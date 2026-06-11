@@ -54,6 +54,44 @@ _FA_HINTS = {
 }
 
 
+def _clean_moodle_html(raw: str) -> str:
+    """Strip Moodle/Bootstrap noise from scraped HTML, keeping layout structure for Gemini."""
+    try:
+        from bs4 import BeautifulSoup, Comment
+    except ImportError:
+        return raw  # beautifulsoup4 not installed — fall back to raw
+
+    soup = BeautifulSoup(raw, "html.parser")
+
+    # Remove non-visual tags entirely
+    for tag in soup.find_all(["script", "style", "svg", "noscript", "meta", "link"]):
+        tag.decompose()
+
+    # Remove HTML comments
+    for comment in soup.find_all(string=lambda t: isinstance(t, Comment)):
+        comment.extract()
+
+    # Strip noisy attributes; keep class (layout hint), style (inline design), href, src
+    _KEEP_ATTRS = {"class", "style", "href", "src", "alt", "role", "aria-label"}
+    for tag in soup.find_all(True):
+        attrs_to_remove = [a for a in list(tag.attrs) if a not in _KEEP_ATTRS]
+        for a in attrs_to_remove:
+            del tag.attrs[a]
+        # Trim very long class lists to first 4 tokens (Moodle adds many utility classes)
+        if tag.get("class"):
+            tag.attrs["class"] = tag.attrs["class"][:4]
+        # Drop blank style attributes
+        if tag.get("style", "").strip() == "":
+            tag.attrs.pop("style", None)
+
+    # Collapse long text nodes (Moodle sometimes embeds base64 or huge paragraphs)
+    for text_node in soup.find_all(string=True):
+        if len(text_node) > 500:
+            text_node.replace_with(text_node[:500] + "…")
+
+    return str(soup)
+
+
 async def _find_locator_any_frame(
     page: Page, selector: str, retries: int = 6, delay_ms: int = 700
 ):
@@ -70,59 +108,95 @@ async def _find_locator_any_frame(
     return None, None
 
 
+# The D2L source-code editor uses CodeMirror 6 (not a <textarea>).
+# Content lives in .cm-content[data-language] > .cm-line divs (contenteditable).
+# textContent of each .cm-line gives the raw HTML source for that line.
 _JS_EXTRACT_TEXTAREA = """() => {
-    function deepFind(root, selector) {
-        const el = root.querySelector(selector);
-        if (el) return el;
-        for (const child of root.querySelectorAll('*')) {
-            if (child.shadowRoot) {
-                const found = deepFind(child.shadowRoot, selector);
-                if (found) return found;
+    function walkShadow(root) {
+        const cmContent = root.querySelector('.cm-content[data-language]');
+        if (cmContent) {
+            const lines = Array.from(cmContent.querySelectorAll('.cm-line'));
+            if (lines.length > 0) {
+                return lines.map(l => l.textContent).join('\\n');
+            }
+        }
+        for (const el of root.querySelectorAll('*')) {
+            if (el.shadowRoot) {
+                const r = walkShadow(el.shadowRoot);
+                if (r != null) return r;
             }
         }
         return null;
     }
-    for (const sel of [
-        'd2l-htmleditor-source-editor textarea',
-        '.d2l-htmleditor-source-code textarea',
-        'textarea[class*="source"]',
-    ]) {
-        const el = deepFind(document, sel);
-        if (el) return el.value;
+    return walkShadow(document);
+}"""
+
+# Diagnostic version — returns a status object so Python can log what was found.
+_JS_DIAGNOSE = """() => {
+    const info = { textareas: 0, cmEditors: 0, cmLines: 0, snippet: null };
+    function walk(root) {
+        for (const el of root.querySelectorAll('*')) {
+            if (el.tagName === 'TEXTAREA') info.textareas++;
+            if (el.classList && el.classList.contains('cm-editor')) info.cmEditors++;
+            if (el.classList && el.classList.contains('cm-line')) {
+                info.cmLines++;
+                if (!info.snippet) info.snippet = el.textContent.slice(0, 80);
+            }
+            if (el.shadowRoot) walk(el.shadowRoot);
+        }
     }
-    for (const t of document.querySelectorAll('textarea')) {
-        if (t.value && t.value.includes('<')) return t.value;
-    }
-    return null;
+    walk(document);
+    return info;
 }"""
 
 _JS_SET_TEXTAREA = """(newHtml) => {
-    function deepFind(root, selector) {
-        const el = root.querySelector(selector);
-        if (el) return el;
-        for (const child of root.querySelectorAll('*')) {
-            if (child.shadowRoot) {
-                const found = deepFind(child.shadowRoot, selector);
-                if (found) return found;
+    // Strategy 1: find the d2l-htmleditor-source-editor element and use its CM6 view
+    function walkShadow(root) {
+        for (const el of root.querySelectorAll('*')) {
+            if (el.tagName && el.tagName.toLowerCase() === 'd2l-htmleditor-source-editor') {
+                // Try common CM6 view property names on the LitElement instance
+                for (const prop of ['_editor', 'editor', '_view', 'view', '_cm', 'cm']) {
+                    const v = el[prop];
+                    if (v && v.state && typeof v.dispatch === 'function') {
+                        v.dispatch(v.state.update({
+                            changes: { from: 0, to: v.state.doc.length, insert: newHtml }
+                        }));
+                        return 'cm6:' + prop;
+                    }
+                }
+            }
+            if (el.shadowRoot) {
+                const r = walkShadow(el.shadowRoot);
+                if (r) return r;
             }
         }
         return null;
     }
-    for (const sel of [
-        'd2l-htmleditor-source-editor textarea',
-        '.d2l-htmleditor-source-code textarea',
-        'textarea[class*="source"]',
-    ]) {
-        const el = deepFind(document, sel);
-        if (el) {
-            const setter = Object.getOwnPropertyDescriptor(
-                window.HTMLTextAreaElement.prototype, 'value'
-            ).set;
-            setter.call(el, newHtml);
-            el.dispatchEvent(new Event('input',  { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            return true;
+    const cm6Result = walkShadow(document);
+    if (cm6Result) return cm6Result;
+
+    // Strategy 2: focus the CM6 contenteditable and replace via execCommand
+    function findCmContent(root) {
+        const el = root.querySelector('.cm-content[data-language]');
+        if (el) return el;
+        for (const child of root.querySelectorAll('*')) {
+            if (child.shadowRoot) {
+                const r = findCmContent(child.shadowRoot);
+                if (r) return r;
+            }
         }
+        return null;
+    }
+    const cmContent = findCmContent(document);
+    if (cmContent) {
+        cmContent.focus();
+        const range = document.createRange();
+        range.selectNodeContents(cmContent);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        const ok = document.execCommand('insertText', false, newHtml);
+        return ok ? 'execCommand' : 'execCommand-failed';
     }
     return false;
 }"""
@@ -166,15 +240,45 @@ class StyleMigrator:
         if result:
             self.log(f"✓ Extracted {len(result):,} chars from Brightspace", "success")
         else:
-            self.log("⚠ Could not locate source editor textarea", "warning")
+            try:
+                info = await page.evaluate(_JS_DIAGNOSE)
+                self.log(
+                    f"✗ Editor not found — textareas={info['textareas']} "
+                    f"cm-editors={info['cmEditors']} cm-lines={info['cmLines']} "
+                    f"snippet={info['snippet']!r}",
+                    "error",
+                )
+            except Exception as diag_err:
+                self.log(f"✗ Could not locate source editor (diag failed: {diag_err})", "error")
         return result
 
     async def _scrape_moodle(self, context: BrowserContext) -> Optional[str]:
         self.log("Opening Moodle page in new tab...", "info")
         tab = await context.new_page()
         try:
-            await tab.goto(self.moodle_url, wait_until="domcontentloaded", timeout=30000)
+            try:
+                await tab.goto(self.moodle_url, wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                pass
             await tab.wait_for_timeout(1500)
+
+            # Detect if Moodle redirected to a login page and wait for manual login
+            if "login" in tab.url.lower():
+                self.log("─" * 52, "dim")
+                self.log("  Moodle login required — log in in the browser.", "info")
+                self.log("  Script continues once you reach the page.", "dim")
+                self.log("─" * 52, "dim")
+                for i in range(120):           # up to 6 minutes
+                    await tab.wait_for_timeout(3000)
+                    if i % 10 == 9:
+                        self.log(f"  Waiting for Moodle login... ({(i+1)*3}s)", "dim")
+                    if "login" not in tab.url.lower():
+                        self.log("✓ Moodle login detected", "success")
+                        await tab.wait_for_timeout(1500)
+                        break
+                else:
+                    self.log("✗ Moodle login timed out after 6 minutes", "error")
+                    return None
 
             html = await tab.evaluate("""() => {
                 for (const sel of [
@@ -187,10 +291,13 @@ class StyleMigrator:
                 return document.body.innerHTML;
             }""")
 
-            if html:
-                self.log(f"✓ Scraped {len(html):,} chars from Moodle", "success")
-            else:
+            if not html:
                 self.log("⚠ Could not find Moodle main content", "warning")
+                return None
+
+            raw_len = len(html)
+            html = _clean_moodle_html(html)
+            self.log(f"✓ Scraped Moodle ({raw_len:,} → {len(html):,} chars after cleanup)", "success")
             return html
         except Exception as e:
             self.log(f"✗ Moodle scrape error: {e}", "error")
@@ -430,23 +537,29 @@ class StyleMigrator:
                     await asyncio.sleep(0.5)
                 return
 
-            # ── Print preview to log ───────────────────────────────────────────
+            # ── Scrape Moodle ─────────────────────────────────────────────────
             self.log("─" * 52, "dim")
-            self.log(f"Extracted HTML ({len(source_html):,} chars):", "info")
-            preview = source_html[:2000]
-            if len(source_html) > 2000:
-                preview += f"\n… (truncated, {len(source_html) - 2000:,} more chars)"
-            self.log(preview, "step")
+            moodle_html = await self._scrape_moodle(context)
+            if not moodle_html:
+                self.log("✗ Could not scrape Moodle page — aborting", "error")
+                if self.on_complete:
+                    self.on_complete()
+                while browser.is_connected():
+                    await asyncio.sleep(0.5)
+                return
+
+            # ── Preview scraped Moodle HTML ───────────────────────────────────
             self.log("─" * 52, "dim")
-            self.log("✓ Step 1 complete — HTML extracted successfully.", "success")
-            self.log("  Browser left open. Close it when you are done.", "dim")
+            self.log(f"Moodle HTML preview ({len(moodle_html):,} chars):", "info")
+            self.log(moodle_html[:3000] + ("\n…(truncated)" if len(moodle_html) > 3000 else ""), "step")
+            self.log("─" * 52, "dim")
+            self.log("✓ Moodle scrape complete — stopping here for review.", "success")
+            self.log("  Browser left open. Close when done.", "dim")
             if self.on_complete:
                 self.on_complete()
-
             while browser.is_connected():
                 await asyncio.sleep(0.5)
-
-            self.log("Browser closed.", "dim")
+            return
 
         except Exception as e:
             self.log(f"✗ Unexpected error: {e}", "error")
