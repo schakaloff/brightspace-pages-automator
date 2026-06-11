@@ -24,25 +24,27 @@ async def wait_for_login(page: Page, context: BrowserContext) -> None:
     print("  Script continues automatically once you reach the home page.")
     print("─" * 50)
     for i in range(180):
+        await page.wait_for_timeout(3000)   # always wait — no path can skip this
         url = page.url
-        if "learn.okanagancollege.ca" in url and "microsoftonline.com" not in url:
-            try:
-                has_login_form = await page.evaluate("() => !!document.querySelector('#userName')")
-            except Exception:
-                continue  # mid-navigation, keep waiting
-            if has_login_form:
-                continue
-            try:
-                await page.goto("https://learn.okanagancollege.ca/d2l/home", timeout=15000)
-                await page.wait_for_load_state("domcontentloaded", timeout=10000)
-                await page.wait_for_timeout(2000)
-            except Exception:
-                pass
-            if "/d2l/home" in page.url:
-                break
-        await page.wait_for_timeout(3000)
-        if i % 10 == 0 and i > 0:
-            print(f"  Still waiting... ({i * 3}s)  |  {page.url[:80]}")
+        if i % 10 == 9:
+            print(f"  Still waiting... ({(i + 1) * 3}s)  |  {url[:80]}")
+        if "microsoftonline.com" in url or "learn.okanagancollege.ca" not in url:
+            continue
+        try:
+            has_login_form = await page.evaluate("() => !!document.querySelector('#userName')")
+        except Exception:
+            continue  # mid-navigation
+        if has_login_form:
+            continue
+        # No login form — try navigating to home to confirm session is live
+        try:
+            await page.goto("https://learn.okanagancollege.ca/d2l/home", timeout=15000)
+            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            await page.wait_for_timeout(2000)
+        except Exception:
+            continue
+        if "/d2l/home" in page.url:
+            break
     else:
         raise RuntimeError("Login timed out after 9 minutes")
     print("✓ Logged in — saving session...")
