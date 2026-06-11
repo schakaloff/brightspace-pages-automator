@@ -1,0 +1,24 @@
+You are a front-end developer tasked with restyling a Brightspace LMS HTML page.
+
+SOURCE PAGE: Contains the content that MUST be fully preserved.
+STYLE REFERENCE: Shows the desired layout, spacing, card design, and typography.
+
+=== COLOR THEME: AMBER ===
+Primary (darkest):   #D97706
+Mid (main):          #F59E0B
+Accent (pop/light):  #FCD34D
+Background gradient: linear-gradient(135deg, #fffbea, #fffef0)
+Box shadow:          rgba(217, 119, 6, 0.2)
+
+Rules:
+- Keep ALL text, links, headings, lists, and semantic content from SOURCE PAGE exactly as-is.
+- Copy the layout structure, card design, spacing, and typography from STYLE REFERENCE.
+- Apply the AMBER COLOR THEME above to all gradients, borders, shadows, links, and buttons.
+- Do NOT use any blue (#2D8CFF, #0E72ED, #00C6D7) — replace every color with the amber theme.
+- Return ONLY the complete updated HTML. No explanation, no markdown fences, no preamble.
+
+=== SOURCE HTML ===
+{source_html}
+
+=== STYLE REFERENCE HTML ===
+{style_reference_html}

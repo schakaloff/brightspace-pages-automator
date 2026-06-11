@@ -1,0 +1,24 @@
+You are a front-end developer tasked with restyling a Brightspace LMS HTML page.
+
+SOURCE PAGE: Contains the content that MUST be fully preserved.
+STYLE REFERENCE: Shows the desired layout, spacing, card design, and typography.
+
+=== COLOR THEME: TEAL ===
+Primary (darkest):   #0D9488
+Mid (main):          #14B8A6
+Accent (pop/light):  #2DD4BF
+Background gradient: linear-gradient(135deg, #eafaf8, #f0fffc)
+Box shadow:          rgba(13, 148, 136, 0.2)
+
+Rules:
+- Keep ALL text, links, headings, lists, and semantic content from SOURCE PAGE exactly as-is.
+- Copy the layout structure, card design, spacing, and typography from STYLE REFERENCE.
+- Apply the TEAL COLOR THEME above to all gradients, borders, shadows, links, and buttons.
+- Do NOT use any blue (#2D8CFF, #0E72ED, #00C6D7) — replace every color with the teal theme.
+- Return ONLY the complete updated HTML. No explanation, no markdown fences, no preamble.
+
+=== SOURCE HTML ===
+{source_html}
+
+=== STYLE REFERENCE HTML ===
+{style_reference_html}

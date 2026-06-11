@@ -232,13 +232,16 @@ class App(ctk.CTk):
         except ImportError:
             gemini_api_key = ""
 
+        if not gemini_api_key or gemini_api_key == "your-gemini-api-key-here":
+            _log_append(self._log_box, "⚠  No Gemini API key — open src/api_config.py and paste your key.", "warning")
+            self._run_btn.configure(state="normal", text="▶  Start")
+            return
+
         style_ref_path = Path(__file__).parent / "templates" / "style_reference.html"
         try:
             style_reference_html = style_ref_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             style_reference_html = ""
-
-        selected_color = PAGE_THEMES[self._selected_theme]["mid"]
 
         self._run_btn.configure(state="disabled", text="Running…")
         self._log_box.configure(state="normal")
@@ -270,7 +273,7 @@ class App(ctk.CTk):
                     on_complete=on_complete,
                     gemini_api_key=gemini_api_key,
                     style_reference_html=style_reference_html,
-                    selected_color=selected_color,
+                    theme_name=self._selected_theme,
                 ))
             except Exception as e:
                 q.put((f"✗  {e}", "error"))

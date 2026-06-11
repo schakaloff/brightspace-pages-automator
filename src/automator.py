@@ -42,145 +42,126 @@ class PageAutomator:
         on_complete: Callable = None,
         gemini_api_key: str = "",
         style_reference_html: str = "",
-        selected_color: str = "#2D8CFF",
+        theme_name: str = "blue",
     ):
         self.url = url
         self.log = log
         self.on_complete = on_complete
         self.gemini_api_key = gemini_api_key
         self.style_reference_html = style_reference_html
-        self.selected_color = selected_color
+        self.theme_name = theme_name
+
+    async def _focus_codemirror(self, page: Page) -> bool:
+        """Find and focus the CodeMirror editor inside the source-code dialog."""
+        focused = await page.evaluate("""() => {
+            function deepFind(root) {
+                const el = root.querySelector('[contenteditable="true"].cm-content');
+                if (el) return el;
+                for (const child of root.querySelectorAll('*')) {
+                    if (child.shadowRoot) {
+                        const found = deepFind(child.shadowRoot);
+                        if (found) return found;
+                    }
+                }
+                return null;
+            }
+            const el = deepFind(document);
+            if (el) { el.focus(); el.click(); return true; }
+            return false;
+        }""")
+        return bool(focused)
 
     async def extract_html_from_editor(self, page: Page) -> Optional[str]:
-        """Read HTML from the open source-code dialog textarea (shadow DOM aware)."""
-        self.log("Extracting HTML from source editor...", "info")
+        """Copy HTML from the CodeMirror source editor using Ctrl+A / Ctrl+C."""
+        self.log("Extracting HTML from source editor (Ctrl+A, Ctrl+C)...", "info")
         await page.wait_for_timeout(1500)
 
-        # Traverse shadow DOM to find the source-code textarea
-        _JS_EXTRACT = """() => {
-            function deepFind(root, selector) {
-                const el = root.querySelector(selector);
-                if (el) return el;
-                for (const child of root.querySelectorAll('*')) {
-                    if (child.shadowRoot) {
-                        const found = deepFind(child.shadowRoot, selector);
-                        if (found) return found;
-                    }
-                }
-                return null;
-            }
-            for (const sel of [
-                'd2l-htmleditor-source-editor textarea',
-                '.d2l-htmleditor-source-code textarea',
-                'textarea[class*="source"]',
-            ]) {
-                const el = deepFind(document, sel);
-                if (el) return el.value;
-            }
-            // Fallback: first textarea containing HTML tags
-            for (const t of document.querySelectorAll('textarea')) {
-                if (t.value && t.value.includes('<')) return t.value;
-            }
-            return null;
-        }"""
+        await page.evaluate("navigator.clipboard.writeText('')")
 
-        result = await page.evaluate(_JS_EXTRACT)
+        ok = await self._focus_codemirror(page)
+        if not ok:
+            self.log("⚠ Could not focus CodeMirror editor", "warning")
+            return None
 
-        # Also check inside iframes
-        if result is None:
-            for frame in page.frames:
-                try:
-                    r = await frame.evaluate(_JS_EXTRACT)
-                    if r and '<' in r:
-                        result = r
-                        break
-                except Exception:
-                    pass
-
-        if result:
-            self.log(f"✓ Extracted {len(result):,} chars of HTML", "success")
-        else:
-            self.log("⚠ Could not locate source editor textarea", "warning")
-        return result
-
-    async def replace_html_in_editor(self, page: Page, html: str) -> bool:
-        """Set textarea content to new HTML, fire change events, and click Update."""
-        self.log("Writing styled HTML back to editor...", "info")
-
-        _JS_SET = """(newHtml) => {
-            function deepFind(root, selector) {
-                const el = root.querySelector(selector);
-                if (el) return el;
-                for (const child of root.querySelectorAll('*')) {
-                    if (child.shadowRoot) {
-                        const found = deepFind(child.shadowRoot, selector);
-                        if (found) return found;
-                    }
-                }
-                return null;
-            }
-            for (const sel of [
-                'd2l-htmleditor-source-editor textarea',
-                '.d2l-htmleditor-source-code textarea',
-                'textarea[class*="source"]',
-            ]) {
-                const el = deepFind(document, sel);
-                if (el) {
-                    const setter = Object.getOwnPropertyDescriptor(
-                        window.HTMLTextAreaElement.prototype, 'value'
-                    ).set;
-                    setter.call(el, newHtml);
-                    el.dispatchEvent(new Event('input',  { bubbles: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                    return true;
-                }
-            }
-            return false;
-        }"""
-
-        set_ok = await page.evaluate(_JS_SET, html)
-        if not set_ok:
-            self.log("⚠ Could not write to source editor textarea", "warning")
-            return False
-
+        await page.wait_for_timeout(400)
+        await page.keyboard.press("Control+a")
+        await page.wait_for_timeout(200)
+        await page.keyboard.press("Control+c")
         await page.wait_for_timeout(500)
 
-        # Click the Update / Save button in the dialog (light DOM first, then shadow DOM)
+        result = await page.evaluate("navigator.clipboard.readText()")
+
+        if result and "<" in result:
+            self.log(f"✓ Extracted {len(result):,} chars of HTML", "success")
+            return result
+
+        self.log("⚠ Clipboard empty after copy — editor may not have focused", "warning")
+        return None
+
+    async def replace_html_in_editor(self, page: Page, html: str) -> bool:
+        """Select all in CodeMirror and paste AI-generated HTML, then save."""
+        self.log("Pasting styled HTML into editor (Ctrl+A, Ctrl+V)...", "info")
+
+        await page.evaluate("(h) => navigator.clipboard.writeText(h)", html)
+        await page.wait_for_timeout(300)
+
+        await self._focus_codemirror(page)
+        await page.wait_for_timeout(400)
+        await page.keyboard.press("Control+a")
+        await page.wait_for_timeout(200)
+        await page.keyboard.press("Control+v")
+        await page.wait_for_timeout(600)
+
+        self.log("✓ HTML pasted into editor", "success")
+        await page.wait_for_timeout(500)
+
+        # Click the Save button inside the source-code dialog to apply & close it
         for selector in [
+            '[data-dialog-action="save"]',
+            'd2l-button:has-text("OK")',
+            'button:has-text("OK")',
             'd2l-button:has-text("Update")',
             'button:has-text("Update")',
-            'd2l-button:has-text("Save")',
-            'button:has-text("Save")',
         ]:
             _, btn = await _find_locator_any_frame(page, selector, retries=3, delay_ms=400)
             if btn:
                 await btn.first.click()
-                self.log("✓ HTML updated in editor", "success")
+                self.log("✓ Source code dialog saved", "success")
+                break
+        else:
+            # Shadow DOM fallback
+            await page.evaluate("""() => {
+                function deepFindText(root, text) {
+                    for (const el of root.querySelectorAll('button, d2l-button')) {
+                        if (el.textContent && el.textContent.trim().toLowerCase().includes(text)) {
+                            el.click(); return true;
+                        }
+                    }
+                    for (const child of root.querySelectorAll('*')) {
+                        if (child.shadowRoot && deepFindText(child.shadowRoot, text)) return true;
+                    }
+                    return false;
+                }
+                return deepFindText(document, 'ok') || deepFindText(document, 'update');
+            }""")
+
+        await page.wait_for_timeout(1200)
+
+        # Click Save and Close on the editor page to commit to Brightspace
+        self.log("Looking for Save and Close...", "info")
+        for selector in [
+            'd2l-button:has-text("Save and Close")',
+            'button:has-text("Save and Close")',
+            'd2l-button:has-text("Save")',
+            'button:has-text("Save")',
+        ]:
+            _, btn = await _find_locator_any_frame(page, selector, retries=6, delay_ms=600)
+            if btn:
+                await btn.first.click()
+                self.log("✓ Page saved and closed", "success")
                 return True
 
-        # Shadow DOM fallback
-        clicked = await page.evaluate("""() => {
-            function deepFindText(root, text) {
-                for (const el of root.querySelectorAll('button, d2l-button')) {
-                    if (el.textContent && el.textContent.trim().toLowerCase().includes(text)) {
-                        el.click();
-                        return true;
-                    }
-                }
-                for (const child of root.querySelectorAll('*')) {
-                    if (child.shadowRoot && deepFindText(child.shadowRoot, text))
-                        return true;
-                }
-                return false;
-            }
-            return deepFindText(document, 'update') || deepFindText(document, 'save');
-        }""")
-
-        if clicked:
-            self.log("✓ HTML updated in editor (shadow DOM fallback)", "success")
-            return True
-
-        self.log("⚠ Update button not found — HTML written but dialog not closed", "warning")
+        self.log("⚠ Save and Close not found — please save manually", "warning")
         return False
 
     async def run(self) -> None:
@@ -273,24 +254,27 @@ class PageAutomator:
             self.log("✓ Source Code dialog opened", "success")
 
             # ── Step 5: AI styling pipeline ───────────────────────────────────
-            if self.gemini_api_key and self.style_reference_html:
+            if not self.gemini_api_key:
+                self.log("⚠ No Gemini API key set — add it to .env", "warning")
+            else:
+                self.log(f"✓ API key loaded ({len(self.gemini_api_key)} chars)", "success")
                 source_html = await self.extract_html_from_editor(page)
                 if source_html:
+                    self.log("─" * 52, "dim")
                     styled_html = apply_style(
                         source_html=source_html,
                         style_reference_html=self.style_reference_html,
-                        primary_color=self.selected_color,
+                        theme_name=self.theme_name,
                         api_key=self.gemini_api_key,
                         log_callback=self.log,
                     )
+                    self.log("─" * 52, "dim")
                     if styled_html:
                         await self.replace_html_in_editor(page, styled_html)
                     else:
-                        self.log("⚠ AI styling failed — original HTML preserved", "warning")
+                        self.log("✗ AI returned nothing — original HTML preserved", "error")
                 else:
-                    self.log("⚠ Could not extract HTML — skipping AI styling", "warning")
-            else:
-                self.log("ℹ No AI config — source code dialog left open", "dim")
+                    self.log("✗ Could not extract HTML — skipping AI styling", "error")
 
             # ── Done ──────────────────────────────────────────────────────────
             self.log("─" * 52, "dim")
@@ -321,7 +305,7 @@ async def run(
     on_complete: Callable = None,
     gemini_api_key: str = "",
     style_reference_html: str = "",
-    selected_color: str = "#2D8CFF",
+    theme_name: str = "blue",
 ) -> None:
     await PageAutomator(
         url=url,
@@ -329,5 +313,5 @@ async def run(
         on_complete=on_complete,
         gemini_api_key=gemini_api_key,
         style_reference_html=style_reference_html,
-        selected_color=selected_color,
+        theme_name=theme_name,
     ).run()
