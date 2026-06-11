@@ -22,6 +22,31 @@ except ImportError:
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
+# ── Page themes (used to generate CSS for Brightspace pages) ─────────────────
+# Each theme mirrors the blue reference design but with different hues.
+# Keys: primary (darkest), mid (main), accent (lightest/pop), bg_from/bg_to
+#       (body gradient), shadow_rgb (for box-shadow), circle (swatch color).
+PAGE_THEMES = {
+    "blue":   dict(primary="#0E72ED", mid="#2D8CFF", accent="#00C6D7",
+                   bg_from="#eaf4ff", bg_to="#dffcff", shadow_rgb="14,114,237",   circle="#2D8CFF"),
+    "teal":   dict(primary="#0D9488", mid="#14B8A6", accent="#2DD4BF",
+                   bg_from="#eafaf8", bg_to="#f0fffc", shadow_rgb="13,148,136",   circle="#14B8A6"),
+    "green":  dict(primary="#16A34A", mid="#22C55E", accent="#4ADE80",
+                   bg_from="#eafff0", bg_to="#f0fff4", shadow_rgb="22,163,74",    circle="#22C55E"),
+    "lime":   dict(primary="#65A30D", mid="#84CC16", accent="#BEF264",
+                   bg_from="#f4ffea", bg_to="#f9ffe0", shadow_rgb="101,163,13",   circle="#84CC16"),
+    "amber":  dict(primary="#D97706", mid="#F59E0B", accent="#FCD34D",
+                   bg_from="#fffbea", bg_to="#fffef0", shadow_rgb="217,119,6",    circle="#F59E0B"),
+    "orange": dict(primary="#EA580C", mid="#F97316", accent="#FDBA74",
+                   bg_from="#fff3ea", bg_to="#fff9ef", shadow_rgb="234,88,12",    circle="#F97316"),
+    "red":    dict(primary="#B91C1C", mid="#EF4444", accent="#FCA5A5",
+                   bg_from="#ffeaea", bg_to="#fff0f0", shadow_rgb="185,28,28",    circle="#EF4444"),
+    "pink":   dict(primary="#BE185D", mid="#EC4899", accent="#F9A8D4",
+                   bg_from="#ffeaf5", bg_to="#fff0f8", shadow_rgb="190,24,93",    circle="#EC4899"),
+    "purple": dict(primary="#6D28D9", mid="#8B5CF6", accent="#C4B5FD",
+                   bg_from="#f3eaff", bg_to="#f8f0ff", shadow_rgb="109,40,217",   circle="#8B5CF6"),
+}
+
 # ── Palette (identical to quiz automator) ────────────────────────────────────
 _BG         = "#0f0f14"
 _CARD       = "#17171f"
@@ -58,11 +83,13 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Brightspace Page Automator")
-        self.geometry("780x560")
-        self.minsize(600, 420)
+        self.geometry("780x600")
+        self.minsize(600, 460)
         self.configure(fg_color=_BG)
 
-        self._log_queue = queue.Queue()
+        self._log_queue     = queue.Queue()
+        self._selected_theme = "blue"
+        self._swatch_frames  = {}   # theme_name -> outer border frame
         self._build_ui()
         self.after(100, self._poll_log)
 
@@ -83,6 +110,44 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=12),
             text_color=_TEXT_DIM,
         ).pack(anchor="w", pady=(4, 0))
+
+        # ── Theme color picker ────────────────────────────────────────────────
+        ctk.CTkLabel(
+            hdr,
+            text="PAGE THEME",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(14, 6))
+
+        swatches_row = ctk.CTkFrame(hdr, fg_color="transparent")
+        swatches_row.pack(anchor="w")
+
+        for name, theme in PAGE_THEMES.items():
+            # Outer frame acts as the selection ring
+            ring = ctk.CTkFrame(
+                swatches_row,
+                width=34, height=34,
+                corner_radius=17,
+                fg_color="transparent",
+                border_width=2,
+                border_color="#ffffff" if name == self._selected_theme else _BG,
+            )
+            ring.pack(side="left", padx=4)
+            ring.pack_propagate(False)
+
+            btn = ctk.CTkButton(
+                ring,
+                width=26, height=26,
+                corner_radius=13,
+                fg_color=theme["circle"],
+                hover_color=theme["mid"],
+                text="",
+                command=lambda n=name: self._select_theme(n),
+            )
+            btn.place(relx=0.5, rely=0.5, anchor="center")
+
+            self._swatch_frames[name] = ring
+
         ctk.CTkFrame(self, height=1, fg_color=_DIVIDER).pack(fill="x", padx=28, pady=(14, 0))
 
         body = ctk.CTkFrame(self, fg_color="transparent")
@@ -145,6 +210,14 @@ class App(ctk.CTk):
         # Wire up color tags on the underlying tk.Text widget
         for tag, color in _TAG_COLORS.items():
             self._log_box._textbox.tag_configure(tag, foreground=color)
+
+    def _select_theme(self, name: str):
+        if name == self._selected_theme:
+            return
+        # Remove ring from old selection
+        self._swatch_frames[self._selected_theme].configure(border_color=_BG)
+        self._selected_theme = name
+        self._swatch_frames[name].configure(border_color="#ffffff")
 
     def _bind_paste_menu(self, entry: ctk.CTkEntry):
         import tkinter as tk
