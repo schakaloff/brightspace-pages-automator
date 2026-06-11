@@ -126,6 +126,7 @@ class App(ctk.CTk):
         self.after(100, self._poll_log)
         self.after(100, self._sm_poll_log)
         self.after(100, self._col_poll_log)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ── Top-level UI ──────────────────────────────────────────────────────────
 
@@ -244,6 +245,9 @@ class App(ctk.CTk):
             placeholder_text="https://learn.okanagancollege.ca/d2l/home/…",
             height=42, font=ctk.CTkFont(size=13),
         )
+        saved_automator_url = self._load_config().get("automator_url", "")
+        if saved_automator_url:
+            self._url_entry.insert(0, saved_automator_url)
         self._url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 10))
         self._bind_paste_menu(self._url_entry)
 
@@ -633,6 +637,8 @@ class App(ctk.CTk):
             placeholder_text="https://learn.okanagancollege.ca/d2l/le/content/…",
             height=38, font=ctk.CTkFont(size=13),
         )
+        if cfg.get("sm_bs_url"):
+            self._sm_bs_entry.insert(0, cfg["sm_bs_url"])
         self._sm_bs_entry.pack(fill="x", pady=(0, 12))
         self._bind_paste_menu(self._sm_bs_entry)
 
@@ -646,6 +652,8 @@ class App(ctk.CTk):
             placeholder_text="https://moodle.example.com/course/view.php?id=…",
             height=38, font=ctk.CTkFont(size=13),
         )
+        if cfg.get("sm_moodle_url"):
+            self._sm_moodle_entry.insert(0, cfg["sm_moodle_url"])
         self._sm_moodle_entry.pack(fill="x", pady=(0, 12))
         self._bind_paste_menu(self._sm_moodle_entry)
 
@@ -798,10 +806,22 @@ class App(ctk.CTk):
 
     def _save_config(self, data: dict) -> None:
         try:
+            existing = self._load_config()
+            existing.update(data)
             _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            _CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            _CONFIG_PATH.write_text(json.dumps(existing, indent=2), encoding="utf-8")
         except Exception:
             pass
+
+    def _on_close(self) -> None:
+        self._save_config({
+            "automator_url":  self._url_entry.get().strip(),
+            "sm_bs_url":      self._sm_bs_entry.get().strip(),
+            "sm_moodle_url":  self._sm_moodle_entry.get().strip(),
+            "primary_color":  self._sm_color_entry.get().strip(),
+            "gemini_api_key": self._sm_key_entry.get().strip(),
+        })
+        self.destroy()
 
 
 if __name__ == "__main__":
