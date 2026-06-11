@@ -316,6 +316,9 @@ class App(ctk.CTk):
                     q.put(("__DONE__", ""))
 
             try:
+                # Always reimport so live edits to automator.py take effect immediately
+                import sys as _sys
+                _sys.modules.pop('automator', None)
                 from automator import run as automator_run
                 asyncio.run(automator_run(
                     url=url,

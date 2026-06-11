@@ -294,12 +294,13 @@ class StyleMigrator:
             self.log("─" * 52, "dim")
             self.log("Looking for Options button...", "info")
             try:
-                await page.wait_for_selector("iframe", timeout=5000)
+                await page.wait_for_selector("iframe", timeout=8000)
             except Exception:
                 pass
+            await page.wait_for_timeout(3000)
 
             _, btn = await _find_locator_any_frame(
-                page, "d2l-button-icon.content-options-btn", retries=7
+                page, "d2l-button-icon.content-options-btn", retries=15, delay_ms=1000
             )
             if btn is None:
                 self.log("✗ Options button not found", "error")
@@ -339,7 +340,45 @@ class StyleMigrator:
             # ── Source Code ───────────────────────────────────────────────────
             self.log("─" * 52, "dim")
             self.log("Looking for Source Code button...", "info")
-            _, src_btn = await _find_locator_any_frame(
+
+            # Expand the toolbar overflow (⋯) first — Source Code is often chomped
+            expand_result = await page.evaluate("""() => {
+                function deepFind(root, fn, depth) {
+                    if (depth > 15) return null;
+                    for (const el of root.querySelectorAll('*')) {
+                        if (fn(el)) return el;
+                        if (el.shadowRoot) {
+                            const found = deepFind(el.shadowRoot, fn, depth + 1);
+                            if (found) return found;
+                        }
+                    }
+                    return null;
+                }
+                // Native <button> whose innerHTML contains the three-dots SVG paths
+                let btn = deepFind(document, el => {
+                    if (!el.tagName || el.tagName.toLowerCase() !== 'button') return false;
+                    const html = el.innerHTML || '';
+                    return html.includes('M2,7') && html.includes('M9,7') && html.includes('M16,7');
+                }, 0);
+                if (btn) { btn.click(); return 'button-three-dots'; }
+
+                // Fallback: d2l-htmleditor-button with no cmd attr
+                const outer = deepFind(document, el =>
+                    el.tagName && el.tagName.toLowerCase() === 'd2l-htmleditor-button'
+                    && !el.getAttribute('cmd'), 0);
+                if (outer) {
+                    const inner = outer.shadowRoot && outer.shadowRoot.querySelector('button');
+                    if (inner) { inner.click(); return 'no-cmd-inner-button'; }
+                    outer.click();
+                    return 'no-cmd-button';
+                }
+                return null;
+            }""")
+            if expand_result:
+                self.log(f"  ✓ Overflow expanded ({expand_result})", "dim")
+                await page.wait_for_timeout(700)
+
+            src_frame, src_btn = await _find_locator_any_frame(
                 page,
                 'd2l-htmleditor-button[cmd="d2l-source-code"]',
                 retries=8,
@@ -353,8 +392,31 @@ class StyleMigrator:
                     await asyncio.sleep(0.5)
                 return
 
-            await src_btn.first.scroll_into_view_if_needed()
-            await src_btn.first.click()
+            # Click the native <button> inside the shadow DOM — bypasses the
+            # TinyMCE iframe that intercepts pointer events on the toolbar.
+            clicked = await src_frame.evaluate("""() => {
+                function deepFind(root, fn, depth) {
+                    if (depth > 15) return null;
+                    for (const el of root.querySelectorAll('*')) {
+                        if (fn(el)) return el;
+                        if (el.shadowRoot) {
+                            const found = deepFind(el.shadowRoot, fn, depth + 1);
+                            if (found) return found;
+                        }
+                    }
+                    return null;
+                }
+                const outer = deepFind(document, el =>
+                    el.getAttribute && el.getAttribute('cmd') === 'd2l-source-code', 0);
+                if (!outer) return false;
+                const inner = outer.shadowRoot && outer.shadowRoot.querySelector('button');
+                if (inner) { inner.click(); return true; }
+                outer.click();
+                return true;
+            }""")
+            if not clicked:
+                self.log("  JS click failed — falling back to dispatch_event", "dim")
+                await src_btn.first.dispatch_event('click')
             self.log("✓ Source Code dialog opened", "success")
 
             # ── Extract HTML ──────────────────────────────────────────────────
