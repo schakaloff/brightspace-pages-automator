@@ -67,6 +67,7 @@ async def launch_browser():
     context = await browser.new_context(
         storage_state=SESSION_FILE if os.path.exists(SESSION_FILE) else None,
         no_viewport=True,
+        permissions=["clipboard-read", "clipboard-write"],
     )
     page = await context.new_page()
     return p, browser, context, page

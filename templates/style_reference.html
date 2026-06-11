@@ -1,150 +1,101 @@
 <!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Style Reference</title>
-  <style>
-    body {
-      font-family: 'Lato', 'Helvetica Neue', Arial, sans-serif;
-      background: linear-gradient(135deg, #eaf4ff 0%, #dffcff 100%);
-      margin: 0;
-      padding: 24px;
-      color: #1a1a2e;
-    }
-
-    .page-header {
-      background: #ffffff;
-      border-radius: 12px;
-      padding: 32px 36px;
-      margin-bottom: 24px;
-      box-shadow: 0 4px 16px rgba(14,114,237,0.08);
-      border-left: 5px solid #2D8CFF;
-    }
-
-    h1 { margin: 0 0 6px; font-size: 1.9rem; color: #0E72ED; font-weight: 700; }
-    h2 { font-size: 1.2rem; color: #2D8CFF; margin: 0 0 14px; font-weight: 600; }
-    h3 { font-size: 1rem; color: #0E72ED; margin: 0 0 10px; font-weight: 700; }
-    p  { margin: 0; font-size: 0.92rem; line-height: 1.65; color: #4a5568; }
-
-    .card-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 20px;
-      margin-bottom: 24px;
-    }
-
-    .card {
-      background: #ffffff;
-      border-radius: 10px;
-      padding: 24px 26px;
-      box-shadow: 0 2px 12px rgba(14,114,237,0.07);
-      transition: transform 0.18s ease, box-shadow 0.18s ease;
-      border-top: 3px solid #2D8CFF;
-    }
-
-    .card:hover {
-      transform: translateY(-3px);
-      box-shadow: 0 8px 24px rgba(14,114,237,0.14);
-    }
-
-    .btn {
-      display: inline-block;
-      margin-top: 16px;
-      padding: 9px 22px;
-      background: #2D8CFF;
-      color: #ffffff;
-      border-radius: 8px;
-      text-decoration: none;
-      font-weight: 700;
-      font-size: 0.88rem;
-      letter-spacing: 0.02em;
-      transition: background 0.18s ease;
-    }
-
-    .btn:hover { background: #0E72ED; }
-
-    .section {
-      background: #ffffff;
-      border-radius: 10px;
-      padding: 28px 32px;
-      margin-bottom: 20px;
-      box-shadow: 0 2px 12px rgba(14,114,237,0.07);
-    }
-
-    .section h2 { border-bottom: 2px solid #eaf4ff; padding-bottom: 10px; }
-
-    ul { padding-left: 20px; margin: 12px 0 0; }
-    ul li { font-size: 0.92rem; line-height: 1.7; color: #4a5568; }
-
-    .badge {
-      display: inline-block;
-      padding: 3px 10px;
-      border-radius: 20px;
-      background: #eaf4ff;
-      color: #0E72ED;
-      font-size: 0.78rem;
-      font-weight: 700;
-      margin-right: 6px;
-    }
-  </style>
-</head>
-<body>
-  <!--
-    STYLE REFERENCE — replace this content with HTML from a well-styled
-    Brightspace page to use as the AI's design template.
-
-    How to get your reference HTML:
-      1. Open the page you want to use as a style guide in Brightspace
-      2. Click Edit Content → Source Code button in the HTML editor
-      3. Copy all the HTML and paste it here, replacing everything in <body>
-
-    The AI will preserve ALL content from the SOURCE page while applying
-    the visual design patterns found in this file.
-  -->
-
-  <div class="page-header">
-    <h1>Course Title</h1>
-    <h2>Module Overview</h2>
-    <p>Welcome to the course. This style reference demonstrates the card-based layout,
-       typography, color scheme, and interactive elements the AI should apply to your pages.</p>
-  </div>
-
-  <div class="card-grid">
-    <div class="card">
-      <span class="badge">Week 1</span>
-      <h3>Introduction &amp; Foundations</h3>
-      <p>Core concepts and terminology. Students will build a foundation for deeper exploration throughout the course.</p>
-      <a href="#" class="btn">View Module</a>
+<html lang="en"><head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reference</title>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary:    #0E72ED;
+            --mid:        #2D8CFF;
+            --accent:     #00C6D7;
+            --charcoal:   #50534C;
+            --white:      #ffffff;
+            --light-stone:#F8F9FA;
+        }
+        * { box-sizing: border-box; }
+        body {
+            background: linear-gradient(135deg, #eaf4ff, #dffcff);
+            color: var(--charcoal);
+            font-family: 'Poppins', sans-serif;
+            margin: 0; padding: 0;
+            display: flex; justify-content: center;
+            min-height: 100vh;
+        }
+        .main-container {
+            max-width: 1000px; width: 95%;
+            margin: 2rem 0;
+            background: var(--white);
+            box-shadow: 0 20px 60px -10px rgba(14,114,237,0.2);
+            border-radius: 24px; overflow: hidden;
+        }
+        .hero {
+            background: linear-gradient(135deg, var(--primary) 0%, var(--mid) 50%, var(--accent) 100%);
+            padding: 2.5rem 2.5rem;
+            color: var(--white); position: relative;
+        }
+        .hero h1 {
+            font-size: 2.2rem; font-weight: 800;
+            margin: 0; line-height: 1.1;
+            letter-spacing: -0.03em; text-transform: uppercase;
+        }
+        .hero-decoration {
+            position: absolute; bottom: -15px; right: 30px;
+            font-size: 6rem; font-weight: 900;
+            opacity: 0.1; user-select: none;
+        }
+        .content-body { padding: 1.5rem 2rem; }
+        .section-header {
+            font-size: 1.2rem; color: var(--primary);
+            margin: 0 0 0.6rem 0; font-weight: 700;
+            border-bottom: 2px solid var(--light-stone);
+            padding-bottom: 0.3rem;
+        }
+        .action-card {
+            background: var(--white);
+            border: 1px solid #eef0f2;
+            padding: 1rem 1.2rem;
+            border-radius: 12px;
+            margin-bottom: 0.8rem;
+            transition: all 0.3s ease;
+        }
+        .action-card:last-child { margin-bottom: 0; }
+        .action-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 24px rgba(14,114,237,0.12);
+        }
+        ul { list-style: none; padding: 0; margin: 0; }
+        li { margin-bottom: 0.4rem; }
+        li:last-child { margin-bottom: 0; }
+        a { color: var(--primary); text-decoration: none; font-weight: 600; font-size: 1rem; }
+        a:hover { color: var(--accent); }
+        .section-block { margin-bottom: 1.2rem; }
+        .section-block:last-child { margin-bottom: 0; }
+        @media (max-width: 768px) {
+            .hero { padding: 2rem 1.5rem; }
+            .hero h1 { font-size: 1.6rem; }
+            .content-body { padding: 1rem 1.2rem; }
+        }
+    </style>
+</head><body>
+<div class="main-container">
+    <header class="hero">
+        <h1>Page Title</h1>
+        <div class="hero-decoration">LABEL</div>
+    </header>
+    <div class="content-body">
+        <div class="section-block">
+            <h2 class="section-header">Section One</h2>
+            <div class="action-card">Content here</div>
+        </div>
+        <div class="section-block">
+            <h2 class="section-header">Section Two</h2>
+            <div class="action-card">Content here</div>
+        </div>
+        <div class="section-block">
+            <h2 class="section-header">Section Three</h2>
+            <div class="action-card">Content here</div>
+        </div>
     </div>
-    <div class="card">
-      <span class="badge">Week 2</span>
-      <h3>Core Concepts</h3>
-      <p>Deep dive into the primary subject matter with practical examples and guided exercises.</p>
-      <a href="#" class="btn">View Module</a>
-    </div>
-    <div class="card">
-      <span class="badge">Week 3</span>
-      <h3>Applied Practice</h3>
-      <p>Hands-on activities, case studies, and assignments to reinforce learning objectives.</p>
-      <a href="#" class="btn">View Module</a>
-    </div>
-  </div>
-
-  <div class="section">
-    <h2>Learning Objectives</h2>
-    <ul>
-      <li>Understand the foundational principles of the subject area</li>
-      <li>Apply concepts through practical, real-world scenarios</li>
-      <li>Critically evaluate and analyze case studies</li>
-      <li>Communicate findings clearly in written and oral formats</li>
-    </ul>
-  </div>
-
-  <div class="section">
-    <h2>Resources &amp; Support</h2>
-    <p>Course materials, readings, and contact information for the instructor are available in the sidebar.
-       Office hours are held weekly — check the calendar for times.</p>
-  </div>
-</body>
-</html>
+</div>
+</body></html>

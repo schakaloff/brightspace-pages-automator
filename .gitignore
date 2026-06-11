@@ -1,4 +1,5 @@
-# API configuration (contains API keys — never commit!)
+# API configuration and secrets — never commit!
+.env
 src/api_config.py
 
 # Virtual environment

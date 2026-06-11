@@ -1,0 +1,7 @@
+Restyle the SOURCE HTML using the STYLE REFERENCE layout. Apply the ORANGE theme: primary #EA580C, mid #F97316, accent #FDBA74, background linear-gradient(135deg,#fff3ea,#fff9ef), shadow rgba(234,88,12,0.2). Keep all text and links. Compact spacing — minimal gaps between sections and cards. No left-side borders on cards. Return only the final HTML, no explanation.
+
+SOURCE:
+{source_html}
+
+REFERENCE:
+{style_reference_html}

@@ -1,0 +1,7 @@
+Restyle the SOURCE HTML using the STYLE REFERENCE layout. Apply the GREEN theme: primary #16A34A, mid #22C55E, accent #4ADE80, background linear-gradient(135deg,#eafff0,#f0fff4), shadow rgba(22,163,74,0.2). Keep all text and links. Compact spacing — minimal gaps between sections and cards. No left-side borders on cards. Return only the final HTML, no explanation.
+
+SOURCE:
+{source_html}
+
+REFERENCE:
+{style_reference_html}
