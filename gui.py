@@ -115,12 +115,16 @@ class App(ctk.CTk):
 
         self._log_queue      = queue.Queue()
         self._sm_log_queue   = queue.Queue()
+        self._col_log_queue  = queue.Queue()
         self._response_queue = queue.Queue()   # GUI → worker: page selection
-        self._selected_theme = "blue"
-        self._swatch_frames  = {}
+        self._selected_theme     = "blue"
+        self._swatch_frames      = {}
+        self._selected_col_theme = "blue"
+        self._col_swatch_frames  = {}
         self._build_ui()
         self.after(100, self._poll_log)
         self.after(100, self._sm_poll_log)
+        self.after(100, self._col_poll_log)
 
     # ── Top-level UI ──────────────────────────────────────────────────────────
 
@@ -137,6 +141,7 @@ class App(ctk.CTk):
         )
         tabview.pack(fill="both", expand=True, padx=10, pady=10)
         self._build_automator_tab(tabview.add("Automator"))
+        self._build_collector_tab(tabview.add("📦 Unit Collector"))
         self._build_style_migrator_tab(tabview.add("🎨 Style Migrator"))
 
     # ── Automator tab ─────────────────────────────────────────────────────────
@@ -355,6 +360,183 @@ class App(ctk.CTk):
         except queue.Empty:
             pass
         self.after(100, self._poll_log)
+
+    # ── Unit Collector tab ────────────────────────────────────────────────────
+
+    def _build_collector_tab(self, parent):
+        hdr = ctk.CTkFrame(parent, fg_color="transparent")
+        hdr.pack(fill="x", padx=18, pady=(18, 0))
+
+        ctk.CTkLabel(
+            hdr, text="Unit Collector",
+            font=ctk.CTkFont(size=22, weight="bold"),
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            hdr,
+            text="Scrapes all topic pages from a unit and combines them into one collapsible HTML file",
+            font=ctk.CTkFont(size=12), text_color=_TEXT_DIM,
+        ).pack(anchor="w", pady=(4, 0))
+
+        ctk.CTkLabel(
+            hdr, text="PAGE THEME",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(14, 6))
+
+        swatches_row = ctk.CTkFrame(hdr, fg_color="transparent")
+        swatches_row.pack(anchor="w")
+
+        for name, theme in PAGE_THEMES.items():
+            ring = ctk.CTkFrame(
+                swatches_row, width=34, height=34, corner_radius=17,
+                fg_color="transparent", border_width=2,
+                border_color="#ffffff" if name == self._selected_col_theme else _BG,
+            )
+            ring.pack(side="left", padx=4)
+            ring.pack_propagate(False)
+            ctk.CTkButton(
+                ring, width=26, height=26, corner_radius=13,
+                fg_color=theme["circle"], hover_color=theme["mid"], text="",
+                command=lambda n=name: self._col_select_theme(n),
+            ).place(relx=0.5, rely=0.5, anchor="center")
+            self._col_swatch_frames[name] = ring
+
+        ctk.CTkFrame(parent, height=1, fg_color=_DIVIDER).pack(fill="x", padx=18, pady=(14, 0))
+
+        body = ctk.CTkFrame(parent, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=14, pady=(14, 14))
+
+        ctk.CTkLabel(
+            body, text="BRIGHTSPACE UNIT URL",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(0, 4))
+        self._col_url_entry = ctk.CTkEntry(
+            body,
+            placeholder_text="https://learn.okanagancollege.ca/d2l/le/content/…/lessons/…",
+            height=38, font=ctk.CTkFont(size=13),
+        )
+        self._col_url_entry.pack(fill="x", pady=(0, 12))
+        self._bind_paste_menu(self._col_url_entry)
+
+        ctk.CTkLabel(
+            body, text="OUTPUT FILE PATH",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(0, 4))
+
+        out_row = ctk.CTkFrame(body, fg_color="transparent")
+        out_row.pack(fill="x", pady=(0, 16))
+        out_row.columnconfigure(0, weight=1)
+
+        self._col_output_entry = ctk.CTkEntry(
+            out_row,
+            placeholder_text=str(Path.home() / "Desktop" / "unit_collection.html"),
+            height=38, font=ctk.CTkFont(size=13),
+        )
+        self._col_output_entry.grid(row=0, column=0, sticky="ew", padx=(0, 10))
+        self._col_output_entry.insert(0, str(Path.home() / "Desktop" / "unit_collection.html"))
+        self._bind_paste_menu(self._col_output_entry)
+
+        ctk.CTkButton(
+            out_row, text="Browse…", width=90, height=38,
+            font=ctk.CTkFont(size=13),
+            command=self._col_browse_output,
+        ).grid(row=0, column=1)
+
+        self._col_run_btn = ctk.CTkButton(
+            body, text="▶  Collect", height=42,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._col_start_run,
+        )
+        self._col_run_btn.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(
+            body, text="LOG",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(0, 4))
+        self._col_log_box = _make_log_box(body)
+
+    def _col_select_theme(self, name: str):
+        if name == self._selected_col_theme:
+            return
+        self._col_swatch_frames[self._selected_col_theme].configure(border_color=_BG)
+        self._selected_col_theme = name
+        self._col_swatch_frames[name].configure(border_color="#ffffff")
+
+    def _col_browse_output(self):
+        import tkinter.filedialog as fd
+        path = fd.asksaveasfilename(
+            defaultextension=".html",
+            filetypes=[("HTML file", "*.html"), ("All files", "*.*")],
+            initialfile="unit_collection.html",
+            title="Save output as…",
+        )
+        if path:
+            self._col_output_entry.delete(0, "end")
+            self._col_output_entry.insert(0, path)
+
+    def _col_start_run(self):
+        unit_url    = self._col_url_entry.get().strip()
+        output_path = self._col_output_entry.get().strip()
+
+        if not unit_url:
+            _log_append(self._col_log_box, "⚠  Paste a Brightspace unit URL first.", "warning")
+            return
+        if not output_path:
+            _log_append(self._col_log_box, "⚠  Choose an output file path.", "warning")
+            return
+
+        theme_colors = PAGE_THEMES[self._selected_col_theme]
+
+        self._col_run_btn.configure(state="disabled", text="Collecting…")
+        self._col_log_box.configure(state="normal")
+        self._col_log_box.delete("1.0", "end")
+        self._col_log_box.configure(state="disabled")
+
+        q = self._col_log_queue
+
+        def worker():
+            class _Capture:
+                def write(self, t):
+                    if t.strip():
+                        q.put((t.rstrip(), "dim"))
+                def flush(self): pass
+
+            old, sys.stdout = sys.stdout, _Capture()
+            done_sent = [False]
+
+            def on_complete():
+                if not done_sent[0]:
+                    done_sent[0] = True
+                    q.put(("__DONE__", ""))
+
+            try:
+                from unit_collector import run as collector_run
+                asyncio.run(collector_run(
+                    unit_url=unit_url,
+                    output_path=output_path,
+                    theme_name=self._selected_col_theme,
+                    theme_colors=theme_colors,
+                    log=lambda msg, tag="info": q.put((msg, tag)),
+                    on_complete=on_complete,
+                ))
+            except Exception as e:
+                q.put((f"✗  {e}", "error"))
+            finally:
+                sys.stdout = old
+                on_complete()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _col_poll_log(self):
+        try:
+            while True:
+                msg, tag = self._col_log_queue.get_nowait()
+                if msg == "__DONE__":
+                    self._col_run_btn.configure(state="normal", text="▶  Collect")
+                else:
+                    _log_append(self._col_log_box, msg, tag)
+        except queue.Empty:
+            pass
+        self.after(100, self._col_poll_log)
 
     # ── Style Migrator tab ────────────────────────────────────────────────────
 
