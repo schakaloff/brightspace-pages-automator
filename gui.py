@@ -115,6 +115,7 @@ class App(ctk.CTk):
 
         self._log_queue      = queue.Queue()
         self._sm_log_queue   = queue.Queue()
+        self._response_queue = queue.Queue()   # GUI → worker: page selection
         self._selected_theme = "blue"
         self._swatch_frames  = {}
         self._build_ui()
@@ -243,12 +244,22 @@ class App(ctk.CTk):
         except FileNotFoundError:
             style_reference_html = ""
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> gemini-prompt
         self._run_btn.configure(state="disabled", text="Running…")
         self._log_box.configure(state="normal")
         self._log_box.delete("1.0", "end")
         self._log_box.configure(state="disabled")
 
-        q = self._log_queue
+        q  = self._log_queue
+        rq = self._response_queue
+
+        def on_pages_found(pages):
+            """Called from worker thread — puts pages in queue, blocks for user response."""
+            q.put(("__PAGES__", pages))
+            return rq.get(timeout=300)  # (start_idx, count)
 
         def worker():
             class _Capture:
@@ -274,6 +285,10 @@ class App(ctk.CTk):
                     gemini_api_key=gemini_api_key,
                     style_reference_html=style_reference_html,
                     theme_name=self._selected_theme,
+<<<<<<< HEAD
+=======
+                    on_pages_found=on_pages_found,
+>>>>>>> gemini-prompt
                 ))
             except Exception as e:
                 q.put((f"✗  {e}", "error"))
@@ -283,12 +298,69 @@ class App(ctk.CTk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _show_pages_dialog(self, pages: list):
+        import tkinter as tk
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Pages Found")
+        dialog.geometry("480x460")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        dialog.configure(fg_color=_BG)
+
+        ctk.CTkLabel(
+            dialog, text=f"Found {len(pages)} pages in this section",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(pady=(20, 8), padx=24, anchor="w")
+
+        # Scrollable page list
+        scroll = ctk.CTkScrollableFrame(dialog, fg_color=_CARD, height=180, corner_radius=10)
+        scroll.pack(fill="x", padx=24, pady=(0, 16))
+        for i, p in enumerate(pages, 1):
+            ctk.CTkLabel(
+                scroll, text=f"{i}.  {p['label']}",
+                font=ctk.CTkFont(size=12), anchor="w", text_color=_TEXT_DIM,
+            ).pack(fill="x", pady=2, padx=8)
+
+        # Start from + how many
+        fields = ctk.CTkFrame(dialog, fg_color="transparent")
+        fields.pack(fill="x", padx=24, pady=(0, 20))
+        fields.columnconfigure(1, weight=1)
+        fields.columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(fields, text="Start from page:", font=ctk.CTkFont(size=12)).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        start_entry = ctk.CTkEntry(fields, width=60, height=36, font=ctk.CTkFont(size=13))
+        start_entry.insert(0, "1")
+        start_entry.grid(row=0, column=1, sticky="w")
+
+        ctk.CTkLabel(fields, text="  How many:", font=ctk.CTkFont(size=12)).grid(row=0, column=2, sticky="w", padx=(16, 8))
+        count_entry = ctk.CTkEntry(fields, width=60, height=36, font=ctk.CTkFont(size=13))
+        count_entry.insert(0, str(len(pages)))
+        count_entry.grid(row=0, column=3, sticky="w")
+
+        def on_run():
+            try:
+                start = max(1, int(start_entry.get())) - 1  # convert to 0-indexed
+                count = max(1, int(count_entry.get()))
+            except ValueError:
+                start, count = 0, len(pages)
+            self._response_queue.put((start, count))
+            dialog.destroy()
+
+        ctk.CTkButton(
+            dialog, text="▶  Run",
+            height=42, font=ctk.CTkFont(size=14, weight="bold"),
+            command=on_run,
+        ).pack(padx=24, fill="x")
+
     def _poll_log(self):
         try:
             while True:
                 msg, tag = self._log_queue.get_nowait()
                 if msg == "__DONE__":
                     self._run_btn.configure(state="normal", text="▶  Start")
+                elif msg == "__PAGES__":
+                    self._show_pages_dialog(tag)
+                    continue
                 else:
                     _log_append(self._log_box, msg, tag)
         except queue.Empty:

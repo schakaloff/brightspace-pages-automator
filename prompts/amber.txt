@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 You are a front-end developer tasked with restyling a Brightspace LMS HTML page.
 
 SOURCE PAGE: Contains the content that MUST be fully preserved.
@@ -21,4 +22,12 @@ Rules:
 {source_html}
 
 === STYLE REFERENCE HTML ===
+=======
+Restyle the SOURCE HTML using the STYLE REFERENCE layout. Apply the AMBER theme: primary #D97706, mid #F59E0B, accent #FCD34D, background linear-gradient(135deg,#fffbea,#fffef0), shadow rgba(217,119,6,0.2). Keep all text and links. Compact spacing — minimal gaps between sections and cards. No left-side borders on cards. Return only the final HTML, no explanation.
+
+SOURCE:
+{source_html}
+
+REFERENCE:
+>>>>>>> gemini-prompt
 {style_reference_html}
