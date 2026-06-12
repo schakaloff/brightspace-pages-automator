@@ -8,6 +8,7 @@ Style Migrator automation:
   5. Replace textarea content → click OK → click Save and Close
 """
 import asyncio
+import threading
 from typing import Callable, Optional
 
 from playwright.async_api import BrowserContext, Page
@@ -211,13 +212,17 @@ class StyleMigrator:
         gemini_api_key: str,
         log: Callable[[str, str], None],
         on_complete: Callable = None,
+        moodle_ready_event: threading.Event = None,
+        on_moodle_waiting: Callable = None,
     ):
-        self.brightspace_url = brightspace_url
-        self.moodle_url      = moodle_url
-        self.primary_color   = primary_color
-        self.gemini_api_key  = gemini_api_key
-        self.log             = log
-        self.on_complete     = on_complete
+        self.brightspace_url    = brightspace_url
+        self.moodle_url         = moodle_url
+        self.primary_color      = primary_color
+        self.gemini_api_key     = gemini_api_key
+        self.log                = log
+        self.on_complete        = on_complete
+        self.moodle_ready_event = moodle_ready_event
+        self.on_moodle_waiting  = on_moodle_waiting
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -266,7 +271,6 @@ class StyleMigrator:
             if "login" in tab.url.lower():
                 self.log("─" * 52, "dim")
                 self.log("  Moodle login required — log in in the browser.", "info")
-                self.log("  Script continues once you reach the page.", "dim")
                 self.log("─" * 52, "dim")
                 for i in range(120):           # up to 6 minutes
                     await tab.wait_for_timeout(3000)
@@ -280,6 +284,18 @@ class StyleMigrator:
                     self.log("✗ Moodle login timed out after 6 minutes", "error")
                     return None
 
+            # Ask the user to navigate to the right Moodle page before scraping
+            self.log("─" * 52, "dim")
+            self.log("  Navigate to the Moodle course page you want to copy.", "info")
+            self.log("  Then click  ✅ Ready — Scrape Now  in the app.", "dim")
+            self.log("─" * 52, "dim")
+            if self.on_moodle_waiting:
+                self.on_moodle_waiting()
+            if self.moodle_ready_event:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, self.moodle_ready_event.wait)
+
+            self.log(f"  Scraping: {tab.url}", "dim")
             html = await tab.evaluate("""() => {
                 for (const sel of [
                     '[role="main"]', '#page-content', '.course-content',
@@ -297,14 +313,18 @@ class StyleMigrator:
 
             raw_len = len(html)
             html = _clean_moodle_html(html)
-            self.log(f"✓ Scraped Moodle ({raw_len:,} → {len(html):,} chars after cleanup)", "success")
+            scraped_url = tab.url
+            await tab.close()
+            self.log(f"✓ Scraped {scraped_url}", "dim")
+            self.log(f"  {raw_len:,} → {len(html):,} chars after cleanup", "success")
             return html
         except Exception as e:
             self.log(f"✗ Moodle scrape error: {e}", "error")
+            try:
+                await tab.close()
+            except Exception:
+                pass
             return None
-        finally:
-            await tab.close()
-            self.log("Moodle tab closed", "dim")
 
     def _call_gemini(self, source_html: str, moodle_html: str) -> Optional[str]:
         from google import genai

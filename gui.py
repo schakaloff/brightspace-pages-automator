@@ -24,7 +24,7 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 # ── Config persistence ────────────────────────────────────────────────────────
-_CONFIG_PATH = Path.home() / ".local" / "share" / "BrightspaceAutomator" / "config.json"
+_CONFIG_PATH = Path(__file__).parent / "user_config.json"
 
 # ── Page themes ───────────────────────────────────────────────────────────────
 PAGE_THEMES = {
@@ -114,14 +114,15 @@ class App(ctk.CTk):
         self.configure(fg_color=_BG)
         self._set_window_icon()
 
-        self._log_queue      = queue.Queue()
-        self._sm_log_queue   = queue.Queue()
-        self._col_log_queue  = queue.Queue()
-        self._response_queue = queue.Queue()   # GUI → worker: page selection
-        self._selected_theme     = "blue"
-        self._swatch_frames      = {}
-        self._selected_col_theme = "blue"
-        self._col_swatch_frames  = {}
+        self._log_queue             = queue.Queue()
+        self._sm_log_queue          = queue.Queue()
+        self._col_log_queue         = queue.Queue()
+        self._response_queue        = queue.Queue()
+        self._selected_theme        = "blue"
+        self._swatch_frames         = {}
+        self._selected_col_theme    = "blue"
+        self._col_swatch_frames     = {}
+        self._sm_moodle_ready_event = None
         self._build_ui()
         self.after(100, self._poll_log)
         self.after(100, self._sm_poll_log)
@@ -705,7 +706,18 @@ class App(ctk.CTk):
             height=42, font=ctk.CTkFont(size=14, weight="bold"),
             command=self._sm_start_run,
         )
-        self._sm_run_btn.pack(fill="x", pady=(0, 12))
+        self._sm_run_btn.pack(fill="x", pady=(0, 8))
+
+        # Container always in the layout; the Ready button is packed inside it on demand
+        self._sm_ready_container = ctk.CTkFrame(body, fg_color="transparent")
+        self._sm_ready_container.pack(fill="x")
+        self._sm_ready_btn = ctk.CTkButton(
+            self._sm_ready_container, text="✅  Ready — Scrape Now",
+            height=38, font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#16A34A", hover_color="#15803D",
+            command=self._sm_moodle_ready,
+        )
+        # not packed yet — shown via __MOODLE_WAITING__ queue signal
 
         # Log
         ctk.CTkLabel(
@@ -729,6 +741,11 @@ class App(ctk.CTk):
 
         self._save_config({"gemini_api_key": api_key, "primary_color": color})
 
+        import threading as _threading
+        ready_event = _threading.Event()
+        self._sm_moodle_ready_event = ready_event
+        self._sm_ready_btn.pack_forget()
+
         self._sm_run_btn.configure(state="disabled", text="Running…")
         self._sm_log_box.configure(state="normal")
         self._sm_log_box.delete("1.0", "end")
@@ -751,6 +768,9 @@ class App(ctk.CTk):
                     done_sent[0] = True
                     q.put(("__DONE__", ""))
 
+            def on_moodle_waiting():
+                q.put(("__MOODLE_WAITING__", ""))
+
             try:
                 from style_migrator import StyleMigrator
                 asyncio.run(StyleMigrator(
@@ -760,6 +780,8 @@ class App(ctk.CTk):
                     gemini_api_key=api_key,
                     log=lambda msg, tag="info": q.put((msg, tag)),
                     on_complete=on_complete,
+                    moodle_ready_event=ready_event,
+                    on_moodle_waiting=on_moodle_waiting,
                 ).run())
             except Exception as e:
                 q.put((f"✗  {e}", "error"))
@@ -775,11 +797,19 @@ class App(ctk.CTk):
                 msg, tag = self._sm_log_queue.get_nowait()
                 if msg == "__DONE__":
                     self._sm_run_btn.configure(state="normal", text="▶  Run Migration")
+                    self._sm_ready_btn.pack_forget()
+                elif msg == "__MOODLE_WAITING__":
+                    self._sm_ready_btn.pack(fill="x", pady=(0, 8))
                 else:
                     _log_append(self._sm_log_box, msg, tag)
         except queue.Empty:
             pass
         self.after(100, self._sm_poll_log)
+
+    def _sm_moodle_ready(self):
+        self._sm_ready_btn.pack_forget()
+        if self._sm_moodle_ready_event:
+            self._sm_moodle_ready_event.set()
 
     # ── Shared helpers ────────────────────────────────────────────────────────
 
@@ -810,8 +840,8 @@ class App(ctk.CTk):
             existing.update(data)
             _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             _CONFIG_PATH.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[config] save failed: {e}", flush=True)
 
     def _on_close(self) -> None:
         self._save_config({

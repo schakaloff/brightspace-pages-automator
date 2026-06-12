@@ -42,3 +42,6 @@ Thumbs.db
 
 # Browser/Playwright
 *.chromium/
+
+# User config (saved URLs, API key)
+user_config.json
