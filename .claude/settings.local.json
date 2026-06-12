@@ -5,7 +5,8 @@
       "Bash(/home/apelsinchik/antigravity/brightspace-quiz-automator/.venv/bin/python *)",
       "Bash(python3 -m py_compile src/automator.py)",
       "Bash(python3 -m py_compile src/automator.py gui.py)",
-      "Skill(run)"
+      "Skill(run)",
+      "Bash(pip show *)"
     ]
   }
 }
