@@ -121,85 +121,119 @@ class PageAutomator:
         """Scrape all topic links from the section sidebar."""
         self.log("Scanning section for topic pages...", "info")
 
-        # Wait for iframe and sidebar to render
+        # Wait for smart-curriculum SPA iframe to appear
         try:
             await page.wait_for_selector('iframe', timeout=8000)
         except Exception:
             pass
-        await page.wait_for_timeout(3000)
 
-        base_url = "/".join(self.url.split("/")[:3])  # https://domain.com
-        # Extract the lesson ID from the URL (last path segment)
+        base_url = "/".join(self.url.split("/")[:3])
         lesson_id = self.url.rstrip("/").split("/")[-1]
 
-        _JS = """([baseUrl, lessonId]) => {
+        # Non-page content types to exclude (matched against icon name or type/sub-title attrs)
+        SKIP_TYPES = ['quiz', 'dropbox', 'link', 'video', 'youtube',
+                      'discussion', 'survey', 'assignment', 'checklist', 'lti']
+
+        _JS = """([baseUrl, lessonId, skipTypes]) => {
+            function iconHint(el) {
+                // icon attribute on d2l-icon children
+                for (const ic of el.querySelectorAll('d2l-icon, d2l-icon-custom')) {
+                    const n = ic.getAttribute('icon') || ic.getAttribute('name') || '';
+                    if (n) return n.toLowerCase();
+                }
+                if (el.shadowRoot) {
+                    for (const ic of el.shadowRoot.querySelectorAll('d2l-icon, d2l-icon-custom')) {
+                        const n = ic.getAttribute('icon') || ic.getAttribute('name') || '';
+                        if (n) return n.toLowerCase();
+                    }
+                }
+                // direct type hint attributes
+                return (el.getAttribute('sub-title-text') || '').toLowerCase();
+            }
+
+            function isHtmlPage(el) {
+                const hint = iconHint(el);
+                if (!hint) return true;
+                return !skipTypes.some(t => hint.includes(t));
+            }
+
             function topicsIn(root) {
                 return Array.from(root.querySelectorAll('d2l-list-item-nav'))
                     .filter(el => (el.getAttribute('action-href') || '').includes('/topics/'))
+                    .filter(el => isHtmlPage(el))
                     .map(el => ({
                         label: el.getAttribute('label') || el.getAttribute('drag-handle-text') || 'Untitled',
-                        url: baseUrl + el.getAttribute('action-href')
+                        url: baseUrl + el.getAttribute('action-href'),
+                        hint: iconHint(el),
                     }));
             }
 
-            // Find the lesson container that matches our lesson ID
-            function findLessonEl(root) {
+            // Find the unit/lesson container matching our ID
+            function findUnitEl(root) {
                 for (const el of root.querySelectorAll('d2l-list-item-nav')) {
                     const href = el.getAttribute('action-href') || '';
                     const key  = el.getAttribute('key') || '';
-                    if (key === lessonId || href.endsWith('/lessons/' + lessonId)) {
-                        return el;
-                    }
+                    if (key === lessonId || href.includes('/' + lessonId)) return el;
                 }
-                // Also check shadow roots
                 for (const child of root.querySelectorAll('*')) {
                     if (child.shadowRoot) {
-                        const found = findLessonEl(child.shadowRoot);
+                        const found = findUnitEl(child.shadowRoot);
                         if (found) return found;
                     }
                 }
                 return null;
             }
 
-            const lessonEl = findLessonEl(document);
-            if (lessonEl) {
-                // Topics are slotted children — they live in the light DOM under the lesson element
-                const topics = topicsIn(lessonEl);
+            const unitEl = findUnitEl(document);
+            if (unitEl) {
+                const topics = topicsIn(unitEl);
                 if (topics.length > 0) return topics;
             }
-
-            // Fallback: return all topics (old behaviour) if lesson container not found
             return topicsIn(document);
         }"""
 
-        pages = await page.evaluate(_JS, [base_url, lesson_id])
+        # Poll for topics — smart-curriculum SPA can take 5-15s to populate
+        pages = []
+        for attempt in range(10):
+            await page.wait_for_timeout(2000)
 
-        # Try every iframe if main doc came up empty
-        if not pages:
-            all_frames = [f for f in page.frames if f != page.main_frame]
-            self.log(f"  Checking {len(all_frames)} frame(s)...", "dim")
-            for frame in all_frames:
-                try:
-                    self.log(f"  frame: {frame.url[:80]}", "dim")
-                    fp = await frame.evaluate(_JS, [base_url, lesson_id])
-                    if fp:
-                        self.log(f"  ✓ Topics found in above frame", "dim")
-                        pages = fp
-                        break
-                except Exception:
-                    pass
+            # Try main frame first
+            try:
+                pages = await page.evaluate(_JS, [base_url, lesson_id, SKIP_TYPES])
+            except Exception:
+                pass
+
+            # Then every child frame (smart-curriculum loads in an iframe)
+            if not pages:
+                for frame in page.frames:
+                    if frame == page.main_frame:
+                        continue
+                    try:
+                        pages = await frame.evaluate(_JS, [base_url, lesson_id, SKIP_TYPES])
+                        if pages:
+                            break
+                    except Exception:
+                        pass
+
+            if pages:
+                break
+            self.log(f"  Waiting for SPA ({attempt + 1}/10)...", "dim")
 
         seen = set()
         unique = []
         for p in (pages or []):
             if p["url"] not in seen:
                 seen.add(p["url"])
-                unique.append(p)
+                # log the type hint so user can see what was detected
+                hint = p.get("hint", "")
+                suffix = f"  [{hint}]" if hint else ""
+                self.log(f"  + {p['label']}{suffix}", "dim")
+                unique.append({"label": p["label"], "url": p["url"]})
 
         if unique:
-            self.log(f"✓ Found {len(unique)} topic pages", "success")
+            self.log(f"✓ Found {len(unique)} HTML page(s)", "success")
         else:
-            self.log("⚠ No topics found — make sure the lesson is expanded in the sidebar", "warning")
+            self.log("⚠ No HTML pages found — check: are you logged in? Is the unit expanded in the sidebar?", "warning")
         return unique
 
     async def _process_topic(self, page: Page, url: str, label: str = "") -> bool:
@@ -239,12 +273,73 @@ class PageAutomator:
             pass
         await page.wait_for_timeout(800)
 
-        _, src_btn = await _find_locator_any_frame(page, 'd2l-htmleditor-button[cmd="d2l-source-code"]', retries=8, delay_ms=700)
-        if src_btn is None:
+        # All editor buttons are inside the shadow DOM of d2l-htmleditor.
+        # Playwright locator() won't reach them, so we use JS with deep
+        # shadow traversal. d2l web components also need their *inner*
+        # <button> clicked, not the outer custom element.
+        _JS_DEEP_CLICK = """(selector) => {
+            function deepFind(root, sel) {
+                const el = root.querySelector(sel);
+                if (el) return el;
+                for (const c of root.querySelectorAll('*')) {
+                    if (c.shadowRoot) {
+                        const f = deepFind(c.shadowRoot, sel);
+                        if (f) return f;
+                    }
+                }
+                return null;
+            }
+            const el = deepFind(document, selector);
+            if (!el) return false;
+            // d2l web components render a real <button> inside their own shadow root
+            if (el.shadowRoot) {
+                const inner = el.shadowRoot.querySelector('button');
+                if (inner) { inner.click(); return true; }
+            }
+            el.click();
+            return true;
+        }"""
+
+        async def js_click(selector: str) -> bool:
+            # Rebuild frame list each call — editor frame may load after page nav
+            ctxs = [page, *[f for f in page.frames if f != page.main_frame]]
+            for ctx in ctxs:
+                try:
+                    if await ctx.evaluate(_JS_DEEP_CLICK, selector):
+                        return True
+                except Exception:
+                    pass
+            return False
+
+        # First: try Source Code button directly (visible when toolbar is wide enough)
+        opened = False
+        for _ in range(5):
+            if await js_click('d2l-htmleditor-button[cmd="d2l-source-code"]'):
+                opened = True
+                break
+            await page.wait_for_timeout(700)
+
+        # Toolbar in "chomping" mode hides Source Code — click More Actions first
+        if not opened:
+            self.log("  Source Code chomped — clicking More Actions...", "dim")
+            await js_click('d2l-htmleditor-button-toggle.d2l-htmleditor-toolbar-chomper')
+            await page.wait_for_timeout(700)
+            # Source Code may now appear as a direct button or inside a menu item
+            for sel in (
+                'd2l-htmleditor-button[cmd="d2l-source-code"]',
+                'd2l-htmleditor-menu-item[cmd="d2l-source-code"]',
+            ):
+                for _ in range(4):
+                    if await js_click(sel):
+                        opened = True
+                        break
+                    await page.wait_for_timeout(500)
+                if opened:
+                    break
+
+        if not opened:
             self.log("✗ Source Code button not found — skipping", "error")
             return False
-        await src_btn.first.scroll_into_view_if_needed()
-        await src_btn.first.click()
         self.log("✓ Source Code dialog opened", "success")
 
         source_html = await self.extract_html_from_editor(page)
