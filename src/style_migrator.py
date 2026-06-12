@@ -8,10 +8,13 @@ Style Migrator automation:
   5. Replace textarea content → click OK → click Save and Close
 """
 import asyncio
+import re
 import threading
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from playwright.async_api import BrowserContext, Page
+
+from config import SESSION_FILE
 
 _MIGRATOR_PROMPT = """You are an expert front-end developer. Your task is to restyle a Brightspace LMS HTML page.
 
@@ -203,6 +206,12 @@ _JS_SET_TEXTAREA = """(newHtml) => {
 }"""
 
 
+def _find_moodle_links(html: str) -> List[str]:
+    """Return deduplicated moodle.okanagan.bc.ca URLs found in html."""
+    urls = re.findall(r'https?://moodle\.okanagan\.bc\.ca[^\s"\'<>]*', html)
+    return list(dict.fromkeys(urls))
+
+
 class StyleMigrator:
     def __init__(
         self,
@@ -214,6 +223,7 @@ class StyleMigrator:
         on_complete: Callable = None,
         moodle_ready_event: threading.Event = None,
         on_moodle_waiting: Callable = None,
+        on_links_found: Callable = None,
     ):
         self.brightspace_url    = brightspace_url
         self.moodle_url         = moodle_url
@@ -223,6 +233,7 @@ class StyleMigrator:
         self.on_complete        = on_complete
         self.moodle_ready_event = moodle_ready_event
         self.on_moodle_waiting  = on_moodle_waiting
+        self.on_links_found     = on_links_found
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -257,7 +268,7 @@ class StyleMigrator:
                 self.log(f"✗ Could not locate source editor (diag failed: {diag_err})", "error")
         return result
 
-    async def _scrape_moodle(self, context: BrowserContext) -> Optional[str]:
+    async def _scrape_moodle(self, context: BrowserContext, structured: bool = False):
         self.log("Opening Moodle page in new tab...", "info")
         tab = await context.new_page()
         try:
@@ -272,7 +283,7 @@ class StyleMigrator:
                 self.log("─" * 52, "dim")
                 self.log("  Moodle login required — log in in the browser.", "info")
                 self.log("─" * 52, "dim")
-                for i in range(120):           # up to 6 minutes
+                for i in range(120):
                     await tab.wait_for_timeout(3000)
                     if i % 10 == 9:
                         self.log(f"  Waiting for Moodle login... ({(i+1)*3}s)", "dim")
@@ -284,10 +295,18 @@ class StyleMigrator:
                     self.log("✗ Moodle login timed out after 6 minutes", "error")
                     return None
 
-            # Ask the user to navigate to the right Moodle page before scraping
+            # Save session now that Moodle is open — captures Moodle cookies too
+            try:
+                await context.storage_state(path=SESSION_FILE)
+                self.log("✓ Moodle session saved", "dim")
+            except Exception:
+                pass
+
+            # Ask the user to confirm they're on the right page before scraping
             self.log("─" * 52, "dim")
-            self.log("  Navigate to the Moodle course page you want to copy.", "info")
-            self.log("  Then click  ✅ Ready — Scrape Now  in the app.", "dim")
+            self.log(f"  Moodle loaded at: {tab.url}", "dim")
+            self.log("  Make sure the course page is visible, then click", "info")
+            self.log("  ✅ Ready — Scrape Now  in the app.", "info")
             self.log("─" * 52, "dim")
             if self.on_moodle_waiting:
                 self.on_moodle_waiting()
@@ -295,7 +314,151 @@ class StyleMigrator:
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, self.moodle_ready_event.wait)
 
-            self.log(f"  Scraping: {tab.url}", "dim")
+            # If still on dashboard/wrong page, navigate to the original URL
+            if "course/view.php" not in tab.url:
+                self.log(f"  Not on a course page — navigating to provided URL...", "dim")
+                try:
+                    await tab.goto(self.moodle_url, wait_until="domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
+
+            # Wait for the page to settle
+            try:
+                await tab.wait_for_load_state("domcontentloaded", timeout=8000)
+            except Exception:
+                pass
+            await tab.wait_for_timeout(1000)
+
+            current_url = tab.url
+            self.log(f"  Scraping: {current_url}", "dim")
+
+            if "course/view.php" not in current_url:
+                self.log(f"⚠ Still not on a course page — scrape may return nothing", "warning")
+                self.log(f"  Got: {current_url}", "dim")
+
+            if structured:
+                try:
+                    items = await tab.evaluate("""() => {
+                        const TYPES = {
+                            modtype_resource:     'FILE',
+                            modtype_assign:       'ASSIGN',
+                            modtype_quiz:         'QUIZ',
+                            modtype_url:          'URL',
+                            modtype_page:         'PAGE',
+                            modtype_forum:        'FORUM',
+                            modtype_label:        'LABEL',
+                            modtype_folder:       'FOLDER',
+                            modtype_kalturamedia: 'VIDEO',
+                            modtype_lti:          'VIDEO',
+                        };
+
+                        function labelInfo(activity) {
+                            const body = activity.querySelector(
+                                '.contentafterlink, .description, .no-overflow, .labelcontent, .activitybody'
+                            );
+                            if (!body) return { type: 'LABEL', name: '(empty label)' };
+
+                            // Detect Kaltura via video.js player in DOM or iframe
+                            const vjsEl  = body.querySelector('.video-js, [id*="videojs_"]');
+                            const kframe = body.querySelector('iframe[src*="kaltura"]');
+                            const hasVideo = !!(vjsEl || kframe);
+
+                            let entryId = '';
+                            if (kframe) {
+                                const m = (kframe.src || '').match(/entryid\\/([^\\/]+)/);
+                                if (m) entryId = m[1];
+                            }
+                            if (!entryId && vjsEl) {
+                                // entry ID sometimes in a data attribute or child source
+                                const src = vjsEl.querySelector('source[src*="entryid"], source[src*="kaltura"]');
+                                if (src) {
+                                    const m = (src.getAttribute('src') || '').match(/entryid[=\\/]([^&\\/]+)/i);
+                                    if (m) entryId = m[1];
+                                }
+                                // or in the player's id attribute: id_videojs_<hash>_<n>
+                                const idAttr = vjsEl.id || '';
+                                if (!entryId && idAttr) entryId = idAttr;
+                            }
+
+                            // Get text content stripping video.js control noise
+                            const rawText = body.textContent.trim().replace(/\\s+/g, ' ');
+                            const isOnlyVideoNoise = /^Video Player is loading/.test(rawText);
+
+                            if (isOnlyVideoNoise || (hasVideo && rawText.replace(/Video Player.*/, '').trim().length < 5)) {
+                                return {
+                                    type: 'VIDEO',
+                                    name: entryId ? 'Kaltura video [' + entryId + ']' : '(embedded video)',
+                                };
+                            }
+
+                            // Build a label name from the text, excluding video player noise
+                            const cleanText = rawText.replace(/Video Player is loading.*?(Current Time \\d|$)/g, '').trim();
+
+                            let name = null;
+                            const heading = body.querySelector('h1,h2,h3,h4,h5,h6');
+                            if (heading) { const t = heading.textContent.trim(); if (t.length > 2) name = t; }
+                            if (!name) {
+                                const bold = body.querySelector('strong, b');
+                                if (bold) { const t = bold.textContent.trim(); if (t.length > 2 && t.length < 120) name = t; }
+                            }
+                            if (!name) {
+                                const link = body.querySelector('a');
+                                if (link) { const t = link.textContent.trim(); name = t.length > 2 ? t : link.href || null; }
+                            }
+                            if (!name && cleanText.length > 2) {
+                                name = cleanText.slice(0, 80) + (cleanText.length > 80 ? '…' : '');
+                            }
+                            if (!name) {
+                                if (body.querySelector('img')) name = '(image)';
+                                else name = '(empty label)';
+                            }
+
+                            // Annotate if a video is also present in this label
+                            if (hasVideo) name += entryId ? ' [🎥 ' + entryId + ']' : ' [🎥]';
+
+                            return { type: 'LABEL', name };
+                        }
+
+                        const result = [];
+                        document.querySelectorAll('li.section, li.section.main').forEach(section => {
+                            const heading = section.querySelector('.sectionname, h3, h4');
+                            result.push({
+                                type: 'SECTION',
+                                name: heading ? heading.textContent.trim() : '(unnamed section)',
+                                href: '',
+                            });
+                            section.querySelectorAll('li.activity').forEach(activity => {
+                                const cls = Array.from(activity.classList);
+                                const matched = cls.find(c => TYPES[c]);
+                                if (!matched) return;
+                                let type = TYPES[matched];
+                                const anchor = activity.querySelector('a');
+                                let name, href = anchor ? anchor.href : '';
+
+                                if (matched === 'modtype_label') {
+                                    const info = labelInfo(activity);
+                                    type = info.type;
+                                    name = info.name;
+                                } else {
+                                    const nameEl = activity.querySelector('.instancename, .activityname a, a');
+                                    name = nameEl ? nameEl.textContent.trim().replace(/\\s{2,}.*$/, '').trim() : '(unnamed)';
+                                }
+                                result.push({ type, name, href });
+                            });
+                        });
+                        return result;
+                    }""")
+                except Exception as eval_err:
+                    self.log(f"✗ Could not read page — did it navigate away? ({eval_err})", "error")
+                    try:
+                        await tab.close()
+                    except Exception:
+                        pass
+                    return None
+                await tab.close()
+                return items
+
+            # Full HTML scrape (used for Gemini restyling)
             html = await tab.evaluate("""() => {
                 for (const sel of [
                     '[role="main"]', '#page-content', '.course-content',
@@ -402,9 +565,46 @@ class StyleMigrator:
     async def run(self) -> None:
         from browser import launch_browser, wait_for_login
 
+        moodle_only = not self.brightspace_url
+
         p, browser, context, page = await launch_browser()
         try:
             await wait_for_login(page, context)
+
+            if moodle_only:
+                self.log("─" * 52, "dim")
+                self.log("Moodle-only mode — skipping Brightspace.", "info")
+                items = await self._scrape_moodle(context, structured=True)
+                if items:
+                    _ICONS = {
+                        "SECTION": "──",
+                        "FILE":    "📄",
+                        "ASSIGN":  "📝",
+                        "QUIZ":    "🧪",
+                        "URL":     "🔗",
+                        "PAGE":    "📖",
+                        "FORUM":   "💬",
+                        "LABEL":   "🏷 ",
+                        "FOLDER":  "📁",
+                        "VIDEO":   "🎥",
+                    }
+                    self.log("─" * 52, "dim")
+                    for item in items:
+                        icon = _ICONS.get(item["type"], "  ")
+                        if item["type"] == "SECTION":
+                            self.log("", "dim")
+                            self.log(f"{icon} {item['name']}", "step")
+                        else:
+                            self.log(f"   {icon} {item['type']:<7}  {item['name']}", "info")
+                    self.log("", "dim")
+                    self.log(f"✓ Found {len([i for i in items if i['type'] != 'SECTION'])} items across {len([i for i in items if i['type'] == 'SECTION'])} sections", "success")
+                else:
+                    self.log("✗ No items found — make sure you're on a Moodle course page (view.php)", "error")
+                if self.on_complete:
+                    self.on_complete()
+                while browser.is_connected():
+                    await asyncio.sleep(0.5)
+                return
 
             # ── Navigate ──────────────────────────────────────────────────────
             self.log("─" * 52, "dim")
@@ -568,17 +768,51 @@ class StyleMigrator:
                     await asyncio.sleep(0.5)
                 return
 
-            # ── Preview scraped Moodle HTML ───────────────────────────────────
+            # ── Gemini restyle ────────────────────────────────────────────────
             self.log("─" * 52, "dim")
-            self.log(f"Moodle HTML preview ({len(moodle_html):,} chars):", "info")
-            self.log(moodle_html[:3000] + ("\n…(truncated)" if len(moodle_html) > 3000 else ""), "step")
+            styled_html = await asyncio.to_thread(
+                self._call_gemini, source_html, moodle_html
+            )
+            if not styled_html:
+                self.log("✗ AI returned nothing — aborting", "error")
+                if self.on_complete:
+                    self.on_complete()
+                while browser.is_connected():
+                    await asyncio.sleep(0.5)
+                return
+
+            # ── Link fixer ────────────────────────────────────────────────────
             self.log("─" * 52, "dim")
-            self.log("✓ Moodle scrape complete — stopping here for review.", "success")
-            self.log("  Browser left open. Close when done.", "dim")
+            moodle_links = _find_moodle_links(styled_html)
+            if moodle_links:
+                self.log(
+                    f"⚠ Found {len(moodle_links)} Moodle link(s) — waiting for replacements…",
+                    "warning",
+                )
+                if self.on_links_found:
+                    replacements = await asyncio.to_thread(
+                        self.on_links_found, moodle_links
+                    )
+                    for old_url, new_url in (replacements or {}).items():
+                        if new_url and new_url.strip():
+                            styled_html = styled_html.replace(old_url, new_url.strip())
+                    self.log("✓ Links updated", "success")
+                else:
+                    self.log("⚠ No link handler — Moodle links left as-is", "warning")
+            else:
+                self.log("✓ No broken Moodle links found", "success")
+
+            # ── Save back ─────────────────────────────────────────────────────
+            self.log("─" * 52, "dim")
+            await self._replace_and_save(page, styled_html)
+
+            self.log("─" * 52, "dim")
+            self.log("✅ Migration complete! Close the browser when done.", "success")
             if self.on_complete:
                 self.on_complete()
             while browser.is_connected():
                 await asyncio.sleep(0.5)
+            self.log("Browser closed.", "dim")
             return
 
         except Exception as e:

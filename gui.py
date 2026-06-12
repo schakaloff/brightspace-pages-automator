@@ -97,6 +97,25 @@ def _make_log_box(parent) -> ctk.CTkTextbox:
     return box
 
 
+def _make_log_box_grid(parent, row: int, col: int = 0) -> ctk.CTkTextbox:
+    """Like _make_log_box but places the border frame with grid so expand works."""
+    border = ctk.CTkFrame(parent, fg_color=_LOG_BORDER, corner_radius=8)
+    border.grid(row=row, column=col, sticky="nsew")
+    box = ctk.CTkTextbox(
+        border,
+        state="disabled",
+        font=ctk.CTkFont(family="Consolas", size=12),
+        fg_color=_LOG_BG,
+        corner_radius=6,
+        text_color=_TAG_COLORS["info"],
+        border_width=0,
+    )
+    box.pack(fill="both", expand=True, padx=2, pady=2)
+    for tag, color in _TAG_COLORS.items():
+        box._textbox.tag_configure(tag, foreground=color)
+    return box
+
+
 def _log_append(box: ctk.CTkTextbox, text: str, tag: str = "info") -> None:
     tb = box._textbox
     tb.configure(state="normal")
@@ -108,25 +127,30 @@ def _log_append(box: ctk.CTkTextbox, text: str, tag: str = "info") -> None:
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Page Changer")
-        self.geometry("800x720")
-        self.minsize(640, 580)
+        self.title("Brightspace Page Automator")
+        self.geometry("900x800")
+        self.minsize(700, 620)
         self.configure(fg_color=_BG)
         self._set_window_icon()
 
-        self._log_queue             = queue.Queue()
-        self._sm_log_queue          = queue.Queue()
-        self._col_log_queue         = queue.Queue()
-        self._response_queue        = queue.Queue()
-        self._selected_theme        = "blue"
-        self._swatch_frames         = {}
-        self._selected_col_theme    = "blue"
-        self._col_swatch_frames     = {}
-        self._sm_moodle_ready_event = None
+        self._log_queue              = queue.Queue()
+        self._sm_log_queue           = queue.Queue()
+        self._col_log_queue          = queue.Queue()
+        self._chk_log_queue          = queue.Queue()
+        self._response_queue         = queue.Queue()
+        self._sm_link_response_queue = queue.Queue()
+        self._sm_link_entries        = {}
+        self._selected_theme         = "blue"
+        self._swatch_frames          = {}
+        self._selected_col_theme     = "blue"
+        self._col_swatch_frames      = {}
+        self._sm_moodle_ready_event  = None
+        self._chk_moodle_ready_event = None
         self._build_ui()
         self.after(100, self._poll_log)
         self.after(100, self._sm_poll_log)
         self.after(100, self._col_poll_log)
+        self.after(100, self._chk_poll_log)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ── Top-level UI ──────────────────────────────────────────────────────────
@@ -187,6 +211,7 @@ class App(ctk.CTk):
         self._build_automator_tab(tabview.add("⚡ Page Changer"))
         self._build_collector_tab(tabview.add("📦 Unit Collector"))
         self._build_style_migrator_tab(tabview.add("🎨 Style Migrator"))
+        self._build_checker_tab(tabview.add("✅ Checker"))
 
     # ── Automator tab ─────────────────────────────────────────────────────────
 
@@ -630,12 +655,12 @@ class App(ctk.CTk):
 
         # Brightspace URL
         ctk.CTkLabel(
-            body, text="BRIGHTSPACE TOPIC URL",
+            body, text="BRIGHTSPACE TOPIC URL  (optional — leave blank to test Moodle scraper only)",
             font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
         ).pack(anchor="w", pady=(0, 4))
         self._sm_bs_entry = ctk.CTkEntry(
             body,
-            placeholder_text="https://learn.okanagancollege.ca/d2l/le/content/…",
+            placeholder_text="https://learn.okanagancollege.ca/d2l/le/content/… (optional)",
             height=38, font=ctk.CTkFont(size=13),
         )
         if cfg.get("sm_bs_url"):
@@ -719,12 +744,28 @@ class App(ctk.CTk):
         )
         # not packed yet — shown via __MOODLE_WAITING__ queue signal
 
-        # Log
+        # Log (inline so we can grab the border frame reference for resize)
         ctk.CTkLabel(
             body, text="LOG",
             font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
         ).pack(anchor="w", pady=(0, 4))
-        self._sm_log_box = _make_log_box(body)
+        self._sm_log_border = ctk.CTkFrame(body, fg_color=_LOG_BORDER, corner_radius=8)
+        self._sm_log_border.pack(fill="both", expand=True)
+        self._sm_log_box = ctk.CTkTextbox(
+            self._sm_log_border,
+            state="disabled",
+            font=ctk.CTkFont(family="Consolas", size=12),
+            fg_color=_LOG_BG,
+            corner_radius=6,
+            text_color=_TAG_COLORS["info"],
+            border_width=0,
+        )
+        self._sm_log_box.pack(fill="both", expand=True, padx=2, pady=2)
+        for tag, color in _TAG_COLORS.items():
+            self._sm_log_box._textbox.tag_configure(tag, foreground=color)
+
+        # Link-fixer panel (built now, packed later when links are found)
+        self._sm_link_panel = self._build_link_panel(body)
 
     def _sm_start_run(self):
         bs_url     = self._sm_bs_entry.get().strip()
@@ -732,9 +773,6 @@ class App(ctk.CTk):
         color      = self._sm_color_entry.get().strip() or "#2D8CFF"
         api_key    = self._sm_key_entry.get().strip()
 
-        if not bs_url:
-            _log_append(self._sm_log_box, "⚠  Paste a Brightspace URL first.", "warning")
-            return
         if not moodle_url:
             _log_append(self._sm_log_box, "⚠  Paste a Moodle URL first.", "warning")
             return
@@ -771,6 +809,10 @@ class App(ctk.CTk):
             def on_moodle_waiting():
                 q.put(("__MOODLE_WAITING__", ""))
 
+            def on_links_found(links):
+                q.put(("__LINKS__", links))
+                return self._sm_link_response_queue.get(timeout=300)
+
             try:
                 from style_migrator import StyleMigrator
                 asyncio.run(StyleMigrator(
@@ -782,6 +824,7 @@ class App(ctk.CTk):
                     on_complete=on_complete,
                     moodle_ready_event=ready_event,
                     on_moodle_waiting=on_moodle_waiting,
+                    on_links_found=on_links_found,
                 ).run())
             except Exception as e:
                 q.put((f"✗  {e}", "error"))
@@ -798,18 +841,254 @@ class App(ctk.CTk):
                 if msg == "__DONE__":
                     self._sm_run_btn.configure(state="normal", text="▶  Run Migration")
                     self._sm_ready_btn.pack_forget()
+                    self._hide_link_fixer()
                 elif msg == "__MOODLE_WAITING__":
                     self._sm_ready_btn.pack(fill="x", pady=(0, 8))
+                elif msg == "__LINKS__":
+                    self._show_link_fixer(tag)  # tag holds the links list
                 else:
                     _log_append(self._sm_log_box, msg, tag)
         except queue.Empty:
             pass
         self.after(100, self._sm_poll_log)
 
+    def _build_link_panel(self, parent) -> ctk.CTkFrame:
+        panel = ctk.CTkFrame(parent, fg_color="transparent")
+        # Not packed here — shown on demand via _show_link_fixer
+
+        ctk.CTkFrame(panel, height=1, fg_color=_DIVIDER).pack(fill="x", pady=(6, 0))
+
+        hdr = ctk.CTkFrame(panel, fg_color="transparent")
+        hdr.pack(fill="x", pady=(6, 4))
+        self._sm_links_title = ctk.CTkLabel(
+            hdr, text="BROKEN MOODLE LINKS",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color="#f0a500",
+        )
+        self._sm_links_title.pack(side="left")
+
+        self._sm_links_scroll = ctk.CTkScrollableFrame(
+            panel, height=130, fg_color=_CARD, corner_radius=8,
+        )
+        self._sm_links_scroll.pack(fill="x", pady=(0, 8))
+        self._sm_links_scroll.columnconfigure(0, weight=2)
+        self._sm_links_scroll.columnconfigure(1, weight=3)
+
+        self._sm_links_apply_btn = ctk.CTkButton(
+            panel, text="Apply & Save",
+            height=38, font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#b45309", hover_color="#92400e",
+            command=self._apply_links,
+        )
+        self._sm_links_apply_btn.pack(fill="x")
+
+        return panel
+
+    def _show_link_fixer(self, links: list):
+        # Clear previous rows
+        for w in self._sm_links_scroll.winfo_children():
+            w.destroy()
+        self._sm_link_entries = {}
+
+        self._sm_links_title.configure(
+            text=f"BROKEN MOODLE LINKS  —  {len(links)} found"
+        )
+
+        for i, url in enumerate(links):
+            label_text = url if len(url) <= 58 else url[:55] + "…"
+            ctk.CTkLabel(
+                self._sm_links_scroll,
+                text=label_text,
+                font=ctk.CTkFont(family="Consolas", size=10),
+                text_color=_TEXT_DIM,
+                anchor="w",
+            ).grid(row=i, column=0, sticky="ew", padx=(6, 8), pady=3)
+
+            entry = ctk.CTkEntry(
+                self._sm_links_scroll,
+                placeholder_text="https://learn.okanagancollege.ca/…",
+                height=30, font=ctk.CTkFont(size=11),
+            )
+            entry.grid(row=i, column=1, sticky="ew", padx=(0, 6), pady=3)
+            self._bind_paste_menu(entry)
+            self._sm_link_entries[url] = entry
+
+        # Shrink log, reveal panel
+        self._sm_log_box.configure(height=120)
+        self._sm_link_panel.pack(fill="x", pady=(0, 4))
+
+    def _hide_link_fixer(self):
+        self._sm_link_panel.pack_forget()
+        self._sm_log_box.configure(height=5000)
+
+    def _apply_links(self):
+        mapping = {
+            old: entry.get().strip()
+            for old, entry in self._sm_link_entries.items()
+        }
+        self._sm_link_response_queue.put(mapping)
+        self._hide_link_fixer()
+
     def _sm_moodle_ready(self):
         self._sm_ready_btn.pack_forget()
         if self._sm_moodle_ready_event:
             self._sm_moodle_ready_event.set()
+
+    # ── Checker tab ───────────────────────────────────────────────────────────
+
+    def _build_checker_tab(self, parent):
+        cfg = self._load_config()
+
+        hdr = ctk.CTkFrame(parent, fg_color="transparent")
+        hdr.pack(fill="x", padx=18, pady=(18, 0))
+        ctk.CTkLabel(
+            hdr, text="✅ Content Checker",
+            font=ctk.CTkFont(size=22, weight="bold"),
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            hdr,
+            text="Verify that Moodle content exists in Brightspace  —  leave either URL blank to test just that side",
+            font=ctk.CTkFont(size=12), text_color=_TEXT_DIM,
+        ).pack(anchor="w", pady=(4, 0))
+
+        ctk.CTkFrame(parent, height=1, fg_color=_DIVIDER).pack(fill="x", padx=18, pady=(14, 0))
+
+        body = ctk.CTkFrame(parent, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=14, pady=(14, 14))
+        # Row 7 (log box) gets all extra vertical space
+        body.grid_rowconfigure(7, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+
+        # Brightspace URL
+        ctk.CTkLabel(
+            body, text="BRIGHTSPACE COURSE URL  (optional — blank = Moodle only)",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self._chk_bs_entry = ctk.CTkEntry(
+            body,
+            placeholder_text="https://learn.okanagancollege.ca/d2l/le/content/<id>/home",
+            height=38, font=ctk.CTkFont(size=13),
+        )
+        if cfg.get("chk_bs_url"):
+            self._chk_bs_entry.insert(0, cfg["chk_bs_url"])
+        self._chk_bs_entry.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        self._bind_paste_menu(self._chk_bs_entry)
+
+        # Moodle URL
+        ctk.CTkLabel(
+            body, text="MOODLE COURSE URL  (optional — blank = Brightspace only)",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).grid(row=2, column=0, sticky="w", pady=(0, 4))
+        self._chk_moodle_entry = ctk.CTkEntry(
+            body,
+            placeholder_text="https://mymoodle.okanagan.bc.ca/course/view.php?id=…",
+            height=38, font=ctk.CTkFont(size=13),
+        )
+        if cfg.get("chk_moodle_url"):
+            self._chk_moodle_entry.insert(0, cfg["chk_moodle_url"])
+        self._chk_moodle_entry.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        self._bind_paste_menu(self._chk_moodle_entry)
+
+        # Run button
+        self._chk_run_btn = ctk.CTkButton(
+            body, text="▶  Run Check",
+            height=42, font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._chk_start_run,
+        )
+        self._chk_run_btn.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+
+        # Ready button container
+        self._chk_ready_container = ctk.CTkFrame(body, fg_color="transparent")
+        self._chk_ready_container.grid(row=5, column=0, sticky="ew")
+        self._chk_ready_btn = ctk.CTkButton(
+            self._chk_ready_container, text="✅  Ready — Scrape Now",
+            height=38, font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#16A34A", hover_color="#15803D",
+            command=self._chk_moodle_ready,
+        )
+
+        # Log
+        ctk.CTkLabel(
+            body, text="LOG",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).grid(row=6, column=0, sticky="w", pady=(8, 4))
+        self._chk_log_box = _make_log_box_grid(body, row=7)
+
+    def _chk_start_run(self):
+        bs_url     = self._chk_bs_entry.get().strip()
+        moodle_url = self._chk_moodle_entry.get().strip()
+
+        if not bs_url and not moodle_url:
+            _log_append(self._chk_log_box, "⚠  Paste at least one URL.", "warning")
+            return
+
+        self._save_config({"chk_bs_url": bs_url, "chk_moodle_url": moodle_url})
+
+        import threading as _threading
+        ready_event = _threading.Event()
+        self._chk_moodle_ready_event = ready_event
+        self._chk_ready_btn.pack_forget()
+
+        self._chk_run_btn.configure(state="disabled", text="Running…")
+        self._chk_log_box.configure(state="normal")
+        self._chk_log_box.delete("1.0", "end")
+        self._chk_log_box.configure(state="disabled")
+
+        q = self._chk_log_queue
+
+        def worker():
+            class _Capture:
+                def write(self, t):
+                    if t.strip(): q.put((t.rstrip(), "dim"))
+                def flush(self): pass
+
+            old, sys.stdout = sys.stdout, _Capture()
+            done_sent = [False]
+
+            def on_complete():
+                if not done_sent[0]:
+                    done_sent[0] = True
+                    q.put(("__DONE__", ""))
+
+            def on_moodle_waiting():
+                q.put(("__CHK_MOODLE_WAITING__", ""))
+
+            try:
+                from content_checker import ContentChecker
+                asyncio.run(ContentChecker(
+                    bs_url=bs_url,
+                    moodle_url=moodle_url,
+                    log=lambda msg, tag="info": q.put((msg, tag)),
+                    on_complete=on_complete,
+                    moodle_ready_event=ready_event,
+                    on_moodle_waiting=on_moodle_waiting,
+                ).run())
+            except Exception as e:
+                q.put((f"✗  {e}", "error"))
+            finally:
+                sys.stdout = old
+                on_complete()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _chk_poll_log(self):
+        try:
+            while True:
+                msg, tag = self._chk_log_queue.get_nowait()
+                if msg == "__DONE__":
+                    self._chk_run_btn.configure(state="normal", text="▶  Run Check")
+                    self._chk_ready_btn.pack_forget()
+                elif msg == "__CHK_MOODLE_WAITING__":
+                    self._chk_ready_btn.pack(fill="x", pady=(0, 8))
+                else:
+                    _log_append(self._chk_log_box, msg, tag)
+        except queue.Empty:
+            pass
+        self.after(100, self._chk_poll_log)
+
+    def _chk_moodle_ready(self):
+        self._chk_ready_btn.pack_forget()
+        if self._chk_moodle_ready_event:
+            self._chk_moodle_ready_event.set()
 
     # ── Shared helpers ────────────────────────────────────────────────────────
 
@@ -850,6 +1129,8 @@ class App(ctk.CTk):
             "sm_moodle_url":  self._sm_moodle_entry.get().strip(),
             "primary_color":  self._sm_color_entry.get().strip(),
             "gemini_api_key": self._sm_key_entry.get().strip(),
+            "chk_bs_url":     self._chk_bs_entry.get().strip(),
+            "chk_moodle_url": self._chk_moodle_entry.get().strip(),
         })
         self.destroy()
 
