@@ -36,6 +36,7 @@ class PageAutomator:
         self.style_reference_html = style_reference_html
         self.theme_name = theme_name
         self.on_pages_found = on_pages_found  # fn(pages) -> (start_idx, count)
+        self._clipboard_lock = asyncio.Lock()  # one tab touches clipboard at a time
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -60,20 +61,23 @@ class PageAutomator:
 
     async def extract_html_from_editor(self, page: Page) -> Optional[str]:
         self.log("Extracting HTML (Ctrl+A, Ctrl+C)...", "info")
-        await page.wait_for_timeout(1500)
-        await page.evaluate("navigator.clipboard.writeText('')")
 
-        if not await self._focus_codemirror(page):
-            self.log("⚠ Could not focus CodeMirror editor", "warning")
-            return None
+        result = None
+        for attempt in range(6):
+            await page.wait_for_timeout(1000)
+            async with self._clipboard_lock:
+                await page.evaluate("navigator.clipboard.writeText('')")
+                if not await self._focus_codemirror(page):
+                    continue
+                await page.wait_for_timeout(300)
+                await page.keyboard.press("Control+a")
+                await page.wait_for_timeout(200)
+                await page.keyboard.press("Control+c")
+                await page.wait_for_timeout(400)
+                result = await page.evaluate("navigator.clipboard.readText()")
+            if result and "<" in result:
+                break
 
-        await page.wait_for_timeout(400)
-        await page.keyboard.press("Control+a")
-        await page.wait_for_timeout(200)
-        await page.keyboard.press("Control+c")
-        await page.wait_for_timeout(500)
-
-        result = await page.evaluate("navigator.clipboard.readText()")
         if result and "<" in result:
             self.log(f"✓ Extracted {len(result):,} chars", "success")
             return result
@@ -83,15 +87,18 @@ class PageAutomator:
 
     async def replace_html_in_editor(self, page: Page, html: str) -> bool:
         self.log("Pasting styled HTML (Ctrl+A, Ctrl+V)...", "info")
-        await page.evaluate("(h) => navigator.clipboard.writeText(h)", html)
-        await page.wait_for_timeout(300)
 
-        await self._focus_codemirror(page)
-        await page.wait_for_timeout(400)
-        await page.keyboard.press("Control+a")
-        await page.wait_for_timeout(200)
-        await page.keyboard.press("Control+v")
-        await page.wait_for_timeout(600)
+        async with self._clipboard_lock:
+            await page.evaluate("(h) => navigator.clipboard.writeText(h)", html)
+            await page.wait_for_timeout(300)
+
+            await self._focus_codemirror(page)
+            await page.wait_for_timeout(400)
+            await page.keyboard.press("Control+a")
+            await page.wait_for_timeout(200)
+            await page.keyboard.press("Control+v")
+            await page.wait_for_timeout(600)
+
         self.log("✓ HTML pasted", "success")
         await page.wait_for_timeout(500)
 
@@ -249,11 +256,11 @@ class PageAutomator:
             pass
 
         try:
-            await page.wait_for_selector('iframe', timeout=5000)
+            await page.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
             pass
 
-        _, btn = await _find_locator_any_frame(page, 'd2l-button-icon.content-options-btn', retries=7)
+        _, btn = await _find_locator_any_frame(page, 'd2l-button-icon.content-options-btn', retries=15)
         if btn is None:
             self.log("✗ Options button not found — skipping", "error")
             return False
@@ -348,7 +355,8 @@ class PageAutomator:
             return False
 
         from ai_styler import apply_style
-        styled_html = apply_style(
+        styled_html = await asyncio.to_thread(
+            apply_style,
             source_html=source_html,
             style_reference_html=self.style_reference_html,
             theme_name=self.theme_name,
@@ -406,11 +414,17 @@ class PageAutomator:
                     start_idx, count = await asyncio.to_thread(self.on_pages_found, pages)
 
                 selected = pages[start_idx: start_idx + count]
-                self.log(f"Processing {len(selected)} page(s) starting from #{start_idx + 1}", "info")
+                self.log(f"Processing {len(selected)} page(s) — up to 3 at a time", "info")
 
-                for i, topic in enumerate(selected):
-                    self.log(f"Page {i + 1} of {len(selected)}", "step")
-                    await self._process_topic(page, topic["url"], topic["label"])
+                sem = asyncio.Semaphore(3)
+
+                async def process_one(topic: dict, idx: int) -> None:
+                    async with sem:
+                        tab = await context.new_page()
+                        self.log(f"[{idx + 1}/{len(selected)}] {topic['label']}", "step")
+                        await self._process_topic(tab, topic["url"], topic["label"])
+
+                await asyncio.gather(*[process_one(t, i) for i, t in enumerate(selected)])
 
             # ── Single topic URL ──────────────────────────────────────────────
             else:
