@@ -414,9 +414,9 @@ class PageAutomator:
                     start_idx, count = await asyncio.to_thread(self.on_pages_found, pages)
 
                 selected = pages[start_idx: start_idx + count]
-                self.log(f"Processing {len(selected)} page(s) — up to 3 at a time", "info")
+                self.log(f"Processing {len(selected)} page(s) — up to 5 at a time", "info")
 
-                sem = asyncio.Semaphore(3)
+                sem = asyncio.Semaphore(5)
 
                 async def process_one(topic: dict, idx: int) -> None:
                     async with sem:

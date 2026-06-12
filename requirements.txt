@@ -1,4 +1,6 @@
 playwright
 customtkinter
 CTkMessagebox
-google-genai
+google-generativeai
+beautifulsoup4
+lxml
