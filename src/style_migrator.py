@@ -200,18 +200,20 @@ class StyleMigrator:
             self.log("Moodle tab closed", "dim")
 
     def _call_gemini(self, source_html: str, moodle_html: str) -> Optional[str]:
-        import google.generativeai as genai
+        from google import genai
 
         self.log("🤖 Sending to Gemini AI for restyling...", "info")
         try:
-            genai.configure(api_key=self.gemini_api_key)
-            model = genai.GenerativeModel("gemini-2.0-flash")
+            client = genai.Client(api_key=self.gemini_api_key)
             prompt = _MIGRATOR_PROMPT.format(
                 source_html=source_html,
                 moodle_html=moodle_html,
                 primary_color=self.primary_color,
             )
-            response = model.generate_content(prompt)
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt,
+            )
             result = response.text.strip()
 
             # Strip markdown fences if model added them
