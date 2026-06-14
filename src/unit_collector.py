@@ -119,7 +119,6 @@ class UnitCollector:
             await page.wait_for_timeout(1000)
             async with self._clipboard_lock:
                 await page.evaluate("navigator.clipboard.writeText('')")
-                # Try main page and every frame — source code dialog can live inside a frame
                 focused = False
                 for ctx in [page, *page.frames]:
                     try:
@@ -280,12 +279,12 @@ class UnitCollector:
             _, btn = await _find_locator_any_frame(page, sel, retries=6, delay_ms=600)
             if btn:
                 await btn.first.click()
-                # Wait for the page to navigate away from the editor (confirms save completed)
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=20000)
-                    await page.wait_for_timeout(1000)
+                    await page.wait_for_load_state("networkidle", timeout=30000)
                 except Exception:
                     pass
+                # Extra wait — Brightspace can finish its POST but not yet committed on the server
+                await page.wait_for_timeout(2000)
                 self.log("✓ Saved", "success")
                 return True
         self.log("⚠ Save button not found", "warning")
@@ -562,7 +561,6 @@ class UnitCollector:
         async with self._clipboard_lock:
             await page.evaluate("(h) => navigator.clipboard.writeText(h)", html)
             await page.wait_for_timeout(300)
-            # Try main page and every frame — source code dialog can live inside a frame
             focused = False
             for ctx in [page, *page.frames]:
                 try:
@@ -662,9 +660,13 @@ class UnitCollector:
                 self.log("  ✗ My Computer option not found", "warning")
                 return False
 
+            # Give the ISF dialog time to load the file-input UI after My Computer is selected.
+            # First call is slow (cold frame); subsequent calls are instant from cache.
+            await page.wait_for_timeout(2000)
+
             # Step 3: Find the file-chooser trigger button and open the OS file dialog
             upload_trigger = None
-            for _ in range(20):
+            for _ in range(40):
                 await page.wait_for_timeout(500)
                 for frame in page.frames:
                     if frame == page.main_frame:
@@ -829,19 +831,6 @@ class UnitCollector:
         if not focused:
             self.log("✗ Could not find source code editor", "error")
             return False
-
-        # Log current editor size (helps debug content accumulation)
-        for ctx in [page, *page.frames]:
-            try:
-                cur_len = await ctx.evaluate("""() => {
-                    const el = document.querySelector('[contenteditable="true"].cm-content');
-                    return el ? el.innerText.length : -1;
-                }""")
-                if cur_len >= 0:
-                    self.log(f"  (editor currently {cur_len:,} chars)", "dim")
-                    break
-            except Exception:
-                pass
 
         async with self._clipboard_lock:
             await page.evaluate("(h) => navigator.clipboard.writeText(h)", section_html)
@@ -1011,9 +1000,10 @@ class UnitCollector:
             scrape_tasks = [self._scrape_topic(context, t, semaphore) for t in topics]
             results = await asyncio.gather(*scrape_tasks, return_exceptions=True)
 
-            # ── Phase 2: append to target sequentially in original order ──────
+            # ── Phase 2: build ordered section list + file list ───────────────
             self.log("─" * 52, "dim")
             self.log("Assembling target page...", "info")
+            sections: list = []
             file_items: list = []
             html_count = link_count = file_count = 0
 
@@ -1022,51 +1012,52 @@ class UnitCollector:
                     self.log(f"✗ Topic {i + 1} scrape failed: {result}", "error")
                     continue
                 topic = result["topic"]
-                label = topic["label"]
-                safe = label.replace("<", "&lt;").replace(">", "&gt;")
+                safe = topic["label"].replace("<", "&lt;").replace(">", "&gt;")
 
                 if result["html"]:
-                    section = f"<h2>{safe}</h2>\n{result['html']}\n<hr/>\n"
-                    await self._append_to_target(context, section)
+                    sections.append(f"<h2>{safe}</h2>\n{result['html']}\n<hr/>\n")
                     html_count += 1
                 elif result["link_url"]:
-                    section = (
+                    sections.append(
                         f'<p><strong>{safe}:</strong> '
                         f'<a href="{result["link_url"]}">{result["link_url"]}</a></p>\n'
                     )
-                    await self._append_to_target(context, section)
                     link_count += 1
                 elif result["file"]:
                     file_items.append(result["file"])
                     file_count += 1
 
-            self.log("─" * 52, "dim")
-            self.log(f"✓ Text done: {html_count} pages, {link_count} links", "success")
+            # ── Phase 3: one persistent editor session — append all, save once ─
+            tab = await context.new_page()
+            try:
+                if not await self._navigate_to_edit(tab, self.target_url):
+                    self.log("✗ Could not open target editor", "error")
+                else:
+                    for section in sections:
+                        if not await self._source_code_append(tab, section):
+                            self.log("⚠ Failed to append a section — continuing", "warning")
 
-            # ── Insert files at the end ──
-            if file_items:
-                self.log(f"Inserting {file_count} file(s)...", "info")
-                tab = await context.new_page()
-                try:
-                    if not await self._navigate_to_edit(tab, self.target_url):
-                        self.log("✗ Could not open target editor for file insertion", "error")
-                    else:
-                        await tab.wait_for_timeout(1000)
-                        # Append "Files" heading via source code, then close dialog back to WYSIWYG
+                    # Let the WYSIWYG editor fully render the new content before saving
+                    await tab.wait_for_timeout(3000)
+
+                    if file_items:
+                        self.log(f"Inserting {file_count} file(s)...", "info")
                         if not await self._source_code_append(tab, "<h2>Files</h2>\n<p></p>\n"):
                             self.log("⚠ Could not append Files header", "warning")
-                        # Extra wait for WYSIWYG editor + toolbar to fully re-render after dialog closes
-                        await tab.wait_for_timeout(3000)
-                        # Insert each file via the WYSIWYG Insert Stuff toolbar button
+                        await tab.wait_for_timeout(5000)
                         for f in file_items:
                             await self._editor_cursor_end(tab)
                             await self._insert_file(tab, f)
-                        await self._save_and_close(tab)
-                finally:
-                    try:
-                        await tab.close()
-                    except Exception:
-                        pass
+
+                    await self._save_and_close(tab)
+            finally:
+                try:
+                    await tab.close()
+                except Exception:
+                    pass
+
+            self.log("─" * 52, "dim")
+            self.log(f"✓ Text done: {html_count} pages, {link_count} links", "success")
 
             if self.gemini_api_key:
                 await self._apply_gemini(context)
