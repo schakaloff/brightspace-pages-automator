@@ -233,19 +233,32 @@ class UnitCollector:
         return False
 
     async def _close_any_dialog(self, page: Page):
-        """Dismiss a visibly open Insert Stuff iframe dialog by clicking Cancel/Close.
-        Does NOT press Escape — that can navigate away from the editor."""
-        for sel in ['button:has-text("Cancel")', 'button:has-text("Close")',
-                    'd2l-button:has-text("Cancel")', 'd2l-button:has-text("Close")']:
-            _, btn = await _find_locator_any_frame(page, sel, retries=2, delay_ms=300)
-            if btn:
+        """Dismiss a stuck Insert Stuff dialog iframe — only if one is actually open.
+        Never touches Cancel/Close buttons on the main editor page."""
+        try:
+            # Only act if an Insert Stuff dialog iframe is present
+            isf_count = await page.locator(
+                'iframe[title="Insert Stuff"], iframe.d2l-dialog-frame'
+            ).count()
+            if isf_count == 0:
+                return
+        except Exception:
+            return
+        # Click Cancel/Close only inside the dialog frames, not the main page
+        for frame in page.frames:
+            url = frame.url or ""
+            # Skip the main page frame
+            if frame == page.main_frame:
+                continue
+            for sel in ['button:has-text("Cancel")', 'button:has-text("Close")']:
                 try:
-                    if await btn.first.is_visible():
-                        await btn.first.click(timeout=2000)
+                    loc = frame.locator(sel)
+                    if await loc.count() > 0 and await loc.first.is_visible():
+                        await loc.first.click(timeout=2000)
                         await page.wait_for_timeout(600)
+                        return
                 except Exception:
                     pass
-                break
 
     async def _save_and_close(self, page: Page) -> bool:
         # Wait for any d2l-shim overlay (left by Insert Stuff dialogs) to clear.
@@ -267,9 +280,9 @@ class UnitCollector:
                 # Wait for the page to navigate away from the editor (confirms save completed)
                 try:
                     await page.wait_for_load_state("networkidle", timeout=20000)
+                    await page.wait_for_timeout(1000)
                 except Exception:
                     pass
-                await page.wait_for_timeout(1000)
                 self.log("✓ Saved", "success")
                 return True
         self.log("⚠ Save button not found", "warning")
@@ -579,8 +592,7 @@ class UnitCollector:
                     return
             except Exception:
                 pass
-        await page.keyboard.press("Control+End")
-        await page.keyboard.press("Enter")
+        # Do not press Enter as fallback — it can trigger focused page buttons (Cancel, etc.)
 
     async def _insert_file(self, page: Page, file_item: dict) -> bool:
         self.log(f"  Inserting: {file_item['filename']}", "info")
@@ -622,165 +634,137 @@ class UnitCollector:
                         pass
                 self.log("  ✗ Insert Stuff button not found", "warning")
                 return False
-            await page.wait_for_timeout(1500)
-
-            # Step 2: Click My Computer in the dialog list
-            # The dialog loads inside an iframe — use frame_locator to scope to it
-            isf = page.frame_locator('iframe[title="Insert Stuff"], iframe.d2l-dialog-frame')
-
+            # Step 2: Wait for My Computer option and click it (content-driven, not fixed wait)
+            _JS_CLICK_MY_COMPUTER = """() => {
+                for (const el of document.querySelectorAll('.d2l-datalist-item-content, [title="My Computer"]')) {
+                    if ((el.getAttribute('title') || el.textContent || '').includes('My Computer')) {
+                        el.click(); return true;
+                    }
+                }
+                return false;
+            }"""
             clicked = False
-            for sel in [
-                '.d2l-datalist-item-content[title="My Computer"]',
-                'li.d2l-datalist-item [title="My Computer"]',
-            ]:
-                try:
-                    loc = isf.locator(sel)
-                    if await loc.count() > 0:
-                        await loc.first.click(timeout=3000)
-                        clicked = True
-                        break
-                except Exception:
-                    pass
-
-            if not clicked:
-                # Fallback: JS inside the iframe frame
+            for _ in range(20):
+                await page.wait_for_timeout(500)
                 for frame in page.frames:
                     try:
-                        found = await frame.evaluate("""() => {
-                            for (const el of document.querySelectorAll('.d2l-datalist-item-content')) {
-                                if (el.getAttribute('title') === 'My Computer'
-                                        || el.textContent.trim().includes('My Computer')) {
-                                    el.click();
-                                    return true;
-                                }
-                            }
-                            return false;
-                        }""")
-                        if found:
+                        if await frame.evaluate(_JS_CLICK_MY_COMPUTER):
                             clicked = True
                             break
                     except Exception:
                         pass
-
+                if clicked:
+                    break
             if not clicked:
                 self.log("  ✗ My Computer option not found", "warning")
                 return False
 
-            await page.wait_for_timeout(1500)
-
-            # Step 3: Find the Upload button — must be visible (avoids stale frames from closed dialogs)
-            upload_btn_loc = None
-            for _ in range(10):
+            # Step 3: Find the file-chooser trigger button and open the OS file dialog
+            upload_trigger = None
+            for _ in range(20):
+                await page.wait_for_timeout(500)
                 for frame in page.frames:
+                    if frame == page.main_frame:
+                        continue
                     try:
                         loc = frame.locator('.d2l-fileinput-addbuttons button')
-                        cnt = await loc.count()
-                        for i in range(cnt):
-                            candidate = loc.nth(i)
-                            if await candidate.is_visible():
-                                upload_btn_loc = candidate
-                                break
-                        if upload_btn_loc is not None:
+                        if await loc.count() > 0 and await loc.first.is_visible():
+                            upload_trigger = loc.first
                             break
                     except Exception:
                         pass
-                if upload_btn_loc is not None:
+                if upload_trigger is not None:
                     break
-                await page.wait_for_timeout(500)
 
-            if upload_btn_loc is None:
-                self.log("  ✗ Upload button not found inside Insert Stuff dialog", "warning")
+            if upload_trigger is None:
+                self.log("  ✗ File chooser trigger not found inside Insert Stuff dialog", "warning")
                 return False
 
-            async with page.expect_file_chooser(timeout=10000) as fc_info:
-                await upload_btn_loc.click(timeout=5000)
+            async with page.expect_file_chooser(timeout=15000) as fc_info:
+                await upload_trigger.click(timeout=5000)
 
             # Step 4: Set the file
             fc = await fc_info.value
             await fc.set_files(file_item["path"])
-            await page.wait_for_timeout(2000)
 
-            # Step 5: Click the Upload confirm button.
-            # Try text-based selectors first; fall back to any visible primary button
-            # that isn't "Insert" (which appears in Step 6).
-            uploaded = False
-            for _ in range(10):
+            # Step 5: Wait for Brightspace's XHR upload to finish, then click the footer
+            # "Upload" button (NOT the file-chooser trigger — that one is inside
+            # .d2l-fileinput-addbuttons; the confirm button is in .d2l-dialog-footer).
+            _JS_UPLOAD_DONE = """() => {
+                const progress = document.querySelector(
+                    '.d2l-fileinput-upload-progress-container:not(.d2l-hidden)');
+                if (progress) return false;
+                const files = document.querySelectorAll(
+                    '.d2l-fileinput-filelist li:not(.d2l-fileinput-placeholder)');
+                return files.length > 0;
+            }"""
+            _JS_CLICK_FOOTER_UPLOAD = """() => {
+                const footer = document.querySelector('.d2l-dialog-footer');
+                if (!footer) return false;
+                for (const b of footer.querySelectorAll('button')) {
+                    if (b.textContent.trim() === 'Upload' && b.offsetParent !== null) {
+                        b.click(); return true;
+                    }
+                }
+                return false;
+            }"""
+
+            upload_done = False
+            for _ in range(40):  # up to 20s for XHR upload
+                await page.wait_for_timeout(500)
                 for frame in page.frames:
+                    if frame == page.main_frame:
+                        continue
                     try:
-                        for sel in [
-                            'button[primary]:has-text("Upload")',
-                            'button:has-text("Upload")',
-                            'button[primary]:has-text("Add")',
-                            'button:has-text("Add")',
-                        ]:
-                            loc = frame.locator(sel)
-                            cnt = await loc.count()
-                            for i in range(cnt):
-                                candidate = loc.nth(i)
-                                if await candidate.is_visible():
-                                    await candidate.click(timeout=5000)
-                                    uploaded = True
-                                    break
-                            if uploaded:
-                                break
-                        if uploaded:
+                        if await frame.evaluate(_JS_UPLOAD_DONE):
+                            upload_done = True
                             break
                     except Exception:
                         pass
-                if not uploaded:
-                    # Fallback: first visible primary button that isn't "Insert"
-                    for frame in page.frames:
-                        try:
-                            loc = frame.locator('button[primary]')
-                            cnt = await loc.count()
-                            for i in range(cnt):
-                                candidate = loc.nth(i)
-                                if await candidate.is_visible():
-                                    txt = (await candidate.inner_text()).strip().lower()
-                                    if "insert" not in txt:
-                                        await candidate.click(timeout=5000)
-                                        uploaded = True
-                                        break
-                            if uploaded:
-                                break
-                        except Exception:
-                            pass
-                if uploaded:
+                if upload_done:
                     break
-                await page.wait_for_timeout(500)
+
+            if not upload_done:
+                self.log(f"  ⚠ File upload did not complete for {file_item['filename']}", "warning")
+
+            uploaded = False
+            for frame in page.frames:
+                if frame == page.main_frame:
+                    continue
+                try:
+                    if await frame.evaluate(_JS_CLICK_FOOTER_UPLOAD):
+                        uploaded = True
+                        break
+                except Exception:
+                    pass
 
             if not uploaded:
-                self.log(f"  ⚠ Upload confirm button not found for {file_item['filename']}", "warning")
+                self.log(f"  ⚠ Footer Upload button not clicked for {file_item['filename']}", "warning")
 
-            await page.wait_for_timeout(3000)
-
-            # Step 6: Click the "Insert" button that appears after upload completes
+            # Step 6: Wait for "Insert" button (appears after upload completes) and click it
+            _JS_CLICK_INSERT = """() => {
+                const btns = Array.from(document.querySelectorAll('button'));
+                for (const b of btns) {
+                    if (b.textContent.trim() === 'Insert' && b.offsetParent !== null) {
+                        b.click(); return true;
+                    }
+                }
+                return false;
+            }"""
             inserted = False
-            for _ in range(30):
+            for _ in range(40):
+                await page.wait_for_timeout(500)
                 for frame in page.frames:
+                    if frame == page.main_frame:
+                        continue
                     try:
-                        for sel in [
-                            'button[primary]:has-text("Insert")',
-                            'button:has-text("Insert")',
-                            'd2l-button:has-text("Insert")',
-                        ]:
-                            loc = frame.locator(sel)
-                            cnt = await loc.count()
-                            for i in range(cnt):
-                                candidate = loc.nth(i)
-                                if await candidate.is_visible():
-                                    await candidate.click(timeout=3000)
-                                    inserted = True
-                                    break
-                            if inserted:
-                                break
-                        if inserted:
+                        if await frame.evaluate(_JS_CLICK_INSERT):
+                            inserted = True
                             break
                     except Exception:
                         pass
                 if inserted:
                     break
-                await page.wait_for_timeout(500)
 
             if not inserted:
                 self.log(f"  ⚠ Insert button not found for {file_item['filename']}", "warning")
