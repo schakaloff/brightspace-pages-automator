@@ -53,6 +53,7 @@ class UnitCollector:
         theme_colors: dict,
         gemini_api_key: str = "",
         style_reference_html: str = "",
+        parallel_pages: int = 3,
         log: Optional[Callable] = None,
         on_complete: Optional[Callable] = None,
     ):
@@ -62,9 +63,11 @@ class UnitCollector:
         self.theme_colors = theme_colors
         self.gemini_api_key = gemini_api_key
         self.style_reference_html = style_reference_html
+        self.parallel_pages = max(1, parallel_pages)
         self._log_fn = log
         self._on_complete = on_complete
         self._clipboard_lock = asyncio.Lock()
+        self._link_lock = asyncio.Lock()
         self._dl_dir = Path(tempfile.gettempdir()) / "brightspace_collector"
         self._dl_dir.mkdir(exist_ok=True)
 
@@ -857,6 +860,53 @@ class UnitCollector:
 
         return await self._close_source_dialog(page)
 
+    async def _scrape_topic(self, context, topic: dict, semaphore: asyncio.Semaphore) -> dict:
+        """Scrape one topic and return its content. Runs under semaphore for HTML/file types.
+        Link types use _link_lock instead to avoid the new-tab race condition."""
+        label = topic["label"]
+        t = topic.get("type", "html")
+        result: dict = {"topic": topic, "html": None, "link_url": None, "file": None}
+
+        if t == "link":
+            async with self._link_lock:
+                tab = await context.new_page()
+                try:
+                    result["link_url"] = await self._collect_link(tab, topic["url"], label)
+                finally:
+                    try:
+                        await tab.close()
+                    except Exception:
+                        pass
+        else:
+            async with semaphore:
+                tab = await context.new_page()
+                try:
+                    if t == "file":
+                        fd = await self._download_file(tab, topic["url"], label)
+                    else:
+                        html = await self._collect_html(tab, topic["url"], label)
+                        if html is not None:
+                            result["html"] = html
+                            return result
+                        # HTML collection failed → treat as file
+                        fd = await self._download_file(tab, topic["url"], label)
+
+                    if fd:
+                        if fd.get("filename", "").lower().endswith(".html.zip"):
+                            extracted = self._html_from_zip(fd["path"])
+                            if extracted:
+                                result["html"] = extracted
+                            else:
+                                result["file"] = fd
+                        else:
+                            result["file"] = fd
+                finally:
+                    try:
+                        await tab.close()
+                    except Exception:
+                        pass
+        return result
+
     async def _append_to_target(self, context, section_html: str) -> bool:
         """Open the target page editor, append section_html via source code, save and close."""
         page = await context.new_page()
@@ -951,67 +1001,44 @@ class UnitCollector:
                     await asyncio.sleep(0.5)
                 return
 
-            self.log(f"Processing {len(topics)} topic(s) one at a time...", "info")
+            # ── Phase 1: scrape all topics in parallel ────────────────────────
+            self.log("─" * 52, "dim")
+            self.log(
+                f"Scraping {len(topics)} topic(s) "
+                f"({self.parallel_pages} page(s) in parallel)...", "info"
+            )
+            semaphore = asyncio.Semaphore(self.parallel_pages)
+            scrape_tasks = [self._scrape_topic(context, t, semaphore) for t in topics]
+            results = await asyncio.gather(*scrape_tasks, return_exceptions=True)
 
+            # ── Phase 2: append to target sequentially in original order ──────
+            self.log("─" * 52, "dim")
+            self.log("Assembling target page...", "info")
             file_items: list = []
             html_count = link_count = file_count = 0
 
-            for topic in topics:
-                self.log("─" * 52, "dim")
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    self.log(f"✗ Topic {i + 1} scrape failed: {result}", "error")
+                    continue
+                topic = result["topic"]
                 label = topic["label"]
-                t = topic.get("type", "html")
-                tab = await context.new_page()
-                try:
-                    if t == "link":
-                        link_url = await self._collect_link(tab, topic["url"], label)
-                        if link_url:
-                            safe = label.replace("<", "&lt;").replace(">", "&gt;")
-                            section = f'<p><strong>{safe}:</strong> <a href="{link_url}">{link_url}</a></p>\n'
-                            await self._append_to_target(context, section)
-                            link_count += 1
+                safe = label.replace("<", "&lt;").replace(">", "&gt;")
 
-                    elif t == "file":
-                        fd = await self._download_file(tab, topic["url"], label)
-                        if fd:
-                            if fd.get("filename", "").lower().endswith(".html.zip"):
-                                extracted = self._html_from_zip(fd["path"])
-                                if extracted:
-                                    safe = label.replace("<", "&lt;").replace(">", "&gt;")
-                                    section = f"<h2>{safe}</h2>\n{extracted}\n<hr/>\n"
-                                    await self._append_to_target(context, section)
-                                    html_count += 1
-                                else:
-                                    file_items.append(fd)
-                                    file_count += 1
-                            else:
-                                file_items.append(fd)
-                                file_count += 1
-
-                    else:
-                        html = await self._collect_html(tab, topic["url"], label)
-                        if html is None:
-                            fd = await self._download_file(tab, topic["url"], label)
-                            if fd:
-                                if fd.get("filename", "").lower().endswith(".html.zip"):
-                                    extracted = self._html_from_zip(fd["path"])
-                                    if extracted:
-                                        safe = label.replace("<", "&lt;").replace(">", "&gt;")
-                                        section = f"<h2>{safe}</h2>\n{extracted}\n<hr/>\n"
-                                        await self._append_to_target(context, section)
-                                        html_count += 1
-                                    else:
-                                        file_items.append(fd)
-                                        file_count += 1
-                                else:
-                                    file_items.append(fd)
-                                    file_count += 1
-                        else:
-                            safe = label.replace("<", "&lt;").replace(">", "&gt;")
-                            section = f"<h2>{safe}</h2>\n{html}\n<hr/>\n"
-                            await self._append_to_target(context, section)
-                            html_count += 1
-                finally:
-                    await tab.close()
+                if result["html"]:
+                    section = f"<h2>{safe}</h2>\n{result['html']}\n<hr/>\n"
+                    await self._append_to_target(context, section)
+                    html_count += 1
+                elif result["link_url"]:
+                    section = (
+                        f'<p><strong>{safe}:</strong> '
+                        f'<a href="{result["link_url"]}">{result["link_url"]}</a></p>\n'
+                    )
+                    await self._append_to_target(context, section)
+                    link_count += 1
+                elif result["file"]:
+                    file_items.append(result["file"])
+                    file_count += 1
 
             self.log("─" * 52, "dim")
             self.log(f"✓ Text done: {html_count} pages, {link_count} links", "success")
@@ -1070,6 +1097,7 @@ async def run(
     theme_colors: dict,
     gemini_api_key: str = "",
     style_reference_html: str = "",
+    parallel_pages: int = 3,
     log: Callable = None,
     on_complete: Callable = None,
 ) -> None:
@@ -1080,6 +1108,7 @@ async def run(
         theme_colors=theme_colors,
         gemini_api_key=gemini_api_key,
         style_reference_html=style_reference_html,
+        parallel_pages=parallel_pages,
         log=log,
         on_complete=on_complete,
     ).run()

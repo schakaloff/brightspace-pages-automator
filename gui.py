@@ -442,8 +442,20 @@ class App(ctk.CTk):
             self._col_key_entry.insert(0, GEMINI_API_KEY)
         except ImportError:
             pass
-        self._col_key_entry.pack(fill="x", pady=(0, 16))
+        self._col_key_entry.pack(fill="x", pady=(0, 12))
         self._bind_paste_menu(self._col_key_entry)
+
+        par_row = ctk.CTkFrame(body, fg_color="transparent")
+        par_row.pack(fill="x", pady=(0, 16))
+        ctk.CTkLabel(
+            par_row, text="PARALLEL PAGES  (how many topics to scrape at once)",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(side="left")
+        self._col_parallel_entry = ctk.CTkEntry(
+            par_row, width=52, height=32, font=ctk.CTkFont(size=13),
+        )
+        self._col_parallel_entry.insert(0, "3")
+        self._col_parallel_entry.pack(side="right")
 
         self._col_run_btn = ctk.CTkButton(
             body, text="▶  Collect & Assemble", height=42,
@@ -469,6 +481,10 @@ class App(ctk.CTk):
         unit_url   = self._col_url_entry.get().strip()
         target_url = self._col_target_entry.get().strip()
         api_key    = self._col_key_entry.get().strip()
+        try:
+            parallel_pages = max(1, min(10, int(self._col_parallel_entry.get().strip())))
+        except ValueError:
+            parallel_pages = 3
 
         if not unit_url:
             _log_append(self._col_log_box, "⚠  Paste a Brightspace unit URL first.", "warning")
@@ -516,6 +532,7 @@ class App(ctk.CTk):
                     theme_colors=theme_colors,
                     gemini_api_key=api_key,
                     style_reference_html=style_reference_html,
+                    parallel_pages=parallel_pages,
                     log=lambda msg, tag="info": q.put((msg, tag)),
                     on_complete=on_complete,
                 ))
