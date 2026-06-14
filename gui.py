@@ -108,10 +108,11 @@ def _log_append(box: ctk.CTkTextbox, text: str, tag: str = "info") -> None:
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Brightspace Page Automator")
-        self.geometry("800x680")
-        self.minsize(640, 540)
+        self.title("Page Changer")
+        self.geometry("800x720")
+        self.minsize(640, 580)
         self.configure(fg_color=_BG)
+        self._set_window_icon()
 
         self._log_queue      = queue.Queue()
         self._sm_log_queue   = queue.Queue()
@@ -128,7 +129,48 @@ class App(ctk.CTk):
 
     # ── Top-level UI ──────────────────────────────────────────────────────────
 
+    def _set_window_icon(self):
+        try:
+            from PIL import Image, ImageDraw
+            import io, tkinter as tk
+            size = 64
+            img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            draw.ellipse([0, 0, size - 1, size - 1], fill="#0d9488")
+            # lightning bolt polygon
+            bolt = [(38, 6), (22, 34), (32, 34), (26, 58), (44, 28), (34, 28)]
+            draw.polygon(bolt, fill="#ffffff")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            buf.seek(0)
+            photo = tk.PhotoImage(data=buf.getvalue())
+            self.iconphoto(True, photo)
+            self._icon_photo = photo  # prevent GC
+        except Exception:
+            pass
+
     def _build_ui(self):
+        # ── App header bar ────────────────────────────────────────────────────
+        hbar = ctk.CTkFrame(self, fg_color=_CARD, height=52, corner_radius=0)
+        hbar.pack(fill="x")
+        hbar.pack_propagate(False)
+
+        ctk.CTkLabel(
+            hbar, text="⚡", font=ctk.CTkFont(size=24), text_color=_ACCENT,
+        ).pack(side="left", padx=(14, 4), pady=10)
+
+        ctk.CTkLabel(
+            hbar, text="Page Changer",
+            font=ctk.CTkFont(size=17, weight="bold"),
+        ).pack(side="left", pady=10)
+
+        ctk.CTkLabel(
+            hbar, text="v0.5.0",
+            font=ctk.CTkFont(size=11), text_color=_TEXT_FAINT,
+        ).pack(side="right", padx=18, pady=10)
+
+        ctk.CTkFrame(self, height=1, fg_color=_DIVIDER).pack(fill="x")
+
         tabview = ctk.CTkTabview(
             self,
             fg_color=_CARD,
@@ -140,7 +182,7 @@ class App(ctk.CTk):
             text_color=_TEXT_DIM,
         )
         tabview.pack(fill="both", expand=True, padx=10, pady=10)
-        self._build_automator_tab(tabview.add("Automator"))
+        self._build_automator_tab(tabview.add("⚡ Page Changer"))
         self._build_collector_tab(tabview.add("📦 Unit Collector"))
         self._build_style_migrator_tab(tabview.add("🎨 Style Migrator"))
 
@@ -151,7 +193,7 @@ class App(ctk.CTk):
         hdr.pack(fill="x", padx=18, pady=(18, 0))
 
         ctk.CTkLabel(
-            hdr, text="Brightspace Page Automator",
+            hdr, text="⚡ Page Changer",
             font=ctk.CTkFont(size=22, weight="bold"),
         ).pack(anchor="w")
         ctk.CTkLabel(
