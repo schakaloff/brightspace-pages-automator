@@ -418,31 +418,35 @@ class App(ctk.CTk):
         self._bind_paste_menu(self._col_url_entry)
 
         ctk.CTkLabel(
-            body, text="OUTPUT FILE PATH",
+            body, text="TARGET PAGE URL  (empty Brightspace page you created)",
             font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
         ).pack(anchor="w", pady=(0, 4))
-
-        out_row = ctk.CTkFrame(body, fg_color="transparent")
-        out_row.pack(fill="x", pady=(0, 16))
-        out_row.columnconfigure(0, weight=1)
-
-        self._col_output_entry = ctk.CTkEntry(
-            out_row,
-            placeholder_text=str(Path.home() / "Desktop" / "unit_collection.html"),
+        self._col_target_entry = ctk.CTkEntry(
+            body,
+            placeholder_text="https://learn.okanagancollege.ca/d2l/le/content/…/topics/…/View",
             height=38, font=ctk.CTkFont(size=13),
         )
-        self._col_output_entry.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-        self._col_output_entry.insert(0, str(Path.home() / "Desktop" / "unit_collection.html"))
-        self._bind_paste_menu(self._col_output_entry)
+        self._col_target_entry.pack(fill="x", pady=(0, 12))
+        self._bind_paste_menu(self._col_target_entry)
 
-        ctk.CTkButton(
-            out_row, text="Browse…", width=90, height=38,
-            font=ctk.CTkFont(size=13),
-            command=self._col_browse_output,
-        ).grid(row=0, column=1)
+        ctk.CTkLabel(
+            body, text="GEMINI API KEY  (leave blank to skip styling)",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(0, 4))
+        self._col_key_entry = ctk.CTkEntry(
+            body, placeholder_text="AIza…",
+            height=38, font=ctk.CTkFont(size=13), show="•",
+        )
+        try:
+            from api_config import GEMINI_API_KEY
+            self._col_key_entry.insert(0, GEMINI_API_KEY)
+        except ImportError:
+            pass
+        self._col_key_entry.pack(fill="x", pady=(0, 16))
+        self._bind_paste_menu(self._col_key_entry)
 
         self._col_run_btn = ctk.CTkButton(
-            body, text="▶  Collect", height=42,
+            body, text="▶  Collect & Assemble", height=42,
             font=ctk.CTkFont(size=14, weight="bold"),
             command=self._col_start_run,
         )
@@ -461,32 +465,27 @@ class App(ctk.CTk):
         self._selected_col_theme = name
         self._col_swatch_frames[name].configure(border_color="#ffffff")
 
-    def _col_browse_output(self):
-        import tkinter.filedialog as fd
-        path = fd.asksaveasfilename(
-            defaultextension=".html",
-            filetypes=[("HTML file", "*.html"), ("All files", "*.*")],
-            initialfile="unit_collection.html",
-            title="Save output as…",
-        )
-        if path:
-            self._col_output_entry.delete(0, "end")
-            self._col_output_entry.insert(0, path)
-
     def _col_start_run(self):
-        unit_url    = self._col_url_entry.get().strip()
-        output_path = self._col_output_entry.get().strip()
+        unit_url   = self._col_url_entry.get().strip()
+        target_url = self._col_target_entry.get().strip()
+        api_key    = self._col_key_entry.get().strip()
 
         if not unit_url:
             _log_append(self._col_log_box, "⚠  Paste a Brightspace unit URL first.", "warning")
             return
-        if not output_path:
-            _log_append(self._col_log_box, "⚠  Choose an output file path.", "warning")
+        if not target_url:
+            _log_append(self._col_log_box, "⚠  Paste the target page URL first.", "warning")
             return
 
         theme_colors = PAGE_THEMES[self._selected_col_theme]
 
-        self._col_run_btn.configure(state="disabled", text="Collecting…")
+        style_ref_path = Path(__file__).parent / "templates" / "style_reference.html"
+        try:
+            style_reference_html = style_ref_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            style_reference_html = ""
+
+        self._col_run_btn.configure(state="disabled", text="Running…")
         self._col_log_box.configure(state="normal")
         self._col_log_box.delete("1.0", "end")
         self._col_log_box.configure(state="disabled")
@@ -512,9 +511,11 @@ class App(ctk.CTk):
                 from unit_collector import run as collector_run
                 asyncio.run(collector_run(
                     unit_url=unit_url,
-                    output_path=output_path,
+                    target_url=target_url,
                     theme_name=self._selected_col_theme,
                     theme_colors=theme_colors,
+                    gemini_api_key=api_key,
+                    style_reference_html=style_reference_html,
                     log=lambda msg, tag="info": q.put((msg, tag)),
                     on_complete=on_complete,
                 ))
@@ -531,7 +532,7 @@ class App(ctk.CTk):
             while True:
                 msg, tag = self._col_log_queue.get_nowait()
                 if msg == "__DONE__":
-                    self._col_run_btn.configure(state="normal", text="▶  Collect")
+                    self._col_run_btn.configure(state="normal", text="▶  Collect & Assemble")
                 else:
                     _log_append(self._col_log_box, msg, tag)
         except queue.Empty:
