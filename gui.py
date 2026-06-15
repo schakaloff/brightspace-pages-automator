@@ -108,23 +108,69 @@ def _log_append(box: ctk.CTkTextbox, text: str, tag: str = "info") -> None:
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Brightspace Page Automator")
-        self.geometry("800x680")
-        self.minsize(640, 540)
+        self.title("Page Changer")
+        self.geometry("800x720")
+        self.minsize(640, 580)
         self.configure(fg_color=_BG)
+        self._set_window_icon()
 
         self._log_queue      = queue.Queue()
         self._sm_log_queue   = queue.Queue()
+        self._col_log_queue  = queue.Queue()
         self._response_queue = queue.Queue()   # GUI → worker: page selection
-        self._selected_theme = "blue"
-        self._swatch_frames  = {}
+        self._selected_theme     = "blue"
+        self._swatch_frames      = {}
+        self._selected_col_theme = "blue"
+        self._col_swatch_frames  = {}
         self._build_ui()
         self.after(100, self._poll_log)
         self.after(100, self._sm_poll_log)
+        self.after(100, self._col_poll_log)
 
     # ── Top-level UI ──────────────────────────────────────────────────────────
 
+    def _set_window_icon(self):
+        try:
+            from PIL import Image, ImageDraw
+            import io, tkinter as tk
+            size = 64
+            img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            draw.ellipse([0, 0, size - 1, size - 1], fill="#0d9488")
+            # lightning bolt polygon
+            bolt = [(38, 6), (22, 34), (32, 34), (26, 58), (44, 28), (34, 28)]
+            draw.polygon(bolt, fill="#ffffff")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            buf.seek(0)
+            photo = tk.PhotoImage(data=buf.getvalue())
+            self.iconphoto(True, photo)
+            self._icon_photo = photo  # prevent GC
+        except Exception:
+            pass
+
     def _build_ui(self):
+        # ── App header bar ────────────────────────────────────────────────────
+        hbar = ctk.CTkFrame(self, fg_color=_CARD, height=52, corner_radius=0)
+        hbar.pack(fill="x")
+        hbar.pack_propagate(False)
+
+        ctk.CTkLabel(
+            hbar, text="⚡", font=ctk.CTkFont(size=24), text_color=_ACCENT,
+        ).pack(side="left", padx=(14, 4), pady=10)
+
+        ctk.CTkLabel(
+            hbar, text="Page Changer",
+            font=ctk.CTkFont(size=17, weight="bold"),
+        ).pack(side="left", pady=10)
+
+        ctk.CTkLabel(
+            hbar, text="v0.5.0",
+            font=ctk.CTkFont(size=11), text_color=_TEXT_FAINT,
+        ).pack(side="right", padx=18, pady=10)
+
+        ctk.CTkFrame(self, height=1, fg_color=_DIVIDER).pack(fill="x")
+
         tabview = ctk.CTkTabview(
             self,
             fg_color=_CARD,
@@ -136,7 +182,8 @@ class App(ctk.CTk):
             text_color=_TEXT_DIM,
         )
         tabview.pack(fill="both", expand=True, padx=10, pady=10)
-        self._build_automator_tab(tabview.add("Automator"))
+        self._build_automator_tab(tabview.add("⚡ Page Changer"))
+        self._build_collector_tab(tabview.add("📦 Unit Collector"))
         self._build_style_migrator_tab(tabview.add("🎨 Style Migrator"))
 
     # ── Automator tab ─────────────────────────────────────────────────────────
@@ -146,7 +193,7 @@ class App(ctk.CTk):
         hdr.pack(fill="x", padx=18, pady=(18, 0))
 
         ctk.CTkLabel(
-            hdr, text="Brightspace Page Automator",
+            hdr, text="⚡ Page Changer",
             font=ctk.CTkFont(size=22, weight="bold"),
         ).pack(anchor="w")
         ctk.CTkLabel(
@@ -355,6 +402,201 @@ class App(ctk.CTk):
         except queue.Empty:
             pass
         self.after(100, self._poll_log)
+
+    # ── Unit Collector tab ────────────────────────────────────────────────────
+
+    def _build_collector_tab(self, parent):
+        hdr = ctk.CTkFrame(parent, fg_color="transparent")
+        hdr.pack(fill="x", padx=18, pady=(18, 0))
+
+        ctk.CTkLabel(
+            hdr, text="Unit Collector",
+            font=ctk.CTkFont(size=22, weight="bold"),
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            hdr,
+            text="Scrapes all topic pages from a unit and combines them into one collapsible HTML file",
+            font=ctk.CTkFont(size=12), text_color=_TEXT_DIM,
+        ).pack(anchor="w", pady=(4, 0))
+
+        ctk.CTkLabel(
+            hdr, text="PAGE THEME",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(14, 6))
+
+        swatches_row = ctk.CTkFrame(hdr, fg_color="transparent")
+        swatches_row.pack(anchor="w")
+
+        for name, theme in PAGE_THEMES.items():
+            ring = ctk.CTkFrame(
+                swatches_row, width=34, height=34, corner_radius=17,
+                fg_color="transparent", border_width=2,
+                border_color="#ffffff" if name == self._selected_col_theme else _BG,
+            )
+            ring.pack(side="left", padx=4)
+            ring.pack_propagate(False)
+            ctk.CTkButton(
+                ring, width=26, height=26, corner_radius=13,
+                fg_color=theme["circle"], hover_color=theme["mid"], text="",
+                command=lambda n=name: self._col_select_theme(n),
+            ).place(relx=0.5, rely=0.5, anchor="center")
+            self._col_swatch_frames[name] = ring
+
+        ctk.CTkFrame(parent, height=1, fg_color=_DIVIDER).pack(fill="x", padx=18, pady=(14, 0))
+
+        body = ctk.CTkFrame(parent, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=14, pady=(14, 14))
+
+        ctk.CTkLabel(
+            body, text="BRIGHTSPACE UNIT URL",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(0, 4))
+        self._col_url_entry = ctk.CTkEntry(
+            body,
+            placeholder_text="https://learn.okanagancollege.ca/d2l/le/content/…/lessons/…",
+            height=38, font=ctk.CTkFont(size=13),
+        )
+        self._col_url_entry.pack(fill="x", pady=(0, 12))
+        self._bind_paste_menu(self._col_url_entry)
+
+        ctk.CTkLabel(
+            body, text="TARGET PAGE URL  (empty Brightspace page you created)",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(0, 4))
+        self._col_target_entry = ctk.CTkEntry(
+            body,
+            placeholder_text="https://learn.okanagancollege.ca/d2l/le/content/…/topics/…/View",
+            height=38, font=ctk.CTkFont(size=13),
+        )
+        self._col_target_entry.pack(fill="x", pady=(0, 12))
+        self._bind_paste_menu(self._col_target_entry)
+
+        ctk.CTkLabel(
+            body, text="GEMINI API KEY  (leave blank to skip styling)",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(0, 4))
+        self._col_key_entry = ctk.CTkEntry(
+            body, placeholder_text="AIza…",
+            height=38, font=ctk.CTkFont(size=13), show="•",
+        )
+        try:
+            from api_config import GEMINI_API_KEY
+            self._col_key_entry.insert(0, GEMINI_API_KEY)
+        except ImportError:
+            pass
+        self._col_key_entry.pack(fill="x", pady=(0, 12))
+        self._bind_paste_menu(self._col_key_entry)
+
+        par_row = ctk.CTkFrame(body, fg_color="transparent")
+        par_row.pack(fill="x", pady=(0, 16))
+        ctk.CTkLabel(
+            par_row, text="PARALLEL PAGES  (how many topics to scrape at once)",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(side="left")
+        self._col_parallel_entry = ctk.CTkEntry(
+            par_row, width=52, height=32, font=ctk.CTkFont(size=13),
+        )
+        self._col_parallel_entry.insert(0, "3")
+        self._col_parallel_entry.pack(side="right")
+
+        self._col_run_btn = ctk.CTkButton(
+            body, text="▶  Collect & Assemble", height=42,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._col_start_run,
+        )
+        self._col_run_btn.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(
+            body, text="LOG",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(0, 4))
+        self._col_log_box = _make_log_box(body)
+
+    def _col_select_theme(self, name: str):
+        if name == self._selected_col_theme:
+            return
+        self._col_swatch_frames[self._selected_col_theme].configure(border_color=_BG)
+        self._selected_col_theme = name
+        self._col_swatch_frames[name].configure(border_color="#ffffff")
+
+    def _col_start_run(self):
+        unit_url   = self._col_url_entry.get().strip()
+        target_url = self._col_target_entry.get().strip()
+        api_key    = self._col_key_entry.get().strip()
+        try:
+            parallel_pages = max(1, min(10, int(self._col_parallel_entry.get().strip())))
+        except ValueError:
+            parallel_pages = 3
+
+        if not unit_url:
+            _log_append(self._col_log_box, "⚠  Paste a Brightspace unit URL first.", "warning")
+            return
+        if not target_url:
+            _log_append(self._col_log_box, "⚠  Paste the target page URL first.", "warning")
+            return
+
+        theme_colors = PAGE_THEMES[self._selected_col_theme]
+
+        style_ref_path = Path(__file__).parent / "templates" / "style_reference.html"
+        try:
+            style_reference_html = style_ref_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            style_reference_html = ""
+
+        self._col_run_btn.configure(state="disabled", text="Running…")
+        self._col_log_box.configure(state="normal")
+        self._col_log_box.delete("1.0", "end")
+        self._col_log_box.configure(state="disabled")
+
+        q = self._col_log_queue
+
+        def worker():
+            class _Capture:
+                def write(self, t):
+                    if t.strip():
+                        q.put((t.rstrip(), "dim"))
+                def flush(self): pass
+
+            old, sys.stdout = sys.stdout, _Capture()
+            done_sent = [False]
+
+            def on_complete():
+                if not done_sent[0]:
+                    done_sent[0] = True
+                    q.put(("__DONE__", ""))
+
+            try:
+                from unit_collector import run as collector_run
+                asyncio.run(collector_run(
+                    unit_url=unit_url,
+                    target_url=target_url,
+                    theme_name=self._selected_col_theme,
+                    theme_colors=theme_colors,
+                    gemini_api_key=api_key,
+                    style_reference_html=style_reference_html,
+                    parallel_pages=parallel_pages,
+                    log=lambda msg, tag="info": q.put((msg, tag)),
+                    on_complete=on_complete,
+                ))
+            except Exception as e:
+                q.put((f"✗  {e}", "error"))
+            finally:
+                sys.stdout = old
+                on_complete()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _col_poll_log(self):
+        try:
+            while True:
+                msg, tag = self._col_log_queue.get_nowait()
+                if msg == "__DONE__":
+                    self._col_run_btn.configure(state="normal", text="▶  Collect & Assemble")
+                else:
+                    _log_append(self._col_log_box, msg, tag)
+        except queue.Empty:
+            pass
+        self.after(100, self._col_poll_log)
 
     # ── Style Migrator tab ────────────────────────────────────────────────────
 
