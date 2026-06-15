@@ -58,12 +58,48 @@ def _norm(text: str) -> str:
     return html_module.unescape(text).lower().strip()
 
 
+# ── External tool detection ───────────────────────────────────────────────────
+
+_EXTERNAL_TOOLS = {
+    "access pearson":   "Access Pearson resource present - will need to be re-linked",
+    "aktiv":            "Aktiv (Top Hat) resource present - will need to be re-linked",
+    "top hat":          "Aktiv (Top Hat) resource present - will need to be re-linked",
+    "cengage":          "Cengage resource present - will need to be re-linked",
+    "electude":         "Electude resource present - will need to be re-linked",
+    "hls":              "HLS videos to be connected during staging",
+    "harris learning":  "HLS videos to be connected during staging",
+    "kaltura":          "Kaltura resource present - will need to be re-linked",
+    "macmillan":        "Macmillan Learning resource present - will need to be re-linked",
+    "mcgraw":           "McGraw Hill resource present - will need to be re-linked",
+    "myokanaganmath":   "MyOkanaganMath resource present - will need to be re-linked",
+    "myokanagan":       "MyOkanaganMath resource present - will need to be re-linked",
+    "stukent":          "Stukent resource present - will need to be re-linked",
+    "wileyplus":        "WileyPlus resource present - will need to be re-linked",
+    "wiris":            "Wiris Quizzes resource present - will need to be re-linked",
+    "zoom":             "Zoom will need to be re-linked",
+    "h5p":              "H5P will need to be manually uploaded by educators",
+    "media collection": "Media collection resource present - will need to be relinked",
+    "turnitin":         "Turnitin resource present - will need to be relinked",
+    "poodll":           "Poodll resource present - will need to be relinked",
+}
+
+def _detect_external_tool(name: str, hint: str = "") -> Optional[tuple]:
+    """Return (tool_label, warning_message) if the name or Moodle module class matches a known tool."""
+    # H5P is identified by its modtype class, not its name
+    if "hvp" in hint or "h5p" in hint:
+        return "H5P", _EXTERNAL_TOOLS["h5p"]
+    name_l = name.lower()
+    for keyword, message in _EXTERNAL_TOOLS.items():
+        if keyword in name_l:
+            return keyword.title(), message
+    return None
+
+
 def _compare_items(moodle_items: list, bs_flat: list) -> list:
     SKIP = {"LABEL", "FORUM"}
 
     bs_modules = {_norm(i["title"]): i["title"] for i in bs_flat if i["kind"] == "MODULE"}
     bs_topics  = {_norm(i["title"]): i["title"] for i in bs_flat if i["kind"] == "TOPIC"}
-    # Combined pool for non-section items: folders/pages on Moodle may map to either
     bs_all     = {**bs_modules, **bs_topics}
 
     results = []
@@ -86,6 +122,19 @@ def _compare_items(moodle_items: list, bs_flat: list) -> list:
             continue
 
         if item["type"] in SKIP:
+            continue
+
+        # External tools are flagged separately — don't try to match them in BS
+        if item["type"] == "EXTERNAL":
+            detected = _detect_external_tool(item["name"], item.get("hint", ""))
+            tool_label, warning = detected if detected else ("External Tool", "External tool - will need to be re-linked")
+            results.append({**item, "section": current_section,
+                             "status": "external", "matched": warning, "tool_label": tool_label})
+            continue
+
+        # Embedded items (found inside page bodies) — preserve as-is, no BS comparison
+        if item.get("embedded"):
+            results.append({**item, "status": "embedded"})
             continue
 
         name_l = _norm(item["name"])
@@ -120,8 +169,10 @@ _JS_MOODLE_ITEMS = """() => {
         modtype_forum:        'FORUM',
         modtype_label:        'LABEL',
         modtype_folder:       'FOLDER',
-        modtype_kalturamedia: 'VIDEO',
-        modtype_lti:          'VIDEO',
+        modtype_kalturamedia: 'EXTERNAL',
+        modtype_lti:          'EXTERNAL',
+        modtype_hvp:          'EXTERNAL',
+        modtype_h5pactivity:  'EXTERNAL',
     };
 
     function labelInfo(activity) {
@@ -185,7 +236,7 @@ _JS_MOODLE_ITEMS = """() => {
                 const nameEl = activity.querySelector('.instancename, .activityname a, a');
                 name = nameEl ? nameEl.textContent.trim().replace(/\\s{2,}.*$/, '').trim() : '(unnamed)';
             }
-            result.push({ type, name, href });
+            result.push({ type, name, href, hint: matched });
         });
     });
     return result;
@@ -553,19 +604,123 @@ class ContentChecker:
                 pass
             await tab.wait_for_timeout(1500)
 
-            if "login" in tab.url.lower():
-                self.log("  Moodle login required — log in in the browser.", "info")
-                for i in range(120):
-                    await tab.wait_for_timeout(3000)
-                    if i % 10 == 9:
-                        self.log(f"  Waiting for Moodle login… ({(i+1)*3}s)", "dim")
-                    if "login" not in tab.url.lower():
-                        self.log("✓ Moodle login detected", "success")
-                        await tab.wait_for_timeout(1500)
-                        break
-                else:
-                    self.log("✗ Moodle login timed out", "error")
-                    return None
+            if "login" in tab.url.lower() or "course" not in tab.url.lower():
+                try:
+                    from api_config import MOODLE_USERNAME as moodle_user, MOODLE_PASSWORD as moodle_pass
+                except ImportError:
+                    moodle_user, moodle_pass = "", ""
+
+                async def _click_manual_login():
+                    try:
+                        link = tab.locator('a[href*="saml=off"]')
+                        if await link.count() > 0:
+                            self.log("  Clicking Manual Login…", "info")
+                            await link.first.click()
+                            await tab.wait_for_load_state("domcontentloaded", timeout=10000)
+                            await tab.wait_for_timeout(2000)
+                            return True
+                    except Exception:
+                        pass
+                    return False
+
+                async def _handle_microsoft_sso():
+                    """Handle Microsoft account picker + password page."""
+                    if "microsoftonline.com" not in tab.url:
+                        return
+                    self.log("  Microsoft SSO detected — selecting account…", "info")
+
+                    # Account picker: find the OC tile (NUsatenco@okanagan.bc.ca pattern)
+                    try:
+                        await tab.wait_for_timeout(2000)
+                        # Click the tile containing the OC email domain
+                        clicked = await tab.evaluate("""() => {
+                            function findAndClick(root) {
+                                for (const el of root.querySelectorAll('*')) {
+                                    const text = el.textContent || '';
+                                    if (text.includes('okanagan.bc.ca') && el.children.length === 0) {
+                                        // Walk up to find clickable parent
+                                        let p = el;
+                                        for (let i = 0; i < 6; i++) {
+                                            if (!p) break;
+                                            if (p.tagName === 'DIV' && (p.getAttribute('role') === 'button'
+                                                    || p.onclick || p.getAttribute('tabindex') === '0')) {
+                                                p.click(); return true;
+                                            }
+                                            p = p.parentElement;
+                                        }
+                                        el.click(); return true;
+                                    }
+                                }
+                                return false;
+                            }
+                            return findAndClick(document);
+                        }""")
+                        if clicked:
+                            await tab.wait_for_load_state("domcontentloaded", timeout=10000)
+                            await tab.wait_for_timeout(2000)
+                    except Exception:
+                        pass
+
+                    # Password page
+                    if "microsoftonline.com" in tab.url:
+                        self.log("  Entering Microsoft password…", "info")
+                        try:
+                            pwd_input = tab.locator('#i0118')
+                            await pwd_input.wait_for(state="visible", timeout=8000)
+                            await pwd_input.fill(moodle_pass)
+                            await tab.locator('#idSIButton9').click()
+                            await tab.wait_for_load_state("domcontentloaded", timeout=15000)
+                            await tab.wait_for_timeout(2000)
+                        except Exception as e:
+                            self.log(f"  ⚠ Microsoft password step failed: {e}", "warning")
+
+                # Step 1: click Manual Login
+                await _click_manual_login()
+
+                # Step 2a: Microsoft SSO appeared (50/50 chance)
+                await _handle_microsoft_sso()
+
+                # Step 2b: loginredirect=1 — stale session, log out then click Manual Login again
+                if "loginredirect" in tab.url:
+                    self.log("  Clearing stale session (Log out)…", "info")
+                    try:
+                        logout_btn = tab.locator('button[type="submit"].btn-primary')
+                        if await logout_btn.count() > 0:
+                            await logout_btn.first.click()
+                            await tab.wait_for_load_state("domcontentloaded", timeout=10000)
+                            await tab.wait_for_timeout(2000)
+                    except Exception:
+                        pass
+                    await _click_manual_login()
+                    await _handle_microsoft_sso()
+
+                # Step 3: Moodle manual login form (username + password)
+                if "saml=off" in tab.url or ("login" in tab.url.lower() and "microsoftonline" not in tab.url):
+                    if moodle_user and moodle_pass:
+                        self.log("  Filling Moodle credentials…", "info")
+                        try:
+                            await tab.locator('#username').fill(moodle_user)
+                            await tab.locator('#password').fill(moodle_pass)
+                            await tab.locator('#loginbtn').click()
+                            await tab.wait_for_load_state("domcontentloaded", timeout=15000)
+                            await tab.wait_for_timeout(2000)
+                            self.log("✓ Moodle login complete", "success")
+                        except Exception as e:
+                            self.log(f"✗ Auto-login failed: {e}", "error")
+                            return None
+                    else:
+                        self.log("  Credentials not set in api_config.py — log in manually.", "warning")
+                        for i in range(120):
+                            await tab.wait_for_timeout(3000)
+                            if i % 10 == 9:
+                                self.log(f"  Waiting for Moodle login… ({(i+1)*3}s)", "dim")
+                            if "login" not in tab.url.lower():
+                                self.log("✓ Moodle login detected", "success")
+                                await tab.wait_for_timeout(1500)
+                                break
+                        else:
+                            self.log("✗ Moodle login timed out", "error")
+                            return None
 
             try:
                 await context.storage_state(path=SESSION_FILE)
@@ -608,6 +763,12 @@ class ContentChecker:
                 await tab.close()
                 return None
 
+            # Deep scan: (1) scan label bodies on the course page itself,
+            # (2) then navigate to each PAGE topic for its body HTML
+            inline_embedded = await self._scan_moodle_labels_inline(tab, items)
+            embedded = await self._scan_moodle_page_bodies(tab, items)
+            items = items + inline_embedded + embedded
+
             await tab.close()
             n_items = sum(1 for i in items if i["type"] != "SECTION")
             n_sec   = sum(1 for i in items if i["type"] == "SECTION")
@@ -622,32 +783,244 @@ class ContentChecker:
                 pass
             return None
 
+    async def _scan_moodle_labels_inline(self, tab, items: list) -> list:
+        """
+        Scan the current course page (already loaded) for pluginfile.php links
+        and Kaltura iframes embedded inside label activity blocks.
+        Labels render their content inline — they have no separate page to navigate to.
+        """
+        self.log("  Scanning label bodies on course page…", "dim")
+        try:
+            results = await tab.evaluate("""() => {
+                const found = [];
+                document.querySelectorAll('li.section, li.section.main').forEach(section => {
+                    const secEl   = section.querySelector('.sectionname, h3, h4');
+                    const secName = secEl ? secEl.textContent.trim() : '';
+                    section.querySelectorAll('li.activity.modtype_label').forEach(label => {
+                        const nameEl    = label.querySelector('.instancename, .activityname a, a');
+                        const labelName = nameEl ? nameEl.textContent.trim().replace(/\\s{2,}.*$/, '').trim() : '(label)';
+                        const body      = label.querySelector(
+                            '.contentafterlink, .description, .no-overflow, .labelcontent, .activitybody'
+                        );
+                        if (!body) return;
+                        body.querySelectorAll('a[href*="pluginfile.php"]').forEach(a => {
+                            const href = a.href || '';
+                            // skip ReadSpeaker proxy links (they wrap the real URL)
+                            if (href.includes('readspeaker') || href.includes('docreader')) return;
+                            const text = a.textContent.trim() || href.split('/').pop().split('?')[0];
+                            if (href) found.push({
+                                type: 'FILE', name: text, href,
+                                embedded: true, section: secName, parent_topic: labelName
+                            });
+                        });
+                        body.querySelectorAll('iframe[src*="kaltura"]').forEach(f => {
+                            const src = f.src || '';
+                            const m   = src.match(/entryid\\/([^\\/&?]+)/i)
+                                     || src.match(/entry_id=([^&]+)/i)
+                                     || src.match(/\\/([01]_[a-z0-9]+)(?:\\/|$)/i);
+                            const entryId = m ? m[1] : '';
+                            const name    = entryId ? 'Kaltura video [' + entryId + ']' : '(embedded video)';
+                            found.push({
+                                type: 'VIDEO', name, href: src, entryId,
+                                embedded: true, section: secName, parent_topic: labelName
+                            });
+                        });
+                    });
+                });
+                return found;
+            }""")
+        except Exception as e:
+            self.log(f"  ⚠ Label inline scan failed: {e}", "warning")
+            return []
+
+        # Deduplicate
+        seen, dedup = set(), []
+        for r in results:
+            key = r.get("href") or r.get("name")
+            if key and key not in seen:
+                seen.add(key)
+                dedup.append(r)
+
+        if dedup:
+            files  = sum(1 for r in dedup if r["type"] == "FILE")
+            videos = sum(1 for r in dedup if r["type"] == "VIDEO")
+            self.log(f"  Labels: {files} embedded file(s), {videos} embedded video(s)", "dim")
+        return dedup
+
+    async def _scan_moodle_page_bodies(self, tab, items: list) -> list:
+        """
+        Visit each PAGE topic and scan its HTML body for:
+          - pluginfile.php links  → embedded FILE
+          - Kaltura iframes       → embedded VIDEO with entryId
+        Returns a flat list of additional items to append to the main list.
+        """
+        # Build section context so embedded items know where they came from
+        section_of = {}
+        current_section = ""
+        for item in items:
+            if item["type"] == "SECTION":
+                current_section = item["name"]
+            else:
+                section_of[item.get("href", "")] = current_section
+
+        # LABELs are inline on the course page — handled by _scan_moodle_labels_inline
+        # FILE hrefs point to direct downloads, not scannable HTML pages
+        pages_to_scan = [
+            i for i in items
+            if i["type"] == "PAGE" and i.get("href") and not i.get("embedded")
+        ]
+
+        if not pages_to_scan:
+            return []
+
+        self.log(f"  Scanning {len(pages_to_scan)} page(s) for embedded files and videos…", "info")
+        found = []
+        visit_log: list[tuple[str, str, list]] = []  # (section, name, hits)
+
+        for item in pages_to_scan:
+            url     = item["href"]
+            section = section_of.get(url, "")
+            hits    = []
+            try:
+                await tab.goto(url, wait_until="domcontentloaded", timeout=20000)
+                await tab.wait_for_timeout(800)
+
+                results = await tab.evaluate("""() => {
+                    const found = [];
+
+                    // pluginfile.php links
+                    document.querySelectorAll('a[href*="pluginfile.php"]').forEach(a => {
+                        const href = a.href || '';
+                        const text = a.textContent.trim() || href.split('/').pop().split('?')[0];
+                        if (href) found.push({ type: 'FILE', name: text, href, embedded: true });
+                    });
+
+                    // Kaltura iframes — extract entryId from src
+                    document.querySelectorAll('iframe[src*="kaltura"]').forEach(f => {
+                        const src = f.src || '';
+                        const m   = src.match(/entryid\\/([^\\/&?]+)/i)
+                                 || src.match(/entry_id=([^&]+)/i)
+                                 || src.match(/\\/([01]_[a-z0-9]+)(?:\\/|$)/i);
+                        const entryId = m ? m[1] : '';
+                        const name    = entryId ? 'Kaltura video [' + entryId + ']' : '(embedded video)';
+                        found.push({ type: 'VIDEO', name, href: src, entryId, embedded: true });
+                    });
+
+                    // video.js / KMC players that don't use iframe
+                    document.querySelectorAll('[id*="kaltura_player"], [id*="kplayer"]').forEach(el => {
+                        const entryId = el.getAttribute('data-entry-id') || '';
+                        const name    = entryId ? 'Kaltura video [' + entryId + ']' : '(embedded kaltura player)';
+                        found.push({ type: 'VIDEO', name, href: '', entryId, embedded: true });
+                    });
+
+                    return found;
+                }""")
+
+                for r in results:
+                    r["section"]      = section
+                    r["parent_topic"] = item["name"]
+                    found.append(r)
+                    hits.append(r)
+
+            except Exception as e:
+                hits = [{"type": "ERROR", "name": str(e)}]
+
+            visit_log.append((section, item["name"], hits))
+
+        # Deduplicate by href
+        seen  = set()
+        dedup = []
+        for r in found:
+            key = r.get("href") or r.get("name")
+            if key and key not in seen:
+                seen.add(key)
+                dedup.append(r)
+
+        files  = sum(1 for r in dedup if r["type"] == "FILE")
+        videos = sum(1 for r in dedup if r["type"] == "VIDEO")
+        if dedup:
+            self.log(f"  Found {files} embedded file(s), {videos} embedded video(s)", "info")
+
+        # Per-page visit log
+        self.log("", "dim")
+        self.log("  Page scan log:", "dim")
+        for section, name, hits in visit_log:
+            sec_label = f"[{section}] " if section else ""
+            if not hits:
+                self.log(f"    ○ {sec_label}{name}", "dim")
+            else:
+                icons = {"FILE": "📄", "VIDEO": "🎥", "ERROR": "✗"}
+                hit_strs = []
+                for h in hits:
+                    icon = icons.get(h["type"], "?")
+                    hit_strs.append(f"{icon} {h['name']}")
+                self.log(f"    ● {sec_label}{name}  →  {',  '.join(hit_strs)}", "info")
+
+        return dedup
+
     def _log_moodle_items(self, items: list) -> None:
         _ICONS = {
             "FILE": "📄", "ASSIGN": "📝", "QUIZ": "🧪", "URL": "🔗",
-            "PAGE": "📖", "FORUM": "💬", "LABEL": "🏷 ", "FOLDER": "📁", "VIDEO": "🎥",
+            "PAGE": "📖", "FORUM": "💬", "LABEL": "🏷 ", "FOLDER": "📁",
+            "VIDEO": "🎥", "EXTERNAL": "🔌",
         }
+        top_level = [i for i in items if not i.get("embedded")]
+        embedded  = [i for i in items if i.get("embedded")]
+
+        # Group embedded items by section for inline display
+        from collections import defaultdict
+        emb_by_section: dict = defaultdict(list)
+        for e in embedded:
+            emb_by_section[e.get("section", "")].append(e)
+
         self.log("─" * 52, "dim")
-        for item in items:
+        current_sec = ""
+        for item in top_level:
             if item["type"] == "SECTION":
+                # Before moving to the next section, flush embedded items for the current one
+                for e in emb_by_section.get(current_sec, []):
+                    icon   = _ICONS.get(e["type"], "  ")
+                    parent = e.get("parent_topic", "")
+                    entry  = e.get("entryId", "")
+                    extra  = f"  [entryId: {entry}]" if entry else ""
+                    label  = f" (in: {parent})" if parent else ""
+                    self.log(f"   {icon} {e['type']:<7}  {e['name']}{extra}{label}", "dim")
+                current_sec = item["name"]
                 self.log("", "dim")
                 self.log(f"── {item['name']}", "step")
+            elif item["type"] == "EXTERNAL":
+                detected = _detect_external_tool(item["name"], item.get("hint", ""))
+                tool_label, warning = detected if detected else ("External Tool", "External tool - will need to be re-linked")
+                self.log(f"   🔌 EXTERNAL  {item['name']}", "warning")
+                self.log(f"      → Detected as: {tool_label}", "dim")
+                self.log(f"      ⚠ {warning}", "warning")
             else:
                 icon = _ICONS.get(item["type"], "  ")
                 self.log(f"   {icon} {item['type']:<7}  {item['name']}", "info")
+
+        # Flush embedded items for the last section
+        for e in emb_by_section.get(current_sec, []):
+            icon   = _ICONS.get(e["type"], "  ")
+            parent = e.get("parent_topic", "")
+            entry  = e.get("entryId", "")
+            extra  = f"  [entryId: {entry}]" if entry else ""
+            label  = f" (in: {parent})" if parent else ""
+            self.log(f"   {icon} {e['type']:<7}  {e['name']}{extra}{label}", "dim")
+
         self.log("", "dim")
-        n_items = sum(1 for i in items if i["type"] != "SECTION")
-        n_sec   = sum(1 for i in items if i["type"] == "SECTION")
-        self.log(f"✓ {n_items} items across {n_sec} sections", "success")
+        n_items = sum(1 for i in top_level if i["type"] != "SECTION")
+        n_sec   = sum(1 for i in top_level if i["type"] == "SECTION")
+        self.log(f"✓ {n_items} items across {n_sec} sections  (+{len(embedded)} embedded)", "success")
 
     # ── Comparison report ─────────────────────────────────────────────────────
 
     def _log_report(self, results: list) -> None:
         _ICONS = {
             "FILE": "📄", "ASSIGN": "📝", "QUIZ": "🧪", "URL": "🔗",
-            "PAGE": "📖", "FOLDER": "📁", "VIDEO": "🎥", "SECTION": "──",
+            "PAGE": "📖", "FOLDER": "📁", "VIDEO": "🎥", "EXTERNAL": "🔌", "SECTION": "──",
         }
         counts = {"exact": 0, "fuzzy": 0, "found_in_search": 0, "found_in_content": 0, "missing": 0}
+        external_items = []
 
         self.log("─" * 52, "dim")
         for r in results:
@@ -662,6 +1035,15 @@ class ContentChecker:
                     self.log(f"⚠️  {icon} {r['name']}  →  \"{matched}\" ({score}%)", "warning")
                 else:
                     self.log(f"❌ {icon} {r['name']}", "error")
+                continue
+
+            if r["status"] == "external":
+                external_items.append(r)
+                self.log(f"   🔌 {r['name']}", "warning")
+                continue
+
+            # Embedded items are shown in their own summary block at the bottom
+            if r.get("embedded"):
                 continue
 
             status = r["status"]
@@ -693,6 +1075,48 @@ class ContentChecker:
             f"({total} items checked)",
             "step",
         )
+
+        # ── External tools summary ─────────────────────────────────────────────
+        if external_items:
+            self.log("", "dim")
+            self.log("─" * 52, "dim")
+            self.log(f"🔌 External Tools Detected ({len(external_items)})", "warning")
+            self.log("   These will need manual attention after migration:", "dim")
+            self.log("", "dim")
+            seen_warnings: set = set()
+            for r in external_items:
+                warning     = r["matched"]
+                tool_label  = r.get("tool_label", "External Tool")
+                section     = r.get("section", "")
+                prefix      = f"[{section}] " if section else ""
+                self.log(f"   🔌 {prefix}{r['name']}", "warning")
+                self.log(f"      → Detected as: {tool_label}", "dim")
+                if warning not in seen_warnings:
+                    self.log(f"      ⚠ {warning}", "warning")
+                    seen_warnings.add(warning)
+
+        # ── Embedded files / videos summary ────────────────────────────────────
+        embedded = [r for r in results if r.get("embedded")]
+        if embedded:
+            emb_files  = [r for r in embedded if r["type"] == "FILE"]
+            emb_videos = [r for r in embedded if r["type"] == "VIDEO"]
+            self.log("", "dim")
+            self.log("─" * 52, "dim")
+            self.log(f"📎 Embedded Content Found ({len(embedded)} items: {len(emb_files)} files, {len(emb_videos)} videos)", "step")
+            self.log("   Discovered inside page bodies — need migration:", "dim")
+            self.log("", "dim")
+            for r in emb_files:
+                section = r.get("section", "")
+                parent  = r.get("parent_topic", "")
+                loc     = f"[{section} › {parent}]" if section and parent else f"[{parent or section}]"
+                self.log(f"   📄 {loc}  {r['name']}", "info")
+            for r in emb_videos:
+                section  = r.get("section", "")
+                parent   = r.get("parent_topic", "")
+                loc      = f"[{section} › {parent}]" if section and parent else f"[{parent or section}]"
+                entry    = r.get("entryId", "")
+                extra    = f"  [entryId: {entry}]" if entry else "  ⚠ no entryId"
+                self.log(f"   🎥 {loc}  {r['name']}{extra}", "info")
 
     # ── Main flow ─────────────────────────────────────────────────────────────
 
