@@ -389,16 +389,8 @@ class PageAutomator:
                 pass
             self.log("✓ Page loaded", "success")
 
-            if not self.gemini_api_key:
-                self.log("⚠ No Gemini API key — add it to .env", "warning")
-                if self.on_complete:
-                    self.on_complete()
-                while browser.is_connected():
-                    await asyncio.sleep(0.5)
-                return
-
-            # ── Section URL: scrape topics first ─────────────────────────────
             if "/topics/" not in self.url:
+                # Section URL: scrape all topic pages and let user pick
                 pages = await self.scrape_section_pages(page)
                 if not pages:
                     self.log("✗ No topic pages found in this section", "error")
@@ -408,7 +400,6 @@ class PageAutomator:
                         await asyncio.sleep(0.5)
                     return
 
-                # Ask user which pages to process (blocks until GUI responds)
                 start_idx, count = 0, len(pages)
                 if self.on_pages_found:
                     start_idx, count = await asyncio.to_thread(self.on_pages_found, pages)
@@ -425,9 +416,8 @@ class PageAutomator:
                         await self._process_topic(tab, topic["url"], topic["label"])
 
                 await asyncio.gather(*[process_one(t, i) for i, t in enumerate(selected)])
-
-            # ── Single topic URL ──────────────────────────────────────────────
             else:
+                # Single topic URL
                 await self._process_topic(page, self.url)
 
             self.log("─" * 52, "dim")

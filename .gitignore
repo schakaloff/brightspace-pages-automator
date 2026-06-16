@@ -1,4 +1,4 @@
-# API configuration and secrets — never commit!
+﻿# API configuration and secrets â€” never commit!
 .env
 src/api_config.py
 
@@ -42,3 +42,6 @@ Thumbs.db
 
 # Browser/Playwright
 *.chromium/
+
+# User config (saved URLs, API key)
+user_config.json

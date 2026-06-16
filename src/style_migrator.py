@@ -8,9 +8,13 @@ Style Migrator automation:
   5. Replace textarea content → click OK → click Save and Close
 """
 import asyncio
-from typing import Callable, Optional
+import re
+import threading
+from typing import Callable, List, Optional
 
 from playwright.async_api import BrowserContext, Page
+
+from config import SESSION_FILE
 
 _MIGRATOR_PROMPT = """You are an expert front-end developer. Your task is to restyle a Brightspace LMS HTML page.
 
@@ -54,6 +58,44 @@ _FA_HINTS = {
 }
 
 
+def _clean_moodle_html(raw: str) -> str:
+    """Strip Moodle/Bootstrap noise from scraped HTML, keeping layout structure for Gemini."""
+    try:
+        from bs4 import BeautifulSoup, Comment
+    except ImportError:
+        return raw  # beautifulsoup4 not installed — fall back to raw
+
+    soup = BeautifulSoup(raw, "html.parser")
+
+    # Remove non-visual tags entirely
+    for tag in soup.find_all(["script", "style", "svg", "noscript", "meta", "link"]):
+        tag.decompose()
+
+    # Remove HTML comments
+    for comment in soup.find_all(string=lambda t: isinstance(t, Comment)):
+        comment.extract()
+
+    # Strip noisy attributes; keep class (layout hint), style (inline design), href, src
+    _KEEP_ATTRS = {"class", "style", "href", "src", "alt", "role", "aria-label"}
+    for tag in soup.find_all(True):
+        attrs_to_remove = [a for a in list(tag.attrs) if a not in _KEEP_ATTRS]
+        for a in attrs_to_remove:
+            del tag.attrs[a]
+        # Trim very long class lists to first 4 tokens (Moodle adds many utility classes)
+        if tag.get("class"):
+            tag.attrs["class"] = tag.attrs["class"][:4]
+        # Drop blank style attributes
+        if tag.get("style", "").strip() == "":
+            tag.attrs.pop("style", None)
+
+    # Collapse long text nodes (Moodle sometimes embeds base64 or huge paragraphs)
+    for text_node in soup.find_all(string=True):
+        if len(text_node) > 500:
+            text_node.replace_with(text_node[:500] + "…")
+
+    return str(soup)
+
+
 async def _find_locator_any_frame(
     page: Page, selector: str, retries: int = 6, delay_ms: int = 700
 ):
@@ -70,62 +112,104 @@ async def _find_locator_any_frame(
     return None, None
 
 
+# The D2L source-code editor uses CodeMirror 6 (not a <textarea>).
+# Content lives in .cm-content[data-language] > .cm-line divs (contenteditable).
+# textContent of each .cm-line gives the raw HTML source for that line.
 _JS_EXTRACT_TEXTAREA = """() => {
-    function deepFind(root, selector) {
-        const el = root.querySelector(selector);
-        if (el) return el;
-        for (const child of root.querySelectorAll('*')) {
-            if (child.shadowRoot) {
-                const found = deepFind(child.shadowRoot, selector);
-                if (found) return found;
+    function walkShadow(root) {
+        const cmContent = root.querySelector('.cm-content[data-language]');
+        if (cmContent) {
+            const lines = Array.from(cmContent.querySelectorAll('.cm-line'));
+            if (lines.length > 0) {
+                return lines.map(l => l.textContent).join('\\n');
+            }
+        }
+        for (const el of root.querySelectorAll('*')) {
+            if (el.shadowRoot) {
+                const r = walkShadow(el.shadowRoot);
+                if (r != null) return r;
             }
         }
         return null;
     }
-    for (const sel of [
-        'd2l-htmleditor-source-editor textarea',
-        '.d2l-htmleditor-source-code textarea',
-        'textarea[class*="source"]',
-    ]) {
-        const el = deepFind(document, sel);
-        if (el) return el.value;
+    return walkShadow(document);
+}"""
+
+# Diagnostic version — returns a status object so Python can log what was found.
+_JS_DIAGNOSE = """() => {
+    const info = { textareas: 0, cmEditors: 0, cmLines: 0, snippet: null };
+    function walk(root) {
+        for (const el of root.querySelectorAll('*')) {
+            if (el.tagName === 'TEXTAREA') info.textareas++;
+            if (el.classList && el.classList.contains('cm-editor')) info.cmEditors++;
+            if (el.classList && el.classList.contains('cm-line')) {
+                info.cmLines++;
+                if (!info.snippet) info.snippet = el.textContent.slice(0, 80);
+            }
+            if (el.shadowRoot) walk(el.shadowRoot);
+        }
     }
-    for (const t of document.querySelectorAll('textarea')) {
-        if (t.value && t.value.includes('<')) return t.value;
-    }
-    return null;
+    walk(document);
+    return info;
 }"""
 
 _JS_SET_TEXTAREA = """(newHtml) => {
-    function deepFind(root, selector) {
-        const el = root.querySelector(selector);
-        if (el) return el;
-        for (const child of root.querySelectorAll('*')) {
-            if (child.shadowRoot) {
-                const found = deepFind(child.shadowRoot, selector);
-                if (found) return found;
+    // Strategy 1: find the d2l-htmleditor-source-editor element and use its CM6 view
+    function walkShadow(root) {
+        for (const el of root.querySelectorAll('*')) {
+            if (el.tagName && el.tagName.toLowerCase() === 'd2l-htmleditor-source-editor') {
+                // Try common CM6 view property names on the LitElement instance
+                for (const prop of ['_editor', 'editor', '_view', 'view', '_cm', 'cm']) {
+                    const v = el[prop];
+                    if (v && v.state && typeof v.dispatch === 'function') {
+                        v.dispatch(v.state.update({
+                            changes: { from: 0, to: v.state.doc.length, insert: newHtml }
+                        }));
+                        return 'cm6:' + prop;
+                    }
+                }
+            }
+            if (el.shadowRoot) {
+                const r = walkShadow(el.shadowRoot);
+                if (r) return r;
             }
         }
         return null;
     }
-    for (const sel of [
-        'd2l-htmleditor-source-editor textarea',
-        '.d2l-htmleditor-source-code textarea',
-        'textarea[class*="source"]',
-    ]) {
-        const el = deepFind(document, sel);
-        if (el) {
-            const setter = Object.getOwnPropertyDescriptor(
-                window.HTMLTextAreaElement.prototype, 'value'
-            ).set;
-            setter.call(el, newHtml);
-            el.dispatchEvent(new Event('input',  { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            return true;
+    const cm6Result = walkShadow(document);
+    if (cm6Result) return cm6Result;
+
+    // Strategy 2: focus the CM6 contenteditable and replace via execCommand
+    function findCmContent(root) {
+        const el = root.querySelector('.cm-content[data-language]');
+        if (el) return el;
+        for (const child of root.querySelectorAll('*')) {
+            if (child.shadowRoot) {
+                const r = findCmContent(child.shadowRoot);
+                if (r) return r;
+            }
         }
+        return null;
+    }
+    const cmContent = findCmContent(document);
+    if (cmContent) {
+        cmContent.focus();
+        const range = document.createRange();
+        range.selectNodeContents(cmContent);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        const ok = document.execCommand('insertText', false, newHtml);
+        return ok ? 'execCommand' : 'execCommand-failed';
     }
     return false;
 }"""
+
+
+def _find_moodle_links(html: str) -> List[str]:
+    """Return deduplicated moodle.okanagan.bc.ca URLs found in html."""
+    urls = re.findall(r'https?://moodle\.okanagan\.bc\.ca[^\s"\'<>]*', html)
+    return list(dict.fromkeys(urls))
 
 
 class StyleMigrator:
@@ -137,13 +221,19 @@ class StyleMigrator:
         gemini_api_key: str,
         log: Callable[[str, str], None],
         on_complete: Callable = None,
+        moodle_ready_event: threading.Event = None,
+        on_moodle_waiting: Callable = None,
+        on_links_found: Callable = None,
     ):
-        self.brightspace_url = brightspace_url
-        self.moodle_url      = moodle_url
-        self.primary_color   = primary_color
-        self.gemini_api_key  = gemini_api_key
-        self.log             = log
-        self.on_complete     = on_complete
+        self.brightspace_url    = brightspace_url
+        self.moodle_url         = moodle_url
+        self.primary_color      = primary_color
+        self.gemini_api_key     = gemini_api_key
+        self.log                = log
+        self.on_complete        = on_complete
+        self.moodle_ready_event = moodle_ready_event
+        self.on_moodle_waiting  = on_moodle_waiting
+        self.on_links_found     = on_links_found
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -166,16 +256,209 @@ class StyleMigrator:
         if result:
             self.log(f"✓ Extracted {len(result):,} chars from Brightspace", "success")
         else:
-            self.log("⚠ Could not locate source editor textarea", "warning")
+            try:
+                info = await page.evaluate(_JS_DIAGNOSE)
+                self.log(
+                    f"✗ Editor not found — textareas={info['textareas']} "
+                    f"cm-editors={info['cmEditors']} cm-lines={info['cmLines']} "
+                    f"snippet={info['snippet']!r}",
+                    "error",
+                )
+            except Exception as diag_err:
+                self.log(f"✗ Could not locate source editor (diag failed: {diag_err})", "error")
         return result
 
-    async def _scrape_moodle(self, context: BrowserContext) -> Optional[str]:
+    async def _scrape_moodle(self, context: BrowserContext, structured: bool = False):
         self.log("Opening Moodle page in new tab...", "info")
         tab = await context.new_page()
         try:
-            await tab.goto(self.moodle_url, wait_until="domcontentloaded", timeout=30000)
+            try:
+                await tab.goto(self.moodle_url, wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                pass
             await tab.wait_for_timeout(1500)
 
+            # Detect if Moodle redirected to a login page and wait for manual login
+            if "login" in tab.url.lower():
+                self.log("─" * 52, "dim")
+                self.log("  Moodle login required — log in in the browser.", "info")
+                self.log("─" * 52, "dim")
+                for i in range(120):
+                    await tab.wait_for_timeout(3000)
+                    if i % 10 == 9:
+                        self.log(f"  Waiting for Moodle login... ({(i+1)*3}s)", "dim")
+                    if "login" not in tab.url.lower():
+                        self.log("✓ Moodle login detected", "success")
+                        await tab.wait_for_timeout(1500)
+                        break
+                else:
+                    self.log("✗ Moodle login timed out after 6 minutes", "error")
+                    return None
+
+            # Save session now that Moodle is open — captures Moodle cookies too
+            try:
+                await context.storage_state(path=SESSION_FILE)
+                self.log("✓ Moodle session saved", "dim")
+            except Exception:
+                pass
+
+            # Ask the user to confirm they're on the right page before scraping
+            self.log("─" * 52, "dim")
+            self.log(f"  Moodle loaded at: {tab.url}", "dim")
+            self.log("  Make sure the course page is visible, then click", "info")
+            self.log("  ✅ Ready — Scrape Now  in the app.", "info")
+            self.log("─" * 52, "dim")
+            if self.on_moodle_waiting:
+                self.on_moodle_waiting()
+            if self.moodle_ready_event:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, self.moodle_ready_event.wait)
+
+            # If still on dashboard/wrong page, navigate to the original URL
+            if "course/view.php" not in tab.url:
+                self.log(f"  Not on a course page — navigating to provided URL...", "dim")
+                try:
+                    await tab.goto(self.moodle_url, wait_until="domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
+
+            # Wait for the page to settle
+            try:
+                await tab.wait_for_load_state("domcontentloaded", timeout=8000)
+            except Exception:
+                pass
+            await tab.wait_for_timeout(1000)
+
+            current_url = tab.url
+            self.log(f"  Scraping: {current_url}", "dim")
+
+            if "course/view.php" not in current_url:
+                self.log(f"⚠ Still not on a course page — scrape may return nothing", "warning")
+                self.log(f"  Got: {current_url}", "dim")
+
+            if structured:
+                try:
+                    items = await tab.evaluate("""() => {
+                        const TYPES = {
+                            modtype_resource:     'FILE',
+                            modtype_assign:       'ASSIGN',
+                            modtype_quiz:         'QUIZ',
+                            modtype_url:          'URL',
+                            modtype_page:         'PAGE',
+                            modtype_forum:        'FORUM',
+                            modtype_label:        'LABEL',
+                            modtype_folder:       'FOLDER',
+                            modtype_kalturamedia: 'VIDEO',
+                            modtype_lti:          'VIDEO',
+                        };
+
+                        function labelInfo(activity) {
+                            const body = activity.querySelector(
+                                '.contentafterlink, .description, .no-overflow, .labelcontent, .activitybody'
+                            );
+                            if (!body) return { type: 'LABEL', name: '(empty label)' };
+
+                            // Detect Kaltura via video.js player in DOM or iframe
+                            const vjsEl  = body.querySelector('.video-js, [id*="videojs_"]');
+                            const kframe = body.querySelector('iframe[src*="kaltura"]');
+                            const hasVideo = !!(vjsEl || kframe);
+
+                            let entryId = '';
+                            if (kframe) {
+                                const m = (kframe.src || '').match(/entryid\\/([^\\/]+)/);
+                                if (m) entryId = m[1];
+                            }
+                            if (!entryId && vjsEl) {
+                                // entry ID sometimes in a data attribute or child source
+                                const src = vjsEl.querySelector('source[src*="entryid"], source[src*="kaltura"]');
+                                if (src) {
+                                    const m = (src.getAttribute('src') || '').match(/entryid[=\\/]([^&\\/]+)/i);
+                                    if (m) entryId = m[1];
+                                }
+                                // or in the player's id attribute: id_videojs_<hash>_<n>
+                                const idAttr = vjsEl.id || '';
+                                if (!entryId && idAttr) entryId = idAttr;
+                            }
+
+                            // Get text content stripping video.js control noise
+                            const rawText = body.textContent.trim().replace(/\\s+/g, ' ');
+                            const isOnlyVideoNoise = /^Video Player is loading/.test(rawText);
+
+                            if (isOnlyVideoNoise || (hasVideo && rawText.replace(/Video Player.*/, '').trim().length < 5)) {
+                                return {
+                                    type: 'VIDEO',
+                                    name: entryId ? 'Kaltura video [' + entryId + ']' : '(embedded video)',
+                                };
+                            }
+
+                            // Build a label name from the text, excluding video player noise
+                            const cleanText = rawText.replace(/Video Player is loading.*?(Current Time \\d|$)/g, '').trim();
+
+                            let name = null;
+                            const heading = body.querySelector('h1,h2,h3,h4,h5,h6');
+                            if (heading) { const t = heading.textContent.trim(); if (t.length > 2) name = t; }
+                            if (!name) {
+                                const bold = body.querySelector('strong, b');
+                                if (bold) { const t = bold.textContent.trim(); if (t.length > 2 && t.length < 120) name = t; }
+                            }
+                            if (!name) {
+                                const link = body.querySelector('a');
+                                if (link) { const t = link.textContent.trim(); name = t.length > 2 ? t : link.href || null; }
+                            }
+                            if (!name && cleanText.length > 2) {
+                                name = cleanText.slice(0, 80) + (cleanText.length > 80 ? '…' : '');
+                            }
+                            if (!name) {
+                                if (body.querySelector('img')) name = '(image)';
+                                else name = '(empty label)';
+                            }
+
+                            // Annotate if a video is also present in this label
+                            if (hasVideo) name += entryId ? ' [🎥 ' + entryId + ']' : ' [🎥]';
+
+                            return { type: 'LABEL', name };
+                        }
+
+                        const result = [];
+                        document.querySelectorAll('li.section, li.section.main').forEach(section => {
+                            const heading = section.querySelector('.sectionname, h3, h4');
+                            result.push({
+                                type: 'SECTION',
+                                name: heading ? heading.textContent.trim() : '(unnamed section)',
+                                href: '',
+                            });
+                            section.querySelectorAll('li.activity').forEach(activity => {
+                                const cls = Array.from(activity.classList);
+                                const matched = cls.find(c => TYPES[c]);
+                                if (!matched) return;
+                                let type = TYPES[matched];
+                                const anchor = activity.querySelector('a');
+                                let name, href = anchor ? anchor.href : '';
+
+                                if (matched === 'modtype_label') {
+                                    const info = labelInfo(activity);
+                                    type = info.type;
+                                    name = info.name;
+                                } else {
+                                    const nameEl = activity.querySelector('.instancename, .activityname a, a');
+                                    name = nameEl ? nameEl.textContent.trim().replace(/\\s{2,}.*$/, '').trim() : '(unnamed)';
+                                }
+                                result.push({ type, name, href });
+                            });
+                        });
+                        return result;
+                    }""")
+                except Exception as eval_err:
+                    self.log(f"✗ Could not read page — did it navigate away? ({eval_err})", "error")
+                    try:
+                        await tab.close()
+                    except Exception:
+                        pass
+                    return None
+                await tab.close()
+                return items
+
+            # Full HTML scrape (used for Gemini restyling)
             html = await tab.evaluate("""() => {
                 for (const sel of [
                     '[role="main"]', '#page-content', '.course-content',
@@ -187,31 +470,40 @@ class StyleMigrator:
                 return document.body.innerHTML;
             }""")
 
-            if html:
-                self.log(f"✓ Scraped {len(html):,} chars from Moodle", "success")
-            else:
+            if not html:
                 self.log("⚠ Could not find Moodle main content", "warning")
+                return None
+
+            raw_len = len(html)
+            html = _clean_moodle_html(html)
+            scraped_url = tab.url
+            await tab.close()
+            self.log(f"✓ Scraped {scraped_url}", "dim")
+            self.log(f"  {raw_len:,} → {len(html):,} chars after cleanup", "success")
             return html
         except Exception as e:
             self.log(f"✗ Moodle scrape error: {e}", "error")
+            try:
+                await tab.close()
+            except Exception:
+                pass
             return None
-        finally:
-            await tab.close()
-            self.log("Moodle tab closed", "dim")
 
     def _call_gemini(self, source_html: str, moodle_html: str) -> Optional[str]:
-        import google.generativeai as genai
+        from google import genai
 
         self.log("🤖 Sending to Gemini AI for restyling...", "info")
         try:
-            genai.configure(api_key=self.gemini_api_key)
-            model = genai.GenerativeModel("gemini-2.0-flash")
+            client = genai.Client(api_key=self.gemini_api_key)
             prompt = _MIGRATOR_PROMPT.format(
                 source_html=source_html,
                 moodle_html=moodle_html,
                 primary_color=self.primary_color,
             )
-            response = model.generate_content(prompt)
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt,
+            )
             result = response.text.strip()
 
             # Strip markdown fences if model added them
@@ -273,9 +565,46 @@ class StyleMigrator:
     async def run(self) -> None:
         from browser import launch_browser, wait_for_login
 
+        moodle_only = not self.brightspace_url
+
         p, browser, context, page = await launch_browser()
         try:
             await wait_for_login(page, context)
+
+            if moodle_only:
+                self.log("─" * 52, "dim")
+                self.log("Moodle-only mode — skipping Brightspace.", "info")
+                items = await self._scrape_moodle(context, structured=True)
+                if items:
+                    _ICONS = {
+                        "SECTION": "──",
+                        "FILE":    "📄",
+                        "ASSIGN":  "📝",
+                        "QUIZ":    "🧪",
+                        "URL":     "🔗",
+                        "PAGE":    "📖",
+                        "FORUM":   "💬",
+                        "LABEL":   "🏷 ",
+                        "FOLDER":  "📁",
+                        "VIDEO":   "🎥",
+                    }
+                    self.log("─" * 52, "dim")
+                    for item in items:
+                        icon = _ICONS.get(item["type"], "  ")
+                        if item["type"] == "SECTION":
+                            self.log("", "dim")
+                            self.log(f"{icon} {item['name']}", "step")
+                        else:
+                            self.log(f"   {icon} {item['type']:<7}  {item['name']}", "info")
+                    self.log("", "dim")
+                    self.log(f"✓ Found {len([i for i in items if i['type'] != 'SECTION'])} items across {len([i for i in items if i['type'] == 'SECTION'])} sections", "success")
+                else:
+                    self.log("✗ No items found — make sure you're on a Moodle course page (view.php)", "error")
+                if self.on_complete:
+                    self.on_complete()
+                while browser.is_connected():
+                    await asyncio.sleep(0.5)
+                return
 
             # ── Navigate ──────────────────────────────────────────────────────
             self.log("─" * 52, "dim")
@@ -292,12 +621,13 @@ class StyleMigrator:
             self.log("─" * 52, "dim")
             self.log("Looking for Options button...", "info")
             try:
-                await page.wait_for_selector("iframe", timeout=5000)
+                await page.wait_for_selector("iframe", timeout=8000)
             except Exception:
                 pass
+            await page.wait_for_timeout(3000)
 
             _, btn = await _find_locator_any_frame(
-                page, "d2l-button-icon.content-options-btn", retries=7
+                page, "d2l-button-icon.content-options-btn", retries=15, delay_ms=1000
             )
             if btn is None:
                 self.log("✗ Options button not found", "error")
@@ -337,7 +667,45 @@ class StyleMigrator:
             # ── Source Code ───────────────────────────────────────────────────
             self.log("─" * 52, "dim")
             self.log("Looking for Source Code button...", "info")
-            _, src_btn = await _find_locator_any_frame(
+
+            # Expand the toolbar overflow (⋯) first — Source Code is often chomped
+            expand_result = await page.evaluate("""() => {
+                function deepFind(root, fn, depth) {
+                    if (depth > 15) return null;
+                    for (const el of root.querySelectorAll('*')) {
+                        if (fn(el)) return el;
+                        if (el.shadowRoot) {
+                            const found = deepFind(el.shadowRoot, fn, depth + 1);
+                            if (found) return found;
+                        }
+                    }
+                    return null;
+                }
+                // Native <button> whose innerHTML contains the three-dots SVG paths
+                let btn = deepFind(document, el => {
+                    if (!el.tagName || el.tagName.toLowerCase() !== 'button') return false;
+                    const html = el.innerHTML || '';
+                    return html.includes('M2,7') && html.includes('M9,7') && html.includes('M16,7');
+                }, 0);
+                if (btn) { btn.click(); return 'button-three-dots'; }
+
+                // Fallback: d2l-htmleditor-button with no cmd attr
+                const outer = deepFind(document, el =>
+                    el.tagName && el.tagName.toLowerCase() === 'd2l-htmleditor-button'
+                    && !el.getAttribute('cmd'), 0);
+                if (outer) {
+                    const inner = outer.shadowRoot && outer.shadowRoot.querySelector('button');
+                    if (inner) { inner.click(); return 'no-cmd-inner-button'; }
+                    outer.click();
+                    return 'no-cmd-button';
+                }
+                return null;
+            }""")
+            if expand_result:
+                self.log(f"  ✓ Overflow expanded ({expand_result})", "dim")
+                await page.wait_for_timeout(700)
+
+            src_frame, src_btn = await _find_locator_any_frame(
                 page,
                 'd2l-htmleditor-button[cmd="d2l-source-code"]',
                 retries=8,
@@ -351,8 +719,31 @@ class StyleMigrator:
                     await asyncio.sleep(0.5)
                 return
 
-            await src_btn.first.scroll_into_view_if_needed()
-            await src_btn.first.click()
+            # Click the native <button> inside the shadow DOM — bypasses the
+            # TinyMCE iframe that intercepts pointer events on the toolbar.
+            clicked = await src_frame.evaluate("""() => {
+                function deepFind(root, fn, depth) {
+                    if (depth > 15) return null;
+                    for (const el of root.querySelectorAll('*')) {
+                        if (fn(el)) return el;
+                        if (el.shadowRoot) {
+                            const found = deepFind(el.shadowRoot, fn, depth + 1);
+                            if (found) return found;
+                        }
+                    }
+                    return null;
+                }
+                const outer = deepFind(document, el =>
+                    el.getAttribute && el.getAttribute('cmd') === 'd2l-source-code', 0);
+                if (!outer) return false;
+                const inner = outer.shadowRoot && outer.shadowRoot.querySelector('button');
+                if (inner) { inner.click(); return true; }
+                outer.click();
+                return true;
+            }""")
+            if not clicked:
+                self.log("  JS click failed — falling back to dispatch_event", "dim")
+                await src_btn.first.dispatch_event('click')
             self.log("✓ Source Code dialog opened", "success")
 
             # ── Extract HTML ──────────────────────────────────────────────────
@@ -366,23 +757,63 @@ class StyleMigrator:
                     await asyncio.sleep(0.5)
                 return
 
-            # ── Print preview to log ───────────────────────────────────────────
+            # ── Scrape Moodle ─────────────────────────────────────────────────
             self.log("─" * 52, "dim")
-            self.log(f"Extracted HTML ({len(source_html):,} chars):", "info")
-            preview = source_html[:2000]
-            if len(source_html) > 2000:
-                preview += f"\n… (truncated, {len(source_html) - 2000:,} more chars)"
-            self.log(preview, "step")
+            moodle_html = await self._scrape_moodle(context)
+            if not moodle_html:
+                self.log("✗ Could not scrape Moodle page — aborting", "error")
+                if self.on_complete:
+                    self.on_complete()
+                while browser.is_connected():
+                    await asyncio.sleep(0.5)
+                return
+
+            # ── Gemini restyle ────────────────────────────────────────────────
             self.log("─" * 52, "dim")
-            self.log("✓ Step 1 complete — HTML extracted successfully.", "success")
-            self.log("  Browser left open. Close it when you are done.", "dim")
+            styled_html = await asyncio.to_thread(
+                self._call_gemini, source_html, moodle_html
+            )
+            if not styled_html:
+                self.log("✗ AI returned nothing — aborting", "error")
+                if self.on_complete:
+                    self.on_complete()
+                while browser.is_connected():
+                    await asyncio.sleep(0.5)
+                return
+
+            # ── Link fixer ────────────────────────────────────────────────────
+            self.log("─" * 52, "dim")
+            moodle_links = _find_moodle_links(styled_html)
+            if moodle_links:
+                self.log(
+                    f"⚠ Found {len(moodle_links)} Moodle link(s) — waiting for replacements…",
+                    "warning",
+                )
+                if self.on_links_found:
+                    replacements = await asyncio.to_thread(
+                        self.on_links_found, moodle_links
+                    )
+                    for old_url, new_url in (replacements or {}).items():
+                        if new_url and new_url.strip():
+                            styled_html = styled_html.replace(old_url, new_url.strip())
+                    self.log("✓ Links updated", "success")
+                else:
+                    self.log("⚠ No link handler — Moodle links left as-is", "warning")
+            else:
+                self.log("✓ No broken Moodle links found", "success")
+
+            # ── Save back ─────────────────────────────────────────────────────
+            self.log("─" * 52, "dim")
+            await self._replace_and_save(page, styled_html)
+
+            self.log("─" * 52, "dim")
+            self.log("✅ Migration complete! Close the browser when done.", "success")
             if self.on_complete:
                 self.on_complete()
-
             while browser.is_connected():
                 await asyncio.sleep(0.5)
-
             self.log("Browser closed.", "dim")
+            return
 
         except Exception as e:
             self.log(f"✗ Unexpected error: {e}", "error")
