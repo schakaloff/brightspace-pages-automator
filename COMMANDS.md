@@ -15,7 +15,7 @@ py gui.py
 ## Git — Step 0: Make sure you're in the right folder
 
 ```powershell
-cd "c:\Users\300353682\OneDrive - Okanagan College\Desktop\Quiz automator\brightspace-quiz-automator"
+cd brightspace-pages-automator
 ```
 > If you're one level up in `Quiz automator`, git commands will fail or affect the wrong files.
 
