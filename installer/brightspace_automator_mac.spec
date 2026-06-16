@@ -8,7 +8,7 @@ ROOT = Path(SPECPATH).parent
 
 SRC_MODULES = [
     "ai_styler", "automator", "browser", "config",
-    "style_migrator", "unit_collector", "chromium_setup",
+    "style_migrator", "unit_collector", "chromium_setup", "icon_art",
 ]
 
 collect_datas, collect_binaries, collect_hidden = [], [], []
@@ -58,7 +58,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="BrightspaceAutomator",
+    name="BrightspacePagesAutomator",
     debug=False,
     strip=False,
     upx=False,
@@ -71,12 +71,12 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name="BrightspaceAutomator",
+    name="BrightspacePagesAutomator",
 )
 
 app = BUNDLE(
     coll,
-    name="Brightspace Page Automator.app",
+    name="Brightspace Pages Automator.app",
     icon=str(ROOT / "assets" / "icon.icns"),
-    bundle_identifier="com.brightspaceautomator.app",
+    bundle_identifier="com.brightspacepagesautomator.app",
 )

@@ -38,7 +38,7 @@ Restore your renamed cache folder back afterward if you want to skip re-download
 python tools/build_icon.py
 ```
 Confirm `assets/icon.ico` and `assets/icon.icns` are written and visually match the
-in-app lightning-bolt icon (open them in any image viewer / icon previewer).
+in-app "BP" icon (open them in any image viewer / icon previewer).
 
 ## 4. Windows PyInstaller build
 
@@ -46,18 +46,18 @@ Requires Windows + `pip install pyinstaller`.
 
 ```
 pyinstaller installer/brightspace_automator.spec --noconfirm
-dist\BrightspaceAutomator\BrightspaceAutomator.exe
+dist\BrightspacePagesAutomator\BrightspacePagesAutomator.exe
 ```
 
 Checks:
 - App launches and renders with the dark customtkinter theme (not default Tk
   styling — if it looks unstyled, the `collect_all` step in the spec didn't pick up
   customtkinter's theme assets).
-- `dist\BrightspaceAutomator\templates\style_reference.html` exists on disk.
+- `dist\BrightspacePagesAutomator\templates\style_reference.html` exists on disk.
 - Run a job in each of the three tabs (Page Changer, Unit Collector, Style Migrator)
   and confirm the style reference loads correctly (proves `_resource_path` works
   in frozen mode).
-- Taskbar/title bar icon shows the lightning bolt.
+- Taskbar/title bar icon shows the "BP" monogram.
 
 ## 5. Windows installer (Inno Setup)
 
@@ -65,7 +65,7 @@ Install Inno Setup once: `choco install innosetup` (or download manually).
 
 ```
 "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=0.5.0 installer\windows.iss
-installer\output\BrightspaceAutomator-Setup-0.5.0.exe
+installer\output\BrightspacePagesAutomator-Setup-0.5.0.exe
 ```
 
 Checks:
@@ -79,7 +79,7 @@ Requires a Mac + `pip install pyinstaller`.
 
 ```
 pyinstaller installer/brightspace_automator_mac.spec --noconfirm
-open "dist/Brightspace Page Automator.app"
+open "dist/Brightspace Pages Automator.app"
 ```
 
 It's unsigned, so the first launch needs right-click → Open to bypass Gatekeeper.
@@ -87,10 +87,10 @@ Confirm it launches and the Dock/Finder icon looks correct.
 
 Then wrap and test the DMG:
 ```
-hdiutil create -volname "Brightspace Page Automator" \
-  -srcfolder "dist/Brightspace Page Automator.app" \
-  -ov -format UDZO BrightspaceAutomator-0.5.0.dmg
-open BrightspaceAutomator-0.5.0.dmg
+hdiutil create -volname "Brightspace Pages Automator" \
+  -srcfolder "dist/Brightspace Pages Automator.app" \
+  -ov -format UDZO BrightspacePagesAutomator-0.5.0.dmg
+open BrightspacePagesAutomator-0.5.0.dmg
 ```
 Confirm it mounts and drag-installing works.
 

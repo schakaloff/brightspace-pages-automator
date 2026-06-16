@@ -1,5 +1,5 @@
 """
-Brightspace Page Automator
+Brightspace Pages Automator
 GUI architecture reused from brightspace-quiz-automator/gui.py:
   same color palette, same worker-thread + queue + after() pattern.
 """
@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 import customtkinter as ctk
+from icon_art import draw_app_icon
 
 try:
     from CTkMessagebox import CTkMessagebox
@@ -136,7 +137,7 @@ def _log_append(box: ctk.CTkTextbox, text: str, tag: str = "info") -> None:
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Brightspace Page Automator")
+        self.title("Brightspace Pages Automator")
         self.geometry("900x800")
         self.minsize(700, 620)
         self.configure(fg_color=_BG)
@@ -173,15 +174,9 @@ class App(ctk.CTk):
 
     def _set_window_icon(self):
         try:
-            from PIL import Image, ImageDraw
+            from PIL import Image
             import io, tkinter as tk
-            size = 64
-            img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(img)
-            draw.ellipse([0, 0, size - 1, size - 1], fill="#0d9488")
-            # lightning bolt polygon
-            bolt = [(38, 6), (22, 34), (32, 34), (26, 58), (44, 28), (34, 28)]
-            draw.polygon(bolt, fill="#ffffff")
+            img = draw_app_icon(64)
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             buf.seek(0)

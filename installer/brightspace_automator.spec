@@ -8,7 +8,7 @@ ROOT = Path(SPECPATH).parent
 
 SRC_MODULES = [
     "ai_styler", "automator", "browser", "config",
-    "style_migrator", "unit_collector", "chromium_setup",
+    "style_migrator", "unit_collector", "chromium_setup", "icon_art",
 ]
 
 # customtkinter/CTkMessagebox ship theme JSON + image assets that PyInstaller's
@@ -62,7 +62,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="BrightspaceAutomator",
+    name="BrightspacePagesAutomator",
     debug=False,
     strip=False,
     upx=False,
@@ -76,5 +76,5 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name="BrightspaceAutomator",
+    name="BrightspacePagesAutomator",
 )
