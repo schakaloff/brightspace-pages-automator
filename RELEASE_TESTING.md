@@ -94,7 +94,34 @@ open BrightspacePagesAutomator-0.5.0.dmg
 ```
 Confirm it mounts and drag-installing works.
 
-## 7. CI workflow dry run (no release)
+## 7. Self-update check
+
+The update check only runs in frozen (installed) builds — `python gui.py` from
+source always skips it. To test it, you need two installed builds with
+different `BUILD_VERSION` tags and at least one real GitHub Release published.
+
+After your first real release exists:
+1. Build and install an *older* installer locally (e.g. checkout an earlier
+   commit, or just hand-edit a `BUILD_VERSION` file with an older tag before
+   running PyInstaller).
+2. Launch the installed app. Within a few seconds you should see an "Update
+   available" dialog showing the latest release's tag and its CHANGELOG.md
+   notes.
+3. Confirm "Skip this version" dismisses it and it doesn't reappear on next
+   launch (stored in `user_config.json` as `skipped_update_tag`).
+4. Confirm "Remind me later" dismisses it but it reappears next launch.
+5. Start a job in any tab, then click "Update Now" — confirm it refuses with
+   "Finish your current job before updating." instead of proceeding.
+6. With no job running, click "Update Now" — on Windows, confirm it downloads
+   the new installer, runs it silently, and the app closes itself; reopen from
+   the Start Menu shortcut afterward. On Mac, confirm it opens the release
+   page in your browser instead (no silent self-install there).
+
+Also remember: whenever you bump `VERSION` in `gui.py`, add a matching
+`## X.Y.Z` section to `CHANGELOG.md` — the release workflow pulls that section
+into both the GitHub Release notes and the in-app update dialog.
+
+## 8. CI workflow dry run (no release)
 
 Push to a throwaway branch with the workflow trigger temporarily widened to include
 it (edit `branches: [main, dev]` in `.github/workflows/release.yml` to add your
@@ -105,7 +132,7 @@ branch name), push, then check the Actions tab:
 
 Revert the trigger change before merging.
 
-## 8. `dev` branch build (still no release)
+## 9. `dev` branch build (still no release)
 
 Merge to `dev` and confirm in Actions that both build jobs run and artifacts are
 produced, but no GitHub Release is created.

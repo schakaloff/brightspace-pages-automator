@@ -31,6 +31,9 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt pyinstaller
+      - name: Write build version
+        shell: bash
+        run: echo "v${{ needs.get-version.outputs.version }}-${{ github.run_number }}" > BUILD_VERSION
       - run: pyinstaller installer/brightspace_automator.spec --noconfirm
       - name: Install Inno Setup
         run: choco install innosetup -y
@@ -50,6 +53,8 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt pyinstaller
+      - name: Write build version
+        run: echo "v${{ needs.get-version.outputs.version }}-${{ github.run_number }}" > BUILD_VERSION
       - run: pyinstaller installer/brightspace_automator_mac.spec --noconfirm
       - name: Wrap .app into a .dmg
         run: |
@@ -76,6 +81,20 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - name: Extract changelog entry
+        run: |
+          python3 - <<'EOF'
+          import re
+          version = "${{ needs.get-version.outputs.version }}"
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          m = re.search(
+              rf'^## {re.escape(version)}\s*\n(.*?)(?=\n## |\Z)',
+              text, re.S | re.M,
+          )
+          notes = m.group(1).strip() if m else "No changelog entry for this version."
+          open("release_notes.md", "w", encoding="utf-8").write(notes)
+          EOF
       - uses: actions/download-artifact@v4
         with:
           name: windows-installer
@@ -88,4 +107,5 @@ jobs:
         with:
           tag_name: v${{ needs.get-version.outputs.version }}-${{ github.run_number }}
           name: v${{ needs.get-version.outputs.version }}-${{ github.run_number }}
+          body_path: release_notes.md
           files: dist-artifacts/**

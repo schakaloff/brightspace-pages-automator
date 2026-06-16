@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 import customtkinter as ctk
 from icon_art import draw_app_icon
+from update_checker import check_for_update, download_asset
 
 try:
     from CTkMessagebox import CTkMessagebox
@@ -170,6 +171,11 @@ class App(ctk.CTk):
         self.after(200, self._chromium_poll)
         threading.Thread(target=self._chromium_check_worker, daemon=True).start()
 
+        self._update_dialog = None
+        self._update_queue = queue.Queue()
+        self.after(300, self._update_poll)
+        threading.Thread(target=self._update_check_worker, daemon=True).start()
+
     # ── Top-level UI ──────────────────────────────────────────────────────────
 
     def _set_window_icon(self):
@@ -248,6 +254,130 @@ class App(ctk.CTk):
         except queue.Empty:
             pass
         self.after(150, self._chromium_poll)
+
+    # ── Self-update check ────────────────────────────────────────────────────
+
+    def _any_job_running(self) -> bool:
+        for btn in (self._run_btn, self._col_run_btn, self._sm_run_btn, self._chk_run_btn):
+            if btn.cget("state") == "disabled":
+                return True
+        return False
+
+    def _persist_config(self) -> None:
+        self._save_config({
+            "automator_url":  self._url_entry.get().strip(),
+            "sm_bs_url":      self._sm_bs_entry.get().strip(),
+            "sm_moodle_url":  self._sm_moodle_entry.get().strip(),
+            "primary_color":  self._sm_color_entry.get().strip(),
+            "gemini_api_key": self._sm_key_entry.get().strip(),
+            "chk_bs_url":     self._chk_bs_entry.get().strip(),
+            "chk_moodle_url": self._chk_moodle_entry.get().strip(),
+        })
+
+    def _update_check_worker(self):
+        release = check_for_update()
+        if not release:
+            return
+        if self._load_config().get("skipped_update_tag") == release["tag"]:
+            return
+        self._update_queue.put(release)
+
+    def _update_poll(self):
+        try:
+            release = self._update_queue.get_nowait()
+            self._show_update_dialog(release)
+        except queue.Empty:
+            pass
+        self.after(2000, self._update_poll)
+
+    def _show_update_dialog(self, release: dict):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Update available")
+        dialog.geometry("520x420")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        dialog.configure(fg_color=_BG)
+        self._update_dialog = dialog
+
+        ctk.CTkLabel(
+            dialog, text=f"New version available: {release['tag']}",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(pady=(20, 8), padx=24, anchor="w")
+
+        notes_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        notes_frame.pack(fill="both", expand=True, padx=24, pady=(0, 12))
+        notes_box = _make_log_box(notes_frame)
+        notes_box.configure(state="normal")
+        notes_box._textbox.insert("end", release["body"])
+        notes_box.configure(state="disabled")
+
+        status_label = ctk.CTkLabel(dialog, text="", font=ctk.CTkFont(size=11), text_color=_TEXT_FAINT)
+        status_label.pack(padx=24, anchor="w")
+
+        btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_row.pack(fill="x", padx=24, pady=(0, 20))
+        btn_row.columnconfigure((0, 1, 2), weight=1)
+
+        def do_skip():
+            self._save_config({"skipped_update_tag": release["tag"]})
+            dialog.destroy()
+
+        def do_later():
+            dialog.destroy()
+
+        def do_update():
+            if self._any_job_running():
+                status_label.configure(
+                    text="⚠  Finish your current job before updating.", text_color=_TAG_COLORS["warning"]
+                )
+                return
+            update_btn.configure(state="disabled", text="Updating…")
+            skip_btn.configure(state="disabled")
+            later_btn.configure(state="disabled")
+            threading.Thread(target=self._run_update, args=(release, status_label), daemon=True).start()
+
+        skip_btn = ctk.CTkButton(btn_row, text="Skip this version", fg_color="transparent",
+                                  border_width=1, command=do_skip)
+        skip_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        later_btn = ctk.CTkButton(btn_row, text="Remind me later", fg_color="transparent",
+                                   border_width=1, command=do_later)
+        later_btn.grid(row=0, column=1, sticky="ew", padx=6)
+        update_btn = ctk.CTkButton(btn_row, text="Update Now", command=do_update)
+        update_btn.grid(row=0, column=2, sticky="ew", padx=(6, 0))
+
+        if not release.get("asset_url") and sys.platform == "win32":
+            update_btn.configure(state="disabled")
+            status_label.configure(text="No installer found in this release.")
+
+    def _run_update(self, release: dict, status_label) -> None:
+        import tempfile, webbrowser
+
+        def set_status(text):
+            self.after(0, lambda: status_label.configure(text=text))
+
+        if sys.platform != "win32" or not release.get("asset_url"):
+            webbrowser.open(release.get("html_url") or "")
+            self.after(0, lambda: self._update_dialog and self._update_dialog.destroy())
+            return
+
+        try:
+            set_status("Downloading update…")
+            tmp_dir = Path(tempfile.gettempdir())
+            installer_path = tmp_dir / release["asset_name"]
+            download_asset(
+                release["asset_url"], installer_path,
+                progress_cb=lambda pct: set_status(f"Downloading update… {pct}%"),
+            )
+            set_status("Installing…")
+            self.after(0, self._persist_config)
+            import subprocess
+            subprocess.Popen(
+                [str(installer_path), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+                close_fds=True,
+            )
+            self.after(0, self.destroy)
+        except Exception as e:
+            set_status(f"⚠  Update failed: {e}")
 
     def _build_ui(self):
         # ── App header bar ────────────────────────────────────────────────────
@@ -1206,15 +1336,7 @@ class App(ctk.CTk):
             print(f"[config] save failed: {e}", flush=True)
 
     def _on_close(self) -> None:
-        self._save_config({
-            "automator_url":  self._url_entry.get().strip(),
-            "sm_bs_url":      self._sm_bs_entry.get().strip(),
-            "sm_moodle_url":  self._sm_moodle_entry.get().strip(),
-            "primary_color":  self._sm_color_entry.get().strip(),
-            "gemini_api_key": self._sm_key_entry.get().strip(),
-            "chk_bs_url":     self._chk_bs_entry.get().strip(),
-            "chk_moodle_url": self._chk_moodle_entry.get().strip(),
-        })
+        self._persist_config()
         self.destroy()
 
 

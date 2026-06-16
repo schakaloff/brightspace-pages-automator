@@ -9,7 +9,15 @@ ROOT = Path(SPECPATH).parent
 SRC_MODULES = [
     "ai_styler", "automator", "browser", "config",
     "style_migrator", "unit_collector", "chromium_setup", "icon_art",
+    "update_checker",
 ]
+
+# CI writes BUILD_VERSION (the exact release tag) before invoking PyInstaller so
+# update_checker can compare its own build against the latest GitHub release.
+# Optional for local/manual builds — update_checker degrades gracefully if absent.
+extra_datas = []
+if (ROOT / "BUILD_VERSION").exists():
+    extra_datas.append((str(ROOT / "BUILD_VERSION"), "."))
 
 # customtkinter/CTkMessagebox ship theme JSON + image assets that PyInstaller's
 # default analysis won't discover — collect_all pulls in their datas/binaries too.
@@ -26,6 +34,7 @@ a = Analysis(
     binaries=collect_binaries,
     datas=[
         (str(ROOT / "templates" / "style_reference.html"), "templates"),
+        *extra_datas,
         *collect_datas,
     ],
     hiddenimports=[

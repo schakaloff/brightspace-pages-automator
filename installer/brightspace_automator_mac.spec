@@ -9,7 +9,12 @@ ROOT = Path(SPECPATH).parent
 SRC_MODULES = [
     "ai_styler", "automator", "browser", "config",
     "style_migrator", "unit_collector", "chromium_setup", "icon_art",
+    "update_checker",
 ]
+
+extra_datas = []
+if (ROOT / "BUILD_VERSION").exists():
+    extra_datas.append((str(ROOT / "BUILD_VERSION"), "."))
 
 collect_datas, collect_binaries, collect_hidden = [], [], []
 for pkg in ("customtkinter", "CTkMessagebox"):
@@ -24,6 +29,7 @@ a = Analysis(
     binaries=collect_binaries,
     datas=[
         (str(ROOT / "templates" / "style_reference.html"), "templates"),
+        *extra_datas,
         *collect_datas,
     ],
     hiddenimports=[
