@@ -1408,6 +1408,9 @@ class ContentChecker:
             # Stage 2: download all embedded files from Moodle
             await self._download_moodle_files(tab, items)
 
+            # H5P: enable download on each activity so files can be fetched
+            await self._enable_h5p_downloads(tab, items)
+
             await tab.close()
             n_items = sum(1 for i in items if i["type"] != "SECTION")
             n_sec   = sum(1 for i in items if i["type"] == "SECTION")
