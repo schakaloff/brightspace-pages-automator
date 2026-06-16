@@ -34,7 +34,7 @@ def _clean_html(html: str) -> str:
     return result.strip()
 
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
-_MODEL = "gemini-3.5-flash"
+_MODEL = "gemini-2.5-flash"
 _MAX_RETRIES = 3
 _RETRY_DELAY = 8  # seconds between retries on 503
 

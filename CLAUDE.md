@@ -113,7 +113,7 @@ All D2L components (`d2l-htmleditor-button`, `d2l-button-icon`, etc.) use shadow
 |---|---|---|
 | Style source | Theme prompt file (`prompts/<theme>.txt`) + `templates/style_reference.html` | Scraped from a Moodle URL in a new browser tab |
 | AI prompt | `ai_styler.py` per-theme prompt | `_MIGRATOR_PROMPT` in style_migrator.py |
-| Gemini model | gemini-3.5-flash | gemini-2.0-flash |
+| Gemini model | gemini-2.5-flash | gemini-2.0-flash |
 | Batch support | Yes — section URL scrapes all topics, user picks start + count | No — single page only |
 | After AI | Writes back + leaves browser open | Writes back + link fixer + clicks Save and Close |
 
