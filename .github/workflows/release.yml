@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    branches: [main, dev]
+
+jobs:
+  get-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: extract
+        run: |
+          python3 - <<'EOF'
+          import re, os
+          text = open("gui.py", encoding="utf-8").read()
+          m = re.search(r'VERSION\s*=\s*["\']([^"\']+)["\']', text)
+          version = m.group(1)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"version={version}\n")
+          EOF
+
+  build-windows:
+    needs: get-version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt pyinstaller
+      - run: pyinstaller installer/brightspace_automator.spec --noconfirm
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+      - run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ needs.get-version.outputs.version }} installer\windows.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: installer/output/BrightspaceAutomator-Setup-*.exe
+
+  build-mac:
+    needs: get-version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt pyinstaller
+      - run: pyinstaller installer/brightspace_automator_mac.spec --noconfirm
+      - name: Wrap .app into a .dmg
+        run: |
+          hdiutil create -volname "Brightspace Page Automator" \
+            -srcfolder "dist/Brightspace Page Automator.app" \
+            -ov -format UDZO \
+            "BrightspaceAutomator-${{ needs.get-version.outputs.version }}.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-dmg
+          path: BrightspaceAutomator-*.dmg
+
+  release:
+    needs: [get-version, build-windows, build-mac]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: dist-artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-dmg
+          path: dist-artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.get-version.outputs.version }}-${{ github.run_number }}
+          name: v${{ needs.get-version.outputs.version }}-${{ github.run_number }}
+          files: dist-artifacts/**

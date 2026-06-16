@@ -23,6 +23,15 @@ except ImportError:
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
+# ── Version ──────────────────────────────────────────────────────────────────
+VERSION = "0.5.0"  # bump manually per release; CI tag adds the leading "v"
+
+
+def _resource_path(*parts) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    return base.joinpath(*parts)
+
+
 # ── Config persistence ────────────────────────────────────────────────────────
 _CONFIG_PATH = Path.home() / ".local" / "share" / "BrightspaceAutomator" / "config.json"
 
@@ -127,6 +136,13 @@ class App(ctk.CTk):
         self.after(100, self._sm_poll_log)
         self.after(100, self._col_poll_log)
 
+        self._chromium_ready = False
+        self._chromium_dialog = None
+        self._chromium_dialog_log = None
+        self._chromium_queue = queue.Queue()
+        self.after(200, self._chromium_poll)
+        threading.Thread(target=self._chromium_check_worker, daemon=True).start()
+
     # ── Top-level UI ──────────────────────────────────────────────────────────
 
     def _set_window_icon(self):
@@ -149,6 +165,69 @@ class App(ctk.CTk):
         except Exception:
             pass
 
+    # ── Chromium first-run setup ─────────────────────────────────────────────
+
+    def _chromium_check_worker(self):
+        from chromium_setup import is_chromium_installed, install_chromium
+        if is_chromium_installed():
+            self._chromium_queue.put(("__READY__", None))
+            return
+        self._chromium_queue.put(("__NEED_INSTALL__", None))
+        ok, err = install_chromium(
+            progress_cb=lambda line: self._chromium_queue.put(("__PROGRESS__", line))
+        )
+        self._chromium_queue.put(("__INSTALL_DONE__", (ok, err)))
+
+    def _show_chromium_dialog(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Setting up browser engine")
+        dialog.geometry("480x320")
+        dialog.resizable(False, False)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)  # can't be cancelled mid-download
+        dialog.configure(fg_color=_BG)
+
+        ctk.CTkLabel(
+            dialog, text="Downloading browser engine (one-time setup)…",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).pack(pady=(20, 8), padx=24, anchor="w")
+
+        log_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        log_frame.pack(fill="both", expand=True, padx=24, pady=(0, 20))
+        log_box = _make_log_box(log_frame)
+
+        self._chromium_dialog = dialog
+        self._chromium_dialog_log = log_box
+
+    def _chromium_poll(self):
+        try:
+            while True:
+                kind, payload = self._chromium_queue.get_nowait()
+                if kind == "__READY__":
+                    self._chromium_ready = True
+                elif kind == "__NEED_INSTALL__":
+                    self._show_chromium_dialog()
+                elif kind == "__PROGRESS__":
+                    if self._chromium_dialog_log:
+                        _log_append(self._chromium_dialog_log, payload, "info")
+                elif kind == "__INSTALL_DONE__":
+                    ok, err = payload
+                    if self._chromium_dialog:
+                        self._chromium_dialog.destroy()
+                        self._chromium_dialog = None
+                        self._chromium_dialog_log = None
+                    if ok:
+                        self._chromium_ready = True
+                    elif CTkMessagebox:
+                        CTkMessagebox(
+                            title="Chromium setup failed",
+                            message=f"Could not download the browser engine:\n{err}\n\n"
+                                    "Check your internet connection and restart the app to retry.",
+                            icon="cancel",
+                        )
+        except queue.Empty:
+            pass
+        self.after(150, self._chromium_poll)
+
     def _build_ui(self):
         # ── App header bar ────────────────────────────────────────────────────
         hbar = ctk.CTkFrame(self, fg_color=_CARD, height=52, corner_radius=0)
@@ -165,7 +244,7 @@ class App(ctk.CTk):
         ).pack(side="left", pady=10)
 
         ctk.CTkLabel(
-            hbar, text="v0.5.0",
+            hbar, text=f"v{VERSION}",
             font=ctk.CTkFont(size=11), text_color=_TEXT_FAINT,
         ).pack(side="right", padx=18, pady=10)
 
@@ -269,6 +348,9 @@ class App(ctk.CTk):
         self._swatch_frames[name].configure(border_color="#ffffff")
 
     def _start_run(self):
+        if not self._chromium_ready:
+            _log_append(self._log_box, "⚠  Browser engine still installing… please wait.", "warning")
+            return
         url = self._url_entry.get().strip()
         if not url:
             _log_append(self._log_box, "⚠  Paste a Brightspace URL first.", "warning")
@@ -280,7 +362,7 @@ class App(ctk.CTk):
         except ImportError:
             gemini_api_key = ""
 
-        style_ref_path = Path(__file__).parent / "templates" / "style_reference.html"
+        style_ref_path = _resource_path("templates", "style_reference.html")
         try:
             style_reference_html = style_ref_path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -520,6 +602,9 @@ class App(ctk.CTk):
         self._col_swatch_frames[name].configure(border_color="#ffffff")
 
     def _col_start_run(self):
+        if not self._chromium_ready:
+            _log_append(self._col_log_box, "⚠  Browser engine still installing… please wait.", "warning")
+            return
         unit_url   = self._col_url_entry.get().strip()
         target_url = self._col_target_entry.get().strip()
         api_key    = self._col_key_entry.get().strip()
@@ -537,7 +622,7 @@ class App(ctk.CTk):
 
         theme_colors = PAGE_THEMES[self._selected_col_theme]
 
-        style_ref_path = Path(__file__).parent / "templates" / "style_reference.html"
+        style_ref_path = _resource_path("templates", "style_reference.html")
         try:
             style_reference_html = style_ref_path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -704,6 +789,9 @@ class App(ctk.CTk):
         self._sm_log_box = _make_log_box(body)
 
     def _sm_start_run(self):
+        if not self._chromium_ready:
+            _log_append(self._sm_log_box, "⚠  Browser engine still installing… please wait.", "warning")
+            return
         bs_url     = self._sm_bs_entry.get().strip()
         moodle_url = self._sm_moodle_entry.get().strip()
         color      = self._sm_color_entry.get().strip() or "#2D8CFF"
