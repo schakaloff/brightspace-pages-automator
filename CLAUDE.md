@@ -3,12 +3,39 @@
 ## What This Project Does
 
 Automates editing HTML content inside Brightspace (D2L) LMS pages using Playwright and Gemini AI.
-It has two tabs that will eventually work together:
+It has three active tabs:
 
-- **Automator tab** (friend's work) — navigates to a Brightspace page, clicks Options → Edit, opens the Source Code editor, runs Gemini AI to restyle the HTML using a reference style, and writes it back.
-- **Style Migrator tab** (your work) — same navigation flow, but pulls content from a Moodle page as the style reference instead of a manually pasted template. Sends both HTMLs to Gemini to produce a Moodle-styled Brightspace page.
+- **Page Changer tab** — navigates to a Brightspace section or single topic page, clicks Options → Edit, opens the Source Code editor, runs Gemini AI to restyle the HTML using a theme-based prompt, and writes it back. Supports batch processing across all topics in a section.
+- **Unit Collector tab** — scrapes all topic pages from a Brightspace unit and combines them into one collapsible HTML file, then writes it to a target blank page.
+- **Checker tab** — compares Brightspace course structure (via D2L API) against a Moodle course's item list, reporting exact/fuzzy/missing matches.
 
-**Future goal:** Combine both tabs so the Automator uses the Moodle-scraping pipeline from the Style Migrator to auto-generate style references, producing one unified AI prompt.
+---
+
+## Removed: Style Migrator Tab
+
+The **Style Migrator** tab was removed from the GUI in v0.6.0 to streamline the interface.
+The underlying code is **fully preserved** in `src/style_migrator.py` and is not deleted.
+
+### What it did
+- Took a Brightspace topic URL + a Moodle page URL.
+- Opened Brightspace → Options → Edit → Source Code, extracted the HTML.
+- Opened the Moodle URL in a new tab, waited for the user to confirm login, then scraped the main content.
+- Sent both HTMLs to Gemini 2.0 Flash to produce a Moodle-styled Brightspace page.
+- Detected broken Moodle links in the output and showed a link-fixer panel so the user could paste replacement Brightspace URLs before saving.
+- Wrote the styled HTML back and clicked Save and Close.
+
+### How to re-add it
+Wire `StyleMigrator` from `src/style_migrator.py` back into `gui.py` following the same
+worker-thread + queue pattern as the other tabs. Key pieces needed in `gui.py`:
+- `self._sm_log_queue = queue.Queue()`
+- `self._sm_link_response_queue = queue.Queue()`
+- `self._sm_link_entries = {}`
+- `self._sm_moodle_ready_event = None`
+- `self.after(100, self._sm_poll_log)` in `__init__`
+- Add `self._sm_run_btn` to `_any_job_running()`
+- Add `sm_bs_url`, `sm_moodle_url`, `primary_color`, `gemini_api_key` back to `_persist_config()`
+- Restore `_build_style_migrator_tab`, `_sm_start_run`, `_sm_poll_log`, `_build_link_panel`,
+  `_show_link_fixer`, `_hide_link_fixer`, `_apply_links`, `_sm_moodle_ready` methods
 
 ---
 
@@ -16,11 +43,13 @@ It has two tabs that will eventually work together:
 
 ```
 run.bat                  Entry point — activates venv, runs gui.py directly
-gui.py                   CustomTkinter GUI with two tabs; spawns worker threads
+gui.py                   CustomTkinter GUI with three tabs; spawns worker threads
 src/
-  automator.py           Automator tab logic (PageAutomator class)
-  style_migrator.py      Style Migrator tab logic (StyleMigrator class)
-  ai_styler.py           Shared Gemini helper used by automator tab
+  automator.py           Page Changer tab logic (PageAutomator class)
+  unit_collector.py      Unit Collector tab logic (UnitCollector class)
+  content_checker.py     Checker tab logic (ContentChecker class)
+  style_migrator.py      PRESERVED — Style Migrator logic (StyleMigrator class, not in GUI)
+  ai_styler.py           Shared Gemini helper used by Page Changer tab
   browser.py             Shared Playwright launch + login wait loop
   config.py              Shared constants (session file path etc.)
   api_config.py          API config helpers
@@ -28,7 +57,7 @@ src/
 ```
 
 ### Shared browser session
-Both tabs call `browser.launch_browser()` + `wait_for_login()` from `browser.py`. Session cookies are saved to a shared file so login only happens once per machine restart.
+All tabs call `browser.launch_browser()` + `wait_for_login()` from `browser.py`. Session cookies are saved to a shared file so login only happens once per machine restart.
 
 ### Module reload fix
 `gui.py` does `sys.modules.pop('automator', None)` before every import so live edits to `automator.py` take effect without restarting the app.
@@ -56,7 +85,7 @@ All D2L components (`d2l-htmleditor-button`, `d2l-button-icon`, etc.) use shadow
 
 ---
 
-## Navigation Flow (both tabs)
+## Navigation Flow (Page Changer & Style Migrator)
 
 ```
 1. goto(url)
@@ -69,9 +98,9 @@ All D2L components (`d2l-htmleditor-button`, `d2l-button-icon`, etc.) use shadow
 8. JS: click three-dots overflow button (if present)
 9. _find_locator_any_frame('d2l-htmleditor-button[cmd="d2l-source-code"]')
 10. JS shadow DOM click on inner <button>  → Source Code dialog opens
-11. Extract HTML from textarea (shadow DOM aware JS)
+11. Extract HTML from CodeMirror editor (shadow DOM aware JS)
 12. [tab-specific AI call]
-13. Write new HTML back to textarea via JS native setter + dispatch events
+13. Write new HTML back via JS (CM6 view dispatch or execCommand fallback)
 14. Click OK/Update in dialog
 15. Click Save and Close on edit page
 ```
@@ -80,12 +109,13 @@ All D2L components (`d2l-htmleditor-button`, `d2l-button-icon`, etc.) use shadow
 
 ## Tab Differences
 
-| Step | Automator tab | Style Migrator tab |
+| Step | Page Changer tab | Style Migrator (preserved, not in GUI) |
 |---|---|---|
-| Style source | Manually pasted HTML template in GUI | Scraped from a Moodle URL in a new browser tab |
-| AI prompt | `ai_styler.py` PROMPT_TEMPLATE | `_MIGRATOR_PROMPT` in style_migrator.py |
-| Gemini model | gemini-2.0-flash | gemini-2.0-flash |
-| After AI | Writes back + leaves browser open | Writes back + clicks Save and Close |
+| Style source | Theme prompt file (`prompts/<theme>.txt`) + `templates/style_reference.html` | Scraped from a Moodle URL in a new browser tab |
+| AI prompt | `ai_styler.py` per-theme prompt | `_MIGRATOR_PROMPT` in style_migrator.py |
+| Gemini model | gemini-3.5-flash | gemini-2.0-flash |
+| Batch support | Yes — section URL scrapes all topics, user picks start + count | No — single page only |
+| After AI | Writes back + leaves browser open | Writes back + link fixer + clicks Save and Close |
 
 ---
 
@@ -95,30 +125,25 @@ All D2L components (`d2l-htmleditor-button`, `d2l-button-icon`, etc.) use shadow
 |---|---|---|
 | `main` | shared | stable releases |
 | `dev` | shared | integration branch |
-| `feature/source-code-button-fix` | you | shadow DOM click fix, style migrator fixes |
-| friend's branch | friend | automator tab improvements |
-
-**Workflow:** both feature branches → PR into `dev` → test → PR into `main`.
 
 ---
 
-## What's Been Fixed (your branch)
+## What's Been Fixed
 
 - `src/automator.py` — overflow expand + JS shadow DOM click for Source Code button
-- `src/style_migrator.py` — same fixes; also where the actual bug was (user was on this tab)
+- `src/style_migrator.py` — same fixes; CodeMirror 6 extraction via `.cm-content` traversal
 - `gui.py` — `sys.modules.pop('automator', None)` before each worker import so code changes take effect without app restart
 - Options button retries increased to 15 × 1s + 3s initial wait for slow page loads
-- `.env` — Gemini API key updated
+- Style Migrator tab removed from GUI in v0.6.0 (code preserved in `src/style_migrator.py`)
 
 ---
 
 ## What Still Needs Work
 
-- [ ] Confirm Source Code dialog actually opens end-to-end (still testing)
-- [ ] Verify HTML extraction from the dialog textarea works after the JS click
-- [ ] Verify AI-restyled HTML writes back correctly and Save and Close succeeds
-- [ ] **Combine the two tabs** — Automator should accept a Moodle URL as an optional style source and use the Style Migrator scraping pipeline instead of a manual paste
-- [ ] Clean up diagnostic/debug logging added during the click debugging (the `print("automator.py v4 loaded")` line etc.)
+- [ ] Confirm Source Code dialog open → extract → AI restyle → write-back → Save flow works end-to-end
+- [ ] Verify Unit Collector batch flow works end-to-end
+- [ ] Verify Checker comparison output is accurate for real courses
+- [ ] Clean up diagnostic/debug logging in `automator.py` if any remains
 - [ ] Add `__pycache__/` to `.gitignore` so compiled bytecode is never committed
 
 ---
@@ -131,8 +156,9 @@ All D2L components (`d2l-htmleditor-button`, `d2l-button-icon`, etc.) use shadow
 
 - First run installs the venv, dependencies, and Playwright Chromium automatically.
 - Login happens once; session is saved and reused.
-- Use **Style Migrator** tab for Moodle→Brightspace restyling.
-- Use **Automator** tab for applying a custom HTML template style.
+- Use **Page Changer** tab for AI-restyling one or more Brightspace pages.
+- Use **Unit Collector** tab to combine a full unit into one collapsible page.
+- Use **Checker** tab to verify Moodle → Brightspace migration completeness.
 
 ## Environment
 
