@@ -1,0 +1,56 @@
+H5P Download Process (recorded from teacher walkthrough)
+=========================================================
+
+Must be done one-by-one per H5P activity. Requires teacher/admin access.
+
+STEP 1 — Navigate to the H5P activity URL (from the course item list)
+
+STEP 2 — Click "Settings" in the activity navigation menu
+  Selector: a[href*="modedit.php?update="]
+
+STEP 3 — On the settings page, ensure "Display Options" section is expanded
+  Toggle selector: #collapseElement-0
+  Check aria-expanded="true" — if "false", click to expand
+
+STEP 4 — Find "Allow download" checkbox (#id_export)
+  If not checked → check it
+  If already checked → leave it, nothing to do
+
+STEP 5 — Click "Save and display" (NOT "Save and return to course")
+  Selector: #id_submitbutton
+  → Redirects back to the H5P activity page with action bar now visible
+
+STEP 6 — Click the "Reuse" button in the H5P action bar
+  The button is INSIDE an H5P iframe — must access frame context
+  Selector (inside iframe): li.h5p-export button
+  → Opens a dialog: "Reuse Content"
+
+STEP 7 — In the dialog, click "Download as an .h5p file"
+  Selector (inside iframe): .h5p-download-button
+  → Triggers file download of the .h5p package
+
+Downloaded files are saved to: downloads/h5p/<activity-name>.h5p
+
+---
+
+After download: log which files were downloaded before proceeding to next H5P.
+Files saved to: downloads/h5p/<activity-name>.h5p
+Run log saved to: logs/YYYY-MM-DD.txt (new file each day, appends if same day)
+Log file contains: date, course name, list of downloaded files, any failures.
+
+---
+
+BRIGHTSPACE SIDE
+
+STEP 8 — Open Brightspace content page, navigate to the matching section
+  Find and click "Create New" button (may be inside a shadow DOM / different frame)
+  Selector: d2l-button.create-new-btn  (shadow DOM — use JS click on inner button)
+
+STEP 9 — On the Create New panel, click the "Page" icon (TBD — need HTML)
+  → Creates a new empty page in that section
+  → This is where we will upload/embed the H5P file
+
+BRIGHTSPACE UPLOAD (TBD — stopping here for today)
+  Waiting on: what the "Create New → Page" flow looks like (need HTML snippets)
+  Decision made: each H5P gets its own page in the matched Brightspace section
+  Unmatched sections → popup at end of run + written to logs/YYYY-MM-DD.txt

@@ -81,12 +81,50 @@ Note: label names come from the first link inside the label body, not the sectio
 - Each upload returns a Brightspace file URL
 - Build map: `moodle_url → brightspace_url`
 
+## H5P → Brightspace placement
+
+Each H5P activity gets its own page created in Brightspace (not embedded inline).
+
+**Matched sections (auto):**
+- Use the Moodle section → Brightspace module map already built by the Content Checker comparison
+- Create a Brightspace page in the matched module, upload the .h5p file
+
+**Unmatched sections (manual fallback):**
+- If fuzzy match fails for a section, do NOT skip — flag it
+- At end of run: show a popup listing all unmatched H5P items + which section they came from
+- Also write to a persistent log file: `logs/YYYY-MM-DD_<course-name>_unmatched.txt`
+- Log persists until the next run for that course (next run overwrites it)
+- This way if user closes the app the info isn't lost
+
+---
+
 ## Stage 4 — Re-linking report
 - Use Moodle section → Brightspace module mapping from Content Checker comparison
 - For each file: show which Brightspace module it belongs in + new URL
 - For Kaltura: show entryId + which section it was in
 - For H5P: list separately with "needs manual upload by educator"
 - For external tools: already handled by existing external tools report
+
+---
+
+## Hybrid approach (backup plan for HTML generation)
+
+Instead of sending full course pages to Gemini, use a two-layer approach:
+
+**Layer 1 — Rules (free, instant):** Handle everything at the Moodle structure level
+- Sections, standalone FILE resources, quizzes, external tools, forums
+- These are always the same across all courses (`modtype_*` classes never change)
+
+**Layer 2 — Gemini (cheap fallback):** Handle only the label body HTML
+- Send one small label chunk at a time, not the whole page
+- Provide one example label from the same course as style reference
+- Gemini matches that style for the rest of the labels in that course
+- Massively fewer tokens vs current approach; less likely to 503
+
+**Why not fine-tune our own model:**
+- Needs 50-100 example pairs, GPU hardware, hours of training
+- Overkill — the problem is a template problem, not an intelligence problem
+- Rule-based + prompt is faster, cheaper, and just as consistent
 
 ---
 

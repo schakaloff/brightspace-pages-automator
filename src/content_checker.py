@@ -13,8 +13,10 @@ Testable modes:
 import asyncio
 import difflib
 import html as html_module
+import os
 import re
 import threading
+from pathlib import Path
 from typing import Callable, List, Optional
 
 from playwright.async_api import BrowserContext, Page
@@ -769,6 +771,9 @@ class ContentChecker:
             embedded = await self._scan_moodle_page_bodies(tab, items)
             items = items + inline_embedded + embedded
 
+            # H5P: enable download on each activity so files can be fetched
+            await self._enable_h5p_downloads(tab, items)
+
             await tab.close()
             n_items = sum(1 for i in items if i["type"] != "SECTION")
             n_sec   = sum(1 for i in items if i["type"] == "SECTION")
@@ -782,6 +787,118 @@ class ContentChecker:
             except Exception:
                 pass
             return None
+
+    async def _enable_h5p_downloads(self, tab, items: list) -> None:
+        """
+        For each H5P activity: open Settings, tick Allow download, Save and display.
+        This must run before tab.close() so the session is still authenticated.
+        """
+        h5p_items = [
+            i for i in items
+            if i.get("type") == "EXTERNAL"
+            and ("hvp" in i.get("hint", "") or "h5p" in i.get("hint", ""))
+            and i.get("href")
+        ]
+
+        if not h5p_items:
+            return
+
+        self.log("", "dim")
+        self.log("─" * 52, "dim")
+        self.log(f"🎮 H5P activities found: {len(h5p_items)}", "step")
+        self.log("  Enabling download on each…", "dim")
+
+        success = 0
+        for idx, item in enumerate(h5p_items, 1):
+            name = item["name"]
+            url  = item["href"]
+            self.log(f"  [{idx}/{len(h5p_items)}] {name}", "info")
+            try:
+                # Step 1: navigate to H5P activity
+                await tab.goto(url, wait_until="domcontentloaded", timeout=20000)
+                await tab.wait_for_timeout(1000)
+
+                # Step 2: click Settings
+                settings = tab.locator('a[href*="modedit.php?update="]')
+                if await settings.count() == 0:
+                    self.log(f"    ⚠ No Settings link — check teacher access", "warning")
+                    continue
+                await settings.first.click()
+                await tab.wait_for_load_state("domcontentloaded", timeout=15000)
+                await tab.wait_for_timeout(800)
+
+                # Step 3: expand Display Options if collapsed
+                toggle = tab.locator('#collapseElement-0')
+                if await toggle.count() > 0:
+                    expanded = await toggle.first.get_attribute("aria-expanded")
+                    if expanded == "false":
+                        await toggle.first.click()
+                        await tab.wait_for_timeout(400)
+
+                # Step 4: check Allow download if not already checked
+                checkbox = tab.locator('#id_export')
+                if await checkbox.count() == 0:
+                    self.log(f"    ⚠ Allow download checkbox not found", "warning")
+                    continue
+                if not await checkbox.first.is_checked():
+                    await checkbox.first.check()
+                    self.log(f"    ✓ Download enabled", "success")
+                else:
+                    self.log(f"    ✓ Already enabled", "dim")
+
+                # Step 5: Save and display
+                await tab.locator('#id_submitbutton').click()
+                await tab.wait_for_load_state("domcontentloaded", timeout=15000)
+                await tab.wait_for_timeout(2000)  # wait for H5P iframe to fully render
+
+                # Step 6: click Reuse button inside the H5P iframe
+                reuse_clicked = False
+                for frame in tab.frames:
+                    try:
+                        reuse_btn = frame.locator('li.h5p-export button')
+                        if await reuse_btn.count() > 0:
+                            await reuse_btn.first.click()
+                            reuse_clicked = True
+                            break
+                    except Exception:
+                        pass
+
+                if not reuse_clicked:
+                    self.log(f"    ⚠ Reuse button not found in any frame", "warning")
+                    continue
+
+                await tab.wait_for_timeout(800)
+
+                # Step 7: click "Download as an .h5p file" in the dialog
+                save_dir = Path(__file__).parent.parent / "downloads" / "h5p"
+                save_dir.mkdir(parents=True, exist_ok=True)
+                safe_name = re.sub(r'[^\w\s\-]', '', name).strip()[:80]
+                save_path = save_dir / f"{safe_name}.h5p"
+
+                try:
+                    async with tab.expect_download(timeout=15000) as dl_info:
+                        for frame in tab.frames:
+                            try:
+                                dl_btn = frame.locator('.h5p-download-button')
+                                if await dl_btn.count() > 0:
+                                    await dl_btn.first.click()
+                                    break
+                            except Exception:
+                                pass
+                    download = await dl_info.value
+                    await download.save_as(str(save_path))
+                    self.log(f"    💾 Saved: {safe_name}.h5p", "success")
+                    success += 1
+                except Exception as e:
+                    self.log(f"    ✗ Download failed: {e}", "error")
+
+            except Exception as e:
+                self.log(f"    ✗ Failed: {e}", "error")
+
+        self.log("", "dim")
+        self.log(f"  H5P: {success}/{len(h5p_items)} downloaded", "success")
+        if success > 0:
+            self.log(f"  Saved to: downloads/h5p/", "dim")
 
     async def _scan_moodle_labels_inline(self, tab, items: list) -> list:
         """
