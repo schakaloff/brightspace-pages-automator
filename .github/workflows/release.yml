@@ -53,10 +53,17 @@ jobs:
       - run: pyinstaller installer/brightspace_automator_mac.spec --noconfirm
       - name: Wrap .app into a .dmg
         run: |
-          hdiutil create -volname "Brightspace Page Automator" \
-            -srcfolder "dist/Brightspace Page Automator.app" \
-            -ov -format UDZO \
-            "BrightspaceAutomator-${{ needs.get-version.outputs.version }}.dmg"
+          # hdiutil intermittently fails with "Resource busy" right after PyInstaller's
+          # ad-hoc code-signing step on GitHub's macOS runners — retry a few times.
+          for i in 1 2 3 4 5; do
+            hdiutil create -volname "Brightspace Page Automator" \
+              -srcfolder "dist/Brightspace Page Automator.app" \
+              -ov -format UDZO \
+              "BrightspaceAutomator-${{ needs.get-version.outputs.version }}.dmg" && break
+            echo "hdiutil failed (attempt $i), retrying in 5s..."
+            sleep 5
+          done
+          test -f "BrightspaceAutomator-${{ needs.get-version.outputs.version }}.dmg"
       - uses: actions/upload-artifact@v4
         with:
           name: mac-dmg
