@@ -1219,6 +1219,6 @@ class App(ctk.CTk):
 
 
 if __name__ == "__main__":
-    if sys.platform == "win32":
+    if sys.platform == "win32" and sys.stdout is not None:
         sys.stdout.reconfigure(encoding="utf-8")
     App().mainloop()
