@@ -680,6 +680,9 @@ class ContentChecker:
         course_id: str,
         files: list,
     ) -> None:
+        from collections import defaultdict
+        from urllib.parse import urlparse
+
         # Per-course subfolder so re-runs and multiple courses stay separate
         save_dir = Path("downloads") / "files" / course_id
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -688,28 +691,22 @@ class ContentChecker:
         self.log(f"📥 Downloading {len(files)} file(s) from Moodle…", "step")
         self.log(f"   Saving to: downloads/files/{course_id}/", "dim")
 
-        ok_count = fail_count = 0
+        # ── Phase 1: download all files ────────────────────────────────────────
+        # Download tabs are completely separate from the Brightspace page so a
+        # crashed/closed Moodle tab can never affect the BS upload later.
+        downloaded: list = []   # list of (local_path, file_info_dict)
         for idx, f in enumerate(files, 1):
-            name      = f["name"]
-            href      = f["href"]
-            mod_id    = f.get("bs_module_id")
-            mod_title = f.get("bs_module_title") or f.get("section", "?")
-
+            name  = f["name"]
+            href  = f["href"]
             self.log(f"  [{idx}/{len(files)}] {name}", "info")
             tab = await context.new_page()
             try:
-                # Phase 1: navigate to view.php to discover what we get.
-                # Sometimes it redirects directly to the file (download fires).
-                # Sometimes it shows an intermediate "Click here" HTML page.
                 try:
                     await tab.goto(href, wait_until="domcontentloaded", timeout=20000)
                 except Exception:
-                    pass  # navigation may "fail" when it triggers a download
+                    pass
                 await tab.wait_for_timeout(300)
 
-                # Resolve the actual download URL from the intermediate page.
-                # Prefer the resourceworkaround link; fall back to any pluginfile link;
-                # fall back to retrying the original view.php URL with expect_download.
                 dl_href = href
                 wk = tab.locator('.resourceworkaround a[href*="pluginfile.php"]')
                 if await wk.count() > 0:
@@ -723,18 +720,16 @@ class ContentChecker:
                         dl_href = await any_pf.first.get_attribute("href")
                         self.log(f"    → Found pluginfile link on page", "dim")
 
-                # Phase 2: navigate to the resolved URL and catch the download.
-                # Append ?forcedownload=1 to pluginfile URLs so Moodle sends
-                # Content-Disposition: attachment instead of opening inline in Chrome.
                 if "pluginfile.php" in dl_href and "forcedownload" not in dl_href:
                     dl_href += ("&" if "?" in dl_href else "?") + "forcedownload=1"
+
                 async with tab.expect_download(timeout=30000) as dl_info:
                     try:
                         await tab.goto(dl_href, wait_until="domcontentloaded", timeout=20000)
                     except Exception as _nav_err:
                         if "Download is starting" not in str(_nav_err):
-                            raise  # real navigation error — re-raise
-                        # Otherwise the download already started — fall through to dl_info.value
+                            raise
+
                 dl       = await dl_info.value
                 filename = dl.suggested_filename
                 local    = save_dir / filename
@@ -745,37 +740,213 @@ class ContentChecker:
                     await dl.save_as(str(local))
                     self.log(f"    ✓ Downloaded: {filename}", "success")
 
-                bs_url = await self._upload_file_to_brightspace(bs_page, course_id, local)
-                if not bs_url:
-                    fail_count += 1
-                    continue
-
-                if mod_id:
-                    created = await self._create_bs_file_topic(
-                        bs_page, course_id, mod_id, name, bs_url
-                    )
-                    if created:
-                        self.log(f"    ✓ Topic created in BS › {mod_title}", "success")
-                    else:
-                        self.log(
-                            f"    ⚠ File uploaded — add topic manually in: {mod_title}", "warning"
-                        )
-                else:
-                    self.log(
-                        f"    ⚠ No BS module match — file saved to downloads/files/{course_id}/",
-                        "warning",
-                    )
-                ok_count += 1
+                downloaded.append((local, f))
             except Exception as e:
                 self.log(f"    ✗ {e}", "error")
-                fail_count += 1
             finally:
                 try:
                     await tab.close()
                 except Exception:
                     pass
 
-        self.log(f"📥 Done: {ok_count} uploaded, {fail_count} failed", "step")
+        if not downloaded:
+            self.log("  ↷ Nothing downloaded.", "dim")
+            return
+
+        # ── Phase 2: upload to Brightspace via browser UI ──────────────────────
+        self.log(f"", "dim")
+        self.log(f"⬆ Uploading {len(downloaded)} file(s) to Brightspace…", "step")
+
+        # Extract BS domain (e.g. https://learn.okanagancollege.ca)
+        parsed   = urlparse(self.bs_url)
+        bs_base  = f"{parsed.scheme}://{parsed.netloc}"
+
+        # Group files by module so we open one BS tab per module
+        by_module: dict = defaultdict(list)
+        no_module: list = []
+        for local, fi in downloaded:
+            mod_id = fi.get("bs_module_id")
+            if mod_id:
+                by_module[mod_id].append((local, fi))
+            else:
+                no_module.append((local, fi))
+
+        ok_count = fail_count = 0
+
+        for mod_id, items in by_module.items():
+            mod_title  = items[0][1].get("bs_module_title", "?")
+            file_paths = [local for local, _ in items]
+            names      = [fi["name"] for _, fi in items]
+            self.log(f"  📁 {mod_title} ({len(items)} file(s))", "info")
+            ok = await self._upload_files_to_bs_module_ui(
+                context, bs_base, course_id, mod_id, mod_title, file_paths
+            )
+            if ok:
+                for n in names:
+                    self.log(f"    ✓ {n}", "success")
+                ok_count += len(items)
+            else:
+                for local, fi in items:
+                    self.log(f"    ⚠ {fi['name']} — saved locally: {local.name}", "warning")
+                fail_count += len(items)
+
+        for local, fi in no_module:
+            self.log(f"  ⚠ {fi['name']} — no BS module match, saved to downloads/", "warning")
+            fail_count += 1
+
+        self.log(f"⬆ Done: {ok_count} uploaded, {fail_count} failed", "step")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    _DEEP_FIND_JS = """
+    function deepFind(root, fn, depth) {
+        depth = depth === undefined ? 8 : depth;
+        if (!root || depth <= 0) return null;
+        var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (var i = 0; i < all.length; i++) {
+            var el = all[i];
+            if (fn(el)) return el;
+            if (el.shadowRoot) {
+                var found = deepFind(el.shadowRoot, fn, depth - 1);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+    """
+
+    async def _upload_files_to_bs_module_ui(
+        self,
+        context: "BrowserContext",
+        bs_base: str,
+        course_id: str,
+        module_id,
+        module_title: str,
+        file_paths: list,
+    ) -> bool:
+        """
+        Upload one or more local files to a Brightspace module using browser UI.
+        Opens a fresh tab → navigates to course content → finds the module →
+        clicks New/Upload → sets files via the OS file chooser.
+        Returns True if the upload appeared to succeed.
+        """
+        tab = await context.new_page()
+        try:
+            content_url = f"{bs_base}/d2l/le/content/{course_id}/Home"
+            await tab.goto(content_url, wait_until="domcontentloaded", timeout=30000)
+            await tab.wait_for_timeout(2000)
+
+            # ── Step 1: scroll to / activate the target module ──────────────
+            # D2L renders all modules on one page; clicking a module heading in
+            # the TOC brings it into focus and reveals its action buttons.
+            df = self._DEEP_FIND_JS
+            clicked_mod = await tab.evaluate(f"""(moduleId) => {{
+                {df}
+                var el = deepFind(document, function(e) {{
+                    var href = e.getAttribute && e.getAttribute('href') || '';
+                    return href.includes('/' + moduleId + '/') || href.endsWith('/' + moduleId);
+                }});
+                if (el) {{ el.click(); return true; }}
+                return false;
+            }}""", str(module_id))
+
+            if clicked_mod:
+                await tab.wait_for_timeout(1000)
+
+            # ── Step 2: click "New" / "Upload/Create" button ─────────────────
+            # OC Brightspace content page shows a "New" button per module; in
+            # some D2L versions it may say "Upload/Create" or "Add Activities".
+            new_clicked = await tab.evaluate(f"""() => {{
+                {df}
+                var btn = deepFind(document, function(e) {{
+                    var tag  = e.tagName  && e.tagName.toUpperCase();
+                    var txt  = (e.textContent || '').trim().toLowerCase();
+                    var aria = (e.getAttribute && e.getAttribute('aria-label') || '').toLowerCase();
+                    return (tag === 'BUTTON' || tag === 'D2L-BUTTON')
+                        && (txt === 'new' || txt.includes('upload') || txt.includes('add activities')
+                            || aria.includes('upload') || aria === 'new');
+                }});
+                if (btn) {{ btn.click(); return true; }}
+                return false;
+            }}""")
+
+            if not new_clicked:
+                self.log(f"    ✗ Could not find New/Upload button — share the module HTML to fix", "error")
+                return False
+
+            await tab.wait_for_timeout(800)
+
+            # ── Step 3: click "Upload Files" in the dropdown/panel ────────────
+            upload_clicked = await tab.evaluate(f"""() => {{
+                {df}
+                var el = deepFind(document, function(e) {{
+                    var txt = (e.textContent || '').trim();
+                    return txt === 'Upload Files' || txt === 'Upload / Create'
+                        || txt === 'Upload/Create' || txt.toLowerCase().startsWith('upload file');
+                }});
+                if (el) {{ el.click(); return true; }}
+                return false;
+            }}""")
+
+            if not upload_clicked:
+                self.log(f"    ✗ Could not find 'Upload Files' option — share the dropdown HTML", "error")
+                return False
+
+            await tab.wait_for_timeout(1000)
+
+            # ── Step 4: catch file chooser and set all files at once ──────────
+            try:
+                async with tab.expect_file_chooser(timeout=6000) as fc_info:
+                    # D2L file upload dialogs hide a real <input type="file"> somewhere.
+                    # Clicking it (even if display:none) triggers the file chooser event.
+                    await tab.evaluate(f"""() => {{
+                        {df}
+                        var inp = deepFind(document, function(e) {{
+                            return e.tagName === 'INPUT' && e.type === 'file';
+                        }});
+                        if (inp) {{ inp.click(); return; }}
+                        // Fallback: click a visible Browse / My Computer button
+                        var btn = deepFind(document, function(e) {{
+                            if (e.tagName !== 'BUTTON' && e.tagName !== 'A') return false;
+                            var txt = (e.textContent || e.getAttribute('aria-label') || '').toLowerCase();
+                            return txt.includes('browse') || txt.includes('my computer')
+                                || txt.includes('choose file') || txt.includes('add file');
+                        }});
+                        if (btn) btn.click();
+                    }}""")
+
+                fc = await fc_info.value
+                await fc.set_files([str(p) for p in file_paths])
+            except Exception as fc_err:
+                self.log(f"    ✗ File chooser not triggered: {fc_err}", "error")
+                self.log(f"      Navigate to this module in Brightspace and share the upload dialog HTML", "dim")
+                return False
+
+            await tab.wait_for_timeout(1500)
+
+            # ── Step 5: confirm / click Add / Upload / Save ───────────────────
+            await tab.evaluate(f"""() => {{
+                {df}
+                var btn = deepFind(document, function(e) {{
+                    if (e.tagName !== 'BUTTON') return false;
+                    var txt = (e.textContent || '').trim().toLowerCase();
+                    return txt === 'add' || txt === 'upload' || txt === 'save'
+                        || txt === 'done' || txt === 'add files' || txt === 'add content';
+                }});
+                if (btn) btn.click();
+            }}""")
+
+            # Wait for D2L to process the upload (large files may take a few seconds)
+            await tab.wait_for_timeout(4000)
+            return True
+
+        except Exception as e:
+            self.log(f"    ✗ Browser UI upload error: {e}", "error")
+            return False
+        finally:
+            try:
+                await tab.close()
+            except Exception:
+                pass
 
     async def _create_bs_file_topic(
         self, bs_page: "Page", course_id: str, module_id, title: str, file_url: str
