@@ -160,3 +160,14 @@ Filip is building a tab that:
 - 56 embedded files found across 27 sections
 - Confirmed: external URLs are intentionally not captured
 - **Next:** Stage 2 — download files from Moodle using authenticated session
+
+### 2026-06-16
+- Style Preview tab fully implemented and pushed to origin/nick
+  - `src/page_previewer.py`: PagePreviewer class — navigates to Brightspace
+    topic in view mode, extracts source HTML via Options → Edit → Source Code,
+    sends to Gemini for restyling, injects styled HTML into live page DOM,
+    blocks on user action (Apply / Regenerate with feedback / Skip),
+    Apply writes back via Source Code editor + Save and Close
+  - `gui.py`: Style Preview tab wired — theme swatches, URL entry,
+    action frame (Apply / Regenerate / Skip), _prev_* queue/polling pattern
+- **Next:** Stage 2 — download files from Moodle using authenticated session

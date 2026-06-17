@@ -49,6 +49,7 @@ src/
   unit_collector.py      Unit Collector tab logic (UnitCollector class)
   content_checker.py     Checker tab logic (ContentChecker class)
   style_migrator.py      PRESERVED — Style Migrator logic (StyleMigrator class, not in GUI)
+  page_previewer.py      Style Preview tab logic (PagePreviewer class)
   ai_styler.py           Shared Gemini helper used by Page Changer tab
   browser.py             Shared Playwright launch + login wait loop
   config.py              Shared constants (session file path etc.)
