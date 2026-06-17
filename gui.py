@@ -260,9 +260,10 @@ class App(ctk.CTk):
 
     def _persist_config(self) -> None:
         self._save_config({
-            "automator_url":  self._url_entry.get().strip(),
-            "chk_bs_url":     self._chk_bs_entry.get().strip(),
-            "chk_moodle_url": self._chk_moodle_entry.get().strip(),
+            "automator_url":      self._url_entry.get().strip(),
+            "pc_gemini_api_key":  self._pc_key_entry.get().strip(),
+            "chk_bs_url":         self._chk_bs_entry.get().strip(),
+            "chk_moodle_url":     self._chk_moodle_entry.get().strip(),
         })
 
     def _update_check_worker(self):
@@ -452,6 +453,24 @@ class App(ctk.CTk):
         body.pack(fill="both", expand=True, padx=14, pady=(14, 14))
 
         ctk.CTkLabel(
+            body, text="GEMINI API KEY",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(0, 4))
+        self._pc_key_entry = ctk.CTkEntry(
+            body, placeholder_text="AIza…",
+            height=38, font=ctk.CTkFont(size=13), show="•",
+        )
+        try:
+            from api_config import GEMINI_API_KEY as _key
+            self._pc_key_entry.insert(0, _key)
+        except ImportError:
+            saved_key = self._load_config().get("pc_gemini_api_key", "")
+            if saved_key:
+                self._pc_key_entry.insert(0, saved_key)
+        self._pc_key_entry.pack(fill="x", pady=(0, 12))
+        self._bind_paste_menu(self._pc_key_entry)
+
+        ctk.CTkLabel(
             body, text="BRIGHTSPACE PAGE URL",
             font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
         ).pack(anchor="w", pady=(0, 4))
@@ -501,11 +520,7 @@ class App(ctk.CTk):
             _log_append(self._log_box, "⚠  Paste a Brightspace URL first.", "warning")
             return
 
-        try:
-            from api_config import GEMINI_API_KEY
-            gemini_api_key = GEMINI_API_KEY
-        except ImportError:
-            gemini_api_key = ""
+        gemini_api_key = self._pc_key_entry.get().strip()
 
         style_ref_path = _resource_path("templates", "style_reference.html")
         try:
