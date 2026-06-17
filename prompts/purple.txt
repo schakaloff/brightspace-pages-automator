@@ -1,7 +1,0 @@
-Restyle the SOURCE HTML using the STYLE REFERENCE layout. Apply the PURPLE theme: primary #6D28D9, mid #8B5CF6, accent #C4B5FD, shadow rgba(109,40,217,0.2). Keep all text and links. Generous spacing — hero padding 6rem 4rem, card padding 3rem, 3rem margin between cards. Card headings (h4) in Noto Serif serif font. Each link is display:block. Cards hover lift translateY(-15px). Flat #F8F9FA page background. Return only the final HTML, no explanation.
-
-SOURCE:
-{source_html}
-
-REFERENCE:
-{style_reference_html}

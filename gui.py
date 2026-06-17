@@ -39,26 +39,24 @@ _CONFIG_PATH = Path(__file__).parent / "user_config.json"
 
 # ── Page themes ───────────────────────────────────────────────────────────────
 PAGE_THEMES = {
-    "blue":   dict(primary="#0E72ED", mid="#2D8CFF", accent="#00C6D7",
-                   bg_from="#eaf4ff", bg_to="#dffcff", shadow_rgb="14,114,237",   circle="#2D8CFF"),
-    "teal":   dict(primary="#0D9488", mid="#14B8A6", accent="#2DD4BF",
-                   bg_from="#eafaf8", bg_to="#f0fffc", shadow_rgb="13,148,136",   circle="#14B8A6"),
-    "green":  dict(primary="#16A34A", mid="#22C55E", accent="#4ADE80",
-                   bg_from="#eafff0", bg_to="#f0fff4", shadow_rgb="22,163,74",    circle="#22C55E"),
-    "lime":   dict(primary="#65A30D", mid="#84CC16", accent="#BEF264",
-                   bg_from="#f4ffea", bg_to="#f9ffe0", shadow_rgb="101,163,13",   circle="#84CC16"),
-    "amber":  dict(primary="#D97706", mid="#F59E0B", accent="#FCD34D",
-                   bg_from="#fffbea", bg_to="#fffef0", shadow_rgb="217,119,6",    circle="#F59E0B"),
-    "orange": dict(primary="#EA580C", mid="#F97316", accent="#FDBA74",
-                   bg_from="#fff3ea", bg_to="#fff9ef", shadow_rgb="234,88,12",    circle="#F97316"),
-    "red":    dict(primary="#B91C1C", mid="#EF4444", accent="#FCA5A5",
-                   bg_from="#ffeaea", bg_to="#fff0f0", shadow_rgb="185,28,28",    circle="#EF4444"),
-    "pink":   dict(primary="#BE185D", mid="#EC4899", accent="#F9A8D4",
-                   bg_from="#ffeaf5", bg_to="#fff0f8", shadow_rgb="190,24,93",    circle="#EC4899"),
-    "purple": dict(primary="#6D28D9", mid="#8B5CF6", accent="#C4B5FD",
-                   bg_from="#f3eaff", bg_to="#f8f0ff", shadow_rgb="109,40,217",   circle="#8B5CF6"),
-    "oc":     dict(primary="#005F63", mid="#2ECDDC", accent="#FF8204",
-                   bg_from="#f0fafa", bg_to="#f8feff", shadow_rgb="0,95,99",      circle="#005F63"),
+    "lake":     dict(primary="#005F63", mid="#2ECDDC", accent="#FF8204",
+                     bg_from="#f0fafa", bg_to="#f8feff", shadow_rgb="0,95,99",       circle="#005F63"),
+    "sky":      dict(primary="#2ECDDC", mid="#6EDFE8", accent="#005F63",
+                     bg_from="#f0fafa", bg_to="#f8feff", shadow_rgb="46,205,220",    circle="#2ECDDC"),
+    "sunset":   dict(primary="#FF8204", mid="#FFA340", accent="#005F63",
+                     bg_from="#fff8f0", bg_to="#fffcf8", shadow_rgb="255,130,4",     circle="#FF8204"),
+    "peach":    dict(primary="#DE4F3D", mid="#E87A68", accent="#FF8204",
+                     bg_from="#fff3f0", bg_to="#fff8f8", shadow_rgb="222,79,61",     circle="#DE4F3D"),
+    "cherry":   dict(primary="#E10040", mid="#FF3366", accent="#FF8204",
+                     bg_from="#fff0f4", bg_to="#fff8fa", shadow_rgb="225,0,64",      circle="#E10040"),
+    "cabernet": dict(primary="#782434", mid="#A03C54", accent="#DE4F3D",
+                     bg_from="#fff0f2", bg_to="#fff8fa", shadow_rgb="120,36,52",     circle="#782434"),
+    "lavender": dict(primary="#50037F", mid="#8B3FC0", accent="#2ECDDC",
+                     bg_from="#f8f0ff", bg_to="#fdf8ff", shadow_rgb="80,3,127",      circle="#50037F"),
+    "lilac":    dict(primary="#9B5CB8", mid="#CA9CE4", accent="#2ECDDC",
+                     bg_from="#f8f0ff", bg_to="#fdf8ff", shadow_rgb="155,92,184",    circle="#CA9CE4"),
+    "charcoal": dict(primary="#50534C", mid="#7A7D74", accent="#2ECDDC",
+                     bg_from="#f4f4f2", bg_to="#f9f9f8", shadow_rgb="80,83,76",      circle="#50534C"),
 }
 
 # ── Palette ───────────────────────────────────────────────────────────────────
@@ -150,9 +148,9 @@ class App(ctk.CTk):
         self._col_log_queue          = queue.Queue()
         self._chk_log_queue          = queue.Queue()
         self._response_queue         = queue.Queue()
-        self._selected_theme         = "blue"
+        self._selected_theme         = "lake"
         self._swatch_frames          = {}
-        self._selected_col_theme     = "blue"
+        self._selected_col_theme     = "lake"
         self._col_swatch_frames      = {}
         self._chk_moodle_ready_event = None
         self._build_ui()

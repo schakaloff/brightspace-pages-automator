@@ -1,0 +1,7 @@
+Restyle the SOURCE HTML using the STYLE REFERENCE layout. Apply the CABERNET theme (OC brand): primary #782434, mid #A03C54, accent #DE4F3D, shadow rgba(120,36,52,0.2). Keep all text and links. Generous spacing — hero padding 6rem 4rem, card padding 3rem, 3rem margin between cards. Card headings (h4) in Noto Serif serif font. Each link is display:block. Cards hover lift translateY(-15px). Flat #F8F9FA page background. Return only the final HTML, no explanation.
+
+SOURCE:
+{source_html}
+
+REFERENCE:
+{style_reference_html}

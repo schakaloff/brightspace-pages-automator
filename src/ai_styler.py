@@ -48,7 +48,7 @@ def _load_prompt(theme_name: str) -> str:
     path = _PROMPTS_DIR / f"{theme_name}.txt"
     if path.exists():
         return path.read_text(encoding="utf-8")
-    fallback = _PROMPTS_DIR / "blue.txt"
+    fallback = _PROMPTS_DIR / "lake.txt"
     return fallback.read_text(encoding="utf-8") if fallback.exists() else ""
 
 
