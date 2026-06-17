@@ -124,6 +124,9 @@ def _compare_items(moodle_items: list, bs_flat: list) -> list:
             continue
 
         if item["type"] in SKIP:
+            # Accordion labels carry structure we want to display — pass them through
+            if item["type"] == "LABEL" and item.get("accordion_cards") is not None:
+                results.append({**item, "section": current_section, "status": "label_accordion", "matched": None})
             continue
 
         # External tools are flagged separately — don't try to match them in BS
@@ -768,11 +771,45 @@ class ContentChecker:
             # Deep scan: (1) scan label bodies on the course page itself,
             # (2) then navigate to each PAGE topic for its body HTML
             inline_embedded = await self._scan_moodle_labels_inline(tab, items)
-            embedded = await self._scan_moodle_page_bodies(tab, items)
-            items = items + inline_embedded + embedded
+            embedded        = await self._scan_moodle_page_bodies(tab, items)
+
+            # Accordion LABEL items must be inserted after their SECTION item so
+            # _compare_items sees them in section order (appending at end misattributes
+            # them all to the last section).
+            accordions   = [i for i in inline_embedded if i.get("accordion_cards") is not None]
+            flat_embedded = [i for i in inline_embedded if i.get("accordion_cards") is None]
+
+            acc_by_section: dict = {}
+            for a in accordions:
+                acc_by_section.setdefault(a.get("section", ""), []).append(a)
+
+            # Count accordion items per section so we can skip the matching
+            # plain LABEL items the main scraper already created for them.
+            acc_counts: dict = {sec: len(lst) for sec, lst in acc_by_section.items()}
+            skipped_labels: dict = {}
+
+            ordered: list = []
+            _cur_sec = ""
+            for item in items:
+                if item["type"] == "SECTION":
+                    _cur_sec = item["name"]
+                    ordered.append(item)
+                    ordered.extend(acc_by_section.get(item["name"], []))
+                elif (item["type"] == "LABEL"
+                      and item.get("accordion_cards") is None
+                      and skipped_labels.get(_cur_sec, 0) < acc_counts.get(_cur_sec, 0)):
+                    # Superseded by accordion item in same section — drop it
+                    skipped_labels[_cur_sec] = skipped_labels.get(_cur_sec, 0) + 1
+                else:
+                    ordered.append(item)
+
+            items = ordered + flat_embedded + embedded
 
             # H5P: enable download on each activity so files can be fetched
-            await self._enable_h5p_downloads(tab, items)
+            await self._enable_h5p_downloads(context, items)
+
+            # Stage 2: download all embedded files from Moodle
+            await self._download_moodle_files(tab, items)
 
             await tab.close()
             n_items = sum(1 for i in items if i["type"] != "SECTION")
@@ -788,10 +825,68 @@ class ContentChecker:
                 pass
             return None
 
-    async def _enable_h5p_downloads(self, tab, items: list) -> None:
+    async def _download_moodle_files(self, tab, items: list) -> None:
+        """
+        Download all pluginfile.php FILE items (embedded + top-level resources)
+        using the already-authenticated Playwright session.
+        Saves to downloads/files/<section>/<filename>.
+        """
+        file_items = [
+            i for i in items
+            if i.get("type") == "FILE"
+            and i.get("href")
+            and "pluginfile.php" in i.get("href", "")
+        ]
+
+        if not file_items:
+            return
+
+        self.log("", "dim")
+        self.log("─" * 52, "dim")
+        self.log(f"📥 Downloading {len(file_items)} files from Moodle…", "step")
+
+        save_root = Path(__file__).parent.parent / "downloads" / "files"
+        save_root.mkdir(parents=True, exist_ok=True)
+
+        success = 0
+        for idx, item in enumerate(file_items, 1):
+            name    = item.get("name", "file")
+            href    = item["href"]
+            section = re.sub(r'[^\w\s\-]', '', item.get("section", "unsorted")).strip()[:60] or "unsorted"
+
+            self.log(f"  [{idx}/{len(file_items)}] {name}", "info")
+            try:
+                section_dir = save_root / section
+                section_dir.mkdir(parents=True, exist_ok=True)
+
+                async with tab.expect_download(timeout=20000) as dl_info:
+                    await tab.goto(href, wait_until="domcontentloaded", timeout=20000)
+
+                download  = await dl_info.value
+                suggested = download.suggested_filename or re.sub(r'[^\w\s\-.]', '', name).strip()[:80]
+                save_path = section_dir / suggested
+
+                # avoid overwriting if duplicate filename in same section
+                if save_path.exists():
+                    stem, suffix = save_path.stem, save_path.suffix
+                    save_path = section_dir / f"{stem}_{idx}{suffix}"
+
+                await download.save_as(str(save_path))
+                self.log(f"    💾 {suggested}", "success")
+                success += 1
+
+            except Exception as e:
+                self.log(f"    ✗ Failed: {e}", "error")
+
+        self.log("", "dim")
+        self.log(f"  Files: {success}/{len(file_items)} downloaded", "success")
+        if success > 0:
+            self.log(f"  Saved to: downloads/files/", "dim")
+
+    async def _enable_h5p_downloads(self, context, items: list) -> None:
         """
         For each H5P activity: open Settings, tick Allow download, Save and display.
-        This must run before tab.close() so the session is still authenticated.
+        Each item gets a fresh page so a crashed/stalled tab can't affect the rest.
         """
         h5p_items = [
             i for i in items
@@ -813,6 +908,7 @@ class ContentChecker:
             name = item["name"]
             url  = item["href"]
             self.log(f"  [{idx}/{len(h5p_items)}] {name}", "info")
+            tab = await context.new_page()
             try:
                 # Step 1: navigate to H5P activity
                 await tab.goto(url, wait_until="domcontentloaded", timeout=20000)
@@ -919,20 +1015,24 @@ class ContentChecker:
 
                 if not dl_frame:
                     self.log(f"    ⚠ Download dialog did not appear", "warning")
-                    continue
-
-                try:
-                    async with tab.expect_download(timeout=15000) as dl_info:
-                        await dl_frame.locator('.h5p-download-button').first.click()
-                    download = await dl_info.value
-                    await download.save_as(str(save_path))
-                    self.log(f"    💾 Saved: {safe_name}.h5p", "success")
-                    success += 1
-                except Exception as e:
-                    self.log(f"    ✗ Download failed: {e}", "error")
+                else:
+                    try:
+                        async with tab.expect_download(timeout=15000) as dl_info:
+                            await dl_frame.locator('.h5p-download-button').first.click()
+                        download = await dl_info.value
+                        await download.save_as(str(save_path))
+                        self.log(f"    💾 Saved: {safe_name}.h5p", "success")
+                        success += 1
+                    except Exception as e:
+                        self.log(f"    ✗ Download failed: {e}", "error")
 
             except Exception as e:
                 self.log(f"    ✗ Failed: {e}", "error")
+            finally:
+                try:
+                    await tab.close()
+                except Exception:
+                    pass
 
         self.log("", "dim")
         self.log(f"  H5P: {success}/{len(h5p_items)} downloaded", "success")
@@ -943,15 +1043,28 @@ class ContentChecker:
         """
         Scan the current course page (already loaded) for pluginfile.php links
         and Kaltura iframes embedded inside label activity blocks.
+        Also detects Bootstrap accordion structure and stores raw body HTML.
         Labels render their content inline — they have no separate page to navigate to.
         """
         self.log("  Scanning label bodies on course page…", "dim")
         try:
             results = await tab.evaluate("""() => {
                 const found = [];
+
+                function linkType(href) {
+                    if (!href) return 'URL';
+                    if (href.includes('pluginfile.php') || href.includes('mod/resource/view.php')) return 'FILE';
+                    if (href.includes('mod/assign/view.php'))   return 'ASSIGN';
+                    if (href.includes('mod/quiz/view.php'))     return 'QUIZ';
+                    if (href.includes('mod/hvp/view.php') || href.includes('mod/h5pactivity/view.php')) return 'EXTERNAL';
+                    if (href.includes('mod/url/view.php'))      return 'URL';
+                    return 'URL';
+                }
+
                 document.querySelectorAll('li.section, li.section.main').forEach(section => {
                     const secEl   = section.querySelector('.sectionname, h3, h4');
                     const secName = secEl ? secEl.textContent.trim() : '';
+
                     section.querySelectorAll('li.activity.modtype_label').forEach(label => {
                         const nameEl    = label.querySelector('.instancename, .activityname a, a');
                         const labelName = nameEl ? nameEl.textContent.trim().replace(/\\s{2,}.*$/, '').trim() : '(label)';
@@ -959,9 +1072,39 @@ class ContentChecker:
                             '.contentafterlink, .description, .no-overflow, .labelcontent, .activitybody'
                         );
                         if (!body) return;
+
+                        // ── Accordion detection ──────────────────────────────
+                        const cards = body.querySelectorAll('.card');
+                        if (cards.length > 0) {
+                            const accordion_cards = [];
+                            cards.forEach(card => {
+                                const headerEl = card.querySelector('.card-header button, .card-header h5, .card-header');
+                                const title    = headerEl ? headerEl.textContent.trim().replace(/\\s+/g, ' ') : '(card)';
+                                const links    = [];
+                                card.querySelectorAll('a[href]').forEach(a => {
+                                    const href = a.href || '';
+                                    if (!href) return;
+                                    if (href.includes('readspeaker') || href.includes('docreader')) return;
+                                    const name = a.textContent.trim()
+                                              || a.getAttribute('title')
+                                              || a.getAttribute('aria-label');
+                                    if (!name) return; // icon-only / invisible links — skip
+                                    links.push({ name, href, type: linkType(href) });
+                                });
+                                accordion_cards.push({ title, links });
+                            });
+                            found.push({
+                                type: 'LABEL', name: '(accordion)',
+                                section: secName, parent_topic: labelName,
+                                accordion_cards,
+                                body_html: body.innerHTML,
+                            });
+                            return; // don't also scan this label for flat pluginfile links
+                        }
+
+                        // ── Flat label: scan for pluginfile.php links ────────
                         body.querySelectorAll('a[href*="pluginfile.php"]').forEach(a => {
                             const href = a.href || '';
-                            // skip ReadSpeaker proxy links (they wrap the real URL)
                             if (href.includes('readspeaker') || href.includes('docreader')) return;
                             const text = a.textContent.trim() || href.split('/').pop().split('?')[0];
                             if (href) found.push({
@@ -989,18 +1132,22 @@ class ContentChecker:
             self.log(f"  ⚠ Label inline scan failed: {e}", "warning")
             return []
 
-        # Deduplicate
+        # Deduplicate flat embedded items (accordion items are always unique)
         seen, dedup = set(), []
         for r in results:
+            if r.get("accordion_cards") is not None:
+                dedup.append(r)
+                continue
             key = r.get("href") or r.get("name")
             if key and key not in seen:
                 seen.add(key)
                 dedup.append(r)
 
+        files      = sum(1 for r in dedup if r["type"] == "FILE" and not r.get("accordion_cards"))
+        videos     = sum(1 for r in dedup if r["type"] == "VIDEO")
+        accordions = sum(1 for r in dedup if r.get("accordion_cards") is not None)
         if dedup:
-            files  = sum(1 for r in dedup if r["type"] == "FILE")
-            videos = sum(1 for r in dedup if r["type"] == "VIDEO")
-            self.log(f"  Labels: {files} embedded file(s), {videos} embedded video(s)", "dim")
+            self.log(f"  Labels: {files} embedded file(s), {videos} embedded video(s), {accordions} accordion(s)", "dim")
         return dedup
 
     async def _scan_moodle_page_bodies(self, tab, items: list) -> list:
@@ -1144,6 +1291,15 @@ class ContentChecker:
                 current_sec = item["name"]
                 self.log("", "dim")
                 self.log(f"── {item['name']}", "step")
+            elif item["type"] == "LABEL" and item.get("accordion_cards") is not None:
+                parent = item.get("parent_topic", "")
+                label_line = f"   🏷  [accordion: {parent}]" if parent else "   🏷  [accordion]"
+                self.log(label_line, "dim")
+                for card in item["accordion_cards"]:
+                    self.log(f"       📂 {card['title']}", "info")
+                    for lnk in card.get("links", []):
+                        lnk_icon = _ICONS.get(lnk.get("type", "URL"), "🔗")
+                        self.log(f"          {lnk_icon} {lnk['name']}", "dim")
             elif item["type"] == "EXTERNAL":
                 detected = _detect_external_tool(item["name"], item.get("hint", ""))
                 tool_label, warning = detected if detected else ("External Tool", "External tool - will need to be re-linked")
@@ -1178,6 +1334,18 @@ class ContentChecker:
         counts = {"exact": 0, "fuzzy": 0, "found_in_search": 0, "found_in_content": 0, "missing": 0}
         external_items = []
 
+        # Build name→result lookup so accordion cards can show status inline
+        result_by_name = {_norm(r["name"]): r for r in results
+                          if r["type"] not in ("SECTION", "LABEL") and not r.get("embedded")}
+
+        # Names consumed inside an accordion — suppress from flat list to avoid duplicates
+        accordion_consumed: set = set()
+        for r in results:
+            if r.get("status") == "label_accordion":
+                for card in r.get("accordion_cards", []):
+                    for lnk in card.get("links", []):
+                        accordion_consumed.add(_norm(lnk["name"]))
+
         self.log("─" * 52, "dim")
         for r in results:
             icon = _ICONS.get(r["type"], "  ")
@@ -1193,6 +1361,40 @@ class ContentChecker:
                     self.log(f"❌ {icon} {r['name']}", "error")
                 continue
 
+            # ── Accordion label — nested card display ──────────────────────────
+            if r.get("status") == "label_accordion":
+                self.log(f"   🏷  [accordion]", "dim")
+                for card in r.get("accordion_cards", []):
+                    self.log(f"       📂 {card['title']}", "info")
+                    for lnk in card.get("links", []):
+                        matched_r  = result_by_name.get(_norm(lnk["name"]))
+                        lnk_icon   = _ICONS.get(matched_r["type"] if matched_r else lnk.get("type", "URL"), "🔗")
+                        if matched_r:
+                            st = matched_r["status"]
+                            if st == "exact":
+                                self.log(f"          ✅ {lnk_icon} {lnk['name']}", "success")
+                                counts["exact"] += 1
+                            elif st == "fuzzy":
+                                self.log(f"          ⚠️  {lnk_icon} {lnk['name']}", "warning")
+                                self.log(f"               → \"{matched_r['matched']}\" ({matched_r['score']}%)", "dim")
+                                counts["fuzzy"] += 1
+                            elif st == "found_in_search":
+                                self.log(f"          🔍 {lnk_icon} {lnk['name']}", "warning")
+                                counts["found_in_search"] += 1
+                            elif st == "found_in_content":
+                                self.log(f"          📑 {lnk_icon} {lnk['name']}", "warning")
+                                counts["found_in_content"] += 1
+                            elif st == "external":
+                                self.log(f"          🔌 {lnk_icon} {lnk['name']}", "warning")
+                                external_items.append(matched_r)
+                            else:
+                                self.log(f"          ❌ {lnk_icon} {lnk['name']}", "error")
+                                counts["missing"] += 1
+                        else:
+                            # External URL or unknown — show dimmed
+                            self.log(f"          🌐 {lnk['name']}", "dim")
+                continue
+
             if r["status"] == "external":
                 external_items.append(r)
                 self.log(f"   🔌 {r['name']}", "warning")
@@ -1200,6 +1402,10 @@ class ContentChecker:
 
             # Embedded items are shown in their own summary block at the bottom
             if r.get("embedded"):
+                continue
+
+            # Skip items already rendered inside an accordion card
+            if _norm(r["name"]) in accordion_consumed:
                 continue
 
             status = r["status"]
