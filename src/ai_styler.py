@@ -1,3 +1,4 @@
+import re
 import sys
 import time
 from google import genai
@@ -5,6 +6,15 @@ from google.genai import errors as genai_errors
 from pathlib import Path
 from typing import Optional
 from bs4 import BeautifulSoup
+
+_COLOR_PROP_RE = re.compile(r'(?:^|(?<=;))\s*(?:color|background-color)\s*:[^;]*', re.IGNORECASE)
+
+
+def _strip_color_from_style(style: str) -> str:
+    cleaned = _COLOR_PROP_RE.sub('', style)
+    # normalise leftover semicolons
+    parts = [p.strip() for p in cleaned.split(';') if p.strip()]
+    return '; '.join(parts)
 
 
 def _clean_html(html: str) -> str:
@@ -23,6 +33,18 @@ def _clean_html(html: str) -> str:
         ]
         for a in attrs_to_remove:
             del tag.attrs[a]
+
+        # strip inline color/background-color so the theme controls all colours
+        if tag.get('style'):
+            cleaned = _strip_color_from_style(tag['style'])
+            if cleaned:
+                tag['style'] = cleaned
+            else:
+                del tag.attrs['style']
+
+        # strip legacy <font color="..."> attribute
+        if tag.name == 'font' and tag.get('color'):
+            del tag.attrs['color']
 
     # collapse empty tags that carry no content (spans, divs with no text/children)
     for tag in soup.find_all(["span", "div"]):
