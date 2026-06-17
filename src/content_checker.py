@@ -818,13 +818,15 @@ class ContentChecker:
                 await tab.goto(url, wait_until="domcontentloaded", timeout=20000)
                 await tab.wait_for_timeout(1000)
 
-                # Step 2: click Settings
+                # Step 2: navigate to Settings (strip &return=1 so Save and display goes to view.php)
+                self.log(f"    → Going to Settings…", "dim")
                 settings = tab.locator('a[href*="modedit.php?update="]')
                 if await settings.count() == 0:
                     self.log(f"    ⚠ No Settings link — check teacher access", "warning")
                     continue
-                await settings.first.click()
-                await tab.wait_for_load_state("domcontentloaded", timeout=15000)
+                settings_href = await settings.first.get_attribute("href")
+                settings_href = re.sub(r'&return=\d+', '', settings_href)
+                await tab.goto(settings_href, wait_until="domcontentloaded", timeout=15000)
                 await tab.wait_for_timeout(800)
 
                 # Step 3: expand Display Options if collapsed
@@ -832,10 +834,12 @@ class ContentChecker:
                 if await toggle.count() > 0:
                     expanded = await toggle.first.get_attribute("aria-expanded")
                     if expanded == "false":
+                        self.log(f"    → Expanding Display Options…", "dim")
                         await toggle.first.click()
                         await tab.wait_for_timeout(400)
 
                 # Step 4: check Allow download if not already checked
+                self.log(f"    → Checking Allow download checkbox…", "dim")
                 checkbox = tab.locator('#id_export')
                 if await checkbox.count() == 0:
                     self.log(f"    ⚠ Allow download checkbox not found", "warning")
@@ -846,18 +850,45 @@ class ContentChecker:
                 else:
                     self.log(f"    ✓ Already enabled", "dim")
 
-                # Step 5: Save and display
-                await tab.locator('#id_submitbutton').click()
-                await tab.wait_for_load_state("domcontentloaded", timeout=15000)
-                await tab.wait_for_timeout(2000)  # wait for H5P iframe to fully render
+                # Step 5: Save and display (scroll into view — button is below the fold)
+                self.log(f"    → Clicking Save and display…", "dim")
+                save_btn = tab.locator('#id_submitbutton')
+                if await save_btn.count() == 0:
+                    self.log(f"    ⚠ Save and display button not found", "warning")
+                    continue
+                await save_btn.first.scroll_into_view_if_needed()
+                await tab.wait_for_timeout(500)
+                await save_btn.first.click()
+                try:
+                    await tab.wait_for_url(lambda u: "modedit.php" not in u, timeout=15000)
+                except Exception:
+                    self.log(f"    ⚠ Save didn't navigate away — still on {tab.url[:80]}", "warning")
+                    continue
+                self.log(f"    ✓ Saved — on: {tab.url[:60]}", "dim")
+                await tab.wait_for_timeout(2000)
 
-                # Step 6: click Reuse button inside the H5P iframe
+                # Step 6: click Reuse button — scroll first (H5P iframe lazy-loads when visible)
+                await tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await tab.wait_for_timeout(3000)
+
+                # Dismiss "Data Reset" dialog if it appears
+                for frame in tab.frames:
+                    try:
+                        ok_btn = frame.locator('.h5p-dialog-ok-button')
+                        if await ok_btn.count() > 0:
+                            self.log(f"    → Dismissing Data Reset dialog…", "dim")
+                            await ok_btn.first.click()
+                            await tab.wait_for_timeout(800)
+                            break
+                    except Exception:
+                        pass
+
                 reuse_clicked = False
                 for frame in tab.frames:
                     try:
-                        reuse_btn = frame.locator('li.h5p-export button')
-                        if await reuse_btn.count() > 0:
-                            await reuse_btn.first.click()
+                        btn = frame.locator('li.h5p-export button')
+                        if await btn.count() > 0:
+                            await btn.first.click()
                             reuse_clicked = True
                             break
                     except Exception:
@@ -867,24 +898,32 @@ class ContentChecker:
                     self.log(f"    ⚠ Reuse button not found in any frame", "warning")
                     continue
 
-                await tab.wait_for_timeout(800)
-
-                # Step 7: click "Download as an .h5p file" in the dialog
+                # Step 7: wait for download dialog then click "Download as an .h5p file"
                 save_dir = Path(__file__).parent.parent / "downloads" / "h5p"
                 save_dir.mkdir(parents=True, exist_ok=True)
                 safe_name = re.sub(r'[^\w\s\-]', '', name).strip()[:80]
                 save_path = save_dir / f"{safe_name}.h5p"
 
+                dl_frame = None
+                for _ in range(10):
+                    await tab.wait_for_timeout(500)
+                    for frame in tab.frames:
+                        try:
+                            if await frame.locator('.h5p-download-button').count() > 0:
+                                dl_frame = frame
+                                break
+                        except Exception:
+                            pass
+                    if dl_frame:
+                        break
+
+                if not dl_frame:
+                    self.log(f"    ⚠ Download dialog did not appear", "warning")
+                    continue
+
                 try:
                     async with tab.expect_download(timeout=15000) as dl_info:
-                        for frame in tab.frames:
-                            try:
-                                dl_btn = frame.locator('.h5p-download-button')
-                                if await dl_btn.count() > 0:
-                                    await dl_btn.first.click()
-                                    break
-                            except Exception:
-                                pass
+                        await dl_frame.locator('.h5p-download-button').first.click()
                     download = await dl_info.value
                     await download.save_as(str(save_path))
                     self.log(f"    💾 Saved: {safe_name}.h5p", "success")
