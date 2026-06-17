@@ -420,7 +420,7 @@ class App(ctk.CTk):
         ).pack(anchor="w")
         ctk.CTkLabel(
             hdr,
-            text="Paste a page URL — the automator will click the  ⋯  property icon",
+            text="Pick an OC brand colour theme, paste a Brightspace page or section URL, and let Gemini restyle it",
             font=ctk.CTkFont(size=12), text_color=_TEXT_DIM,
         ).pack(anchor="w", pady=(4, 0))
 
