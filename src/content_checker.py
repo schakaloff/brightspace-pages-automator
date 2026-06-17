@@ -259,6 +259,8 @@ class ContentChecker:
         on_complete:         Callable           = None,
         moodle_ready_event:  threading.Event    = None,
         on_moodle_waiting:   Callable           = None,
+        h5p_ready_event:     threading.Event    = None,
+        on_h5p_waiting:      Callable           = None,
     ):
         self.bs_url             = bs_url.strip()
         self.moodle_url         = moodle_url.strip()
@@ -266,6 +268,8 @@ class ContentChecker:
         self.on_complete        = on_complete
         self.moodle_ready_event = moodle_ready_event
         self.on_moodle_waiting  = on_moodle_waiting
+        self.h5p_ready_event    = h5p_ready_event
+        self.on_h5p_waiting     = on_h5p_waiting
 
     # ── Brightspace TOC ───────────────────────────────────────────────────────
 
@@ -986,6 +990,34 @@ class ContentChecker:
 
             items = ordered + flat_embedded + embedded
 
+            # If there are H5P items, pause so the user can check the browser
+            # (e.g. switch out of preview mode) before downloads start.
+            h5p_pending = [
+                i for i in items
+                if i.get("type") == "EXTERNAL"
+                and ("hvp" in i.get("hint", "") or "h5p" in i.get("hint", ""))
+                and i.get("href")
+            ]
+            if h5p_pending and self.on_h5p_waiting:
+                self.log("", "dim")
+                self.log("─" * 52, "dim")
+                self.log(
+                    f"🎮 {len(h5p_pending)} H5P file(s) ready to download.",
+                    "step",
+                )
+                self.log(
+                    "  Check the browser — make sure you're NOT in preview/student mode.",
+                    "warning",
+                )
+                self.log(
+                    "  Then click ✅ Ready — Download H5P in the app.",
+                    "info",
+                )
+                self.on_h5p_waiting()
+                if self.h5p_ready_event:
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, self.h5p_ready_event.wait)
+
             # H5P: enable download on each activity so files can be fetched
             await self._enable_h5p_downloads(context, items)
 
@@ -1117,7 +1149,8 @@ class ContentChecker:
 
                 # Step 4: check Allow download if not already checked
                 self.log(f"    → Checking Allow download checkbox…", "dim")
-                checkbox = tab.locator('#id_export')
+                # mod/hvp uses #id_export; mod/h5pactivity uses #id_enabledownload
+                checkbox = tab.locator('#id_export, #id_enabledownload')
                 if await checkbox.count() == 0:
                     self.log(f"    ⚠ Allow download checkbox not found", "warning")
                     continue

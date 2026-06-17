@@ -157,6 +157,7 @@ class App(ctk.CTk):
         self._selected_prev_theme    = "blue"
         self._prev_swatch_frames     = {}
         self._chk_moodle_ready_event = None
+        self._chk_h5p_ready_event    = None
         self._build_ui()
         self.after(100, self._poll_log)
         self.after(100, self._col_poll_log)
@@ -952,8 +953,10 @@ class App(ctk.CTk):
         self._save_config({"chk_bs_url": bs_url, "chk_moodle_url": moodle_url})
 
         import threading as _threading
-        ready_event = _threading.Event()
+        ready_event     = _threading.Event()
+        h5p_ready_event = _threading.Event()
         self._chk_moodle_ready_event = ready_event
+        self._chk_h5p_ready_event    = h5p_ready_event
         self._chk_ready_btn.pack_forget()
 
         self._chk_run_btn.configure(state="disabled", text="Running…")
@@ -980,6 +983,9 @@ class App(ctk.CTk):
             def on_moodle_waiting():
                 q.put(("__CHK_MOODLE_WAITING__", ""))
 
+            def on_h5p_waiting():
+                q.put(("__CHK_H5P_WAITING__", ""))
+
             try:
                 from content_checker import ContentChecker
                 checker = ContentChecker(
@@ -989,6 +995,8 @@ class App(ctk.CTk):
                     on_complete=on_complete,
                     moodle_ready_event=ready_event,
                     on_moodle_waiting=on_moodle_waiting,
+                    h5p_ready_event=h5p_ready_event,
+                    on_h5p_waiting=on_h5p_waiting,
                 )
                 checker.do_relink = do_relink
                 asyncio.run(checker.run())
@@ -1008,6 +1016,16 @@ class App(ctk.CTk):
                     self._chk_run_btn.configure(state="normal", text="▶  Run Check")
                     self._chk_ready_btn.pack_forget()
                 elif msg == "__CHK_MOODLE_WAITING__":
+                    self._chk_ready_btn.configure(
+                        text="✅  Ready — Scrape Now",
+                        command=self._chk_moodle_ready,
+                    )
+                    self._chk_ready_btn.pack(fill="x", pady=(0, 8))
+                elif msg == "__CHK_H5P_WAITING__":
+                    self._chk_ready_btn.configure(
+                        text="✅  Ready — Download H5P",
+                        command=self._chk_h5p_ready,
+                    )
                     self._chk_ready_btn.pack(fill="x", pady=(0, 8))
                 else:
                     _log_append(self._chk_log_box, msg, tag)
@@ -1019,6 +1037,11 @@ class App(ctk.CTk):
         self._chk_ready_btn.pack_forget()
         if self._chk_moodle_ready_event:
             self._chk_moodle_ready_event.set()
+
+    def _chk_h5p_ready(self):
+        self._chk_ready_btn.pack_forget()
+        if self._chk_h5p_ready_event:
+            self._chk_h5p_ready_event.set()
 
     # ── Style Preview tab ─────────────────────────────────────────────────────
 
