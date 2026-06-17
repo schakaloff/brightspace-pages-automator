@@ -4,6 +4,16 @@ Add a new `## X.Y.Z` section here whenever you bump `VERSION` in `gui.py`.
 The matching section is pulled into the GitHub Release notes automatically,
 and shown to users in the in-app "Update available" dialog.
 
+## 0.7.0
+- Replaced custom colour themes with the 9 official Okanagan College brand
+  colours: Lake, Sky, Sunset, Peach, Cherry, Cabernet, Lavender, Lilac, and
+  Charcoal. Lake is now the default.
+- Updated the page layout to match the OC brand style: generous spacing,
+  Noto Serif headings inside cards, block-level links, and a dramatic hover
+  lift on cards.
+- Added a Gemini API key field directly in the Page Changer tab so the key
+  can be changed without editing any files.
+
 ## 0.6.0
 - Removed the Style Migrator tab from the GUI to streamline the interface.
   The underlying code is preserved in `src/style_migrator.py` and can be
