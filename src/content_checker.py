@@ -510,10 +510,10 @@ class ContentChecker:
                             `/d2l/api/le/1.0/${courseId}/content/topics/${topicId}/file`,
                             { credentials: 'include' }
                         );
-                        if (!r.ok) return { title, skip: true };
+                        if (!r.ok) return { title, topicId, skip: true };
 
                         const ct = (r.headers.get('content-type') || '').toLowerCase();
-                        if (!ct.includes('text/html')) return { title, skip: true };
+                        if (!ct.includes('text/html')) return { title, topicId, skip: true };
 
                         const html  = await r.text();
                         const div   = document.createElement('div');
@@ -526,9 +526,9 @@ class ContentChecker:
                             if (href) links.push({ text: a.textContent.trim().slice(0, 120), href });
                         });
 
-                        return { title, text, links };
+                        return { title, topicId, text, links };
                     } catch (e) {
-                        return { title, skip: true };
+                        return { title, topicId, skip: true };
                     }
                 }));
             }""", [course_id, pairs])
@@ -548,16 +548,197 @@ class ContentChecker:
                         found_in_content[original] = topic_title
 
                 # Link scan — flag Moodle-domain hrefs
+                topic_id = res.get("topicId")
                 for link in links:
                     href = link.get("href", "")
                     if MOODLE_HOST in href:
                         moodle_links.append({
-                            "topic": topic_title,
-                            "text":  link["text"],
-                            "href":  href,
+                            "topic":    topic_title,
+                            "topic_id": topic_id,
+                            "text":     link["text"],
+                            "href":     href,
                         })
 
         return found_in_content, moodle_links
+
+    async def _upload_file_to_brightspace(
+        self, bs_page: "Page", course_id: str, local_path: "Path"
+    ) -> Optional[str]:
+        """
+        Upload a local file to the Brightspace course file store via the
+        manage-files API.  Returns the URL string to embed in HTML, or None on failure.
+        Files over 8 MB are skipped (base64 transport limit through CDP).
+        """
+        import base64, mimetypes
+
+        data = local_path.read_bytes()
+        if len(data) > 8 * 1024 * 1024:
+            self.log(f"    ⚠ Skipped (file too large: {len(data)//1024} KB)", "warning")
+            return None
+
+        b64      = base64.b64encode(data).decode()
+        mime     = mimetypes.guess_type(local_path.name)[0] or "application/octet-stream"
+        filename = local_path.name
+
+        result = await bs_page.evaluate("""async ([courseId, b64, filename, mimeType]) => {
+            try {
+                const binary = atob(b64);
+                const bytes  = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                const blob = new Blob([bytes], { type: mimeType });
+
+                const form = new FormData();
+                form.append('file', blob, filename);
+
+                const resp = await fetch(
+                    `/d2l/api/lp/1.0/${courseId}/managefiles/file/`,
+                    { method: 'POST', body: form, credentials: 'include' }
+                );
+
+                const bodyText = await resp.text().catch(() => '');
+                return { status: resp.status, ok: resp.ok, body: bodyText.slice(0, 500) };
+            } catch (e) {
+                return { status: 0, ok: false, body: String(e) };
+            }
+        }""", [course_id, b64, filename, mime])
+
+        if not result or not result.get("ok"):
+            status = result.get("status", "?") if result else "?"
+            body   = result.get("body", "")   if result else ""
+            self.log(f"    ✗ Upload failed ({status}): {body}", "error")
+            return None
+
+        return f"/content/enforced/{course_id}/{filename}"
+
+    async def _relink_moodle_files(
+        self, context: "BrowserContext", bs_page: "Page",
+        course_id: str, moodle_links: list
+    ) -> None:
+        """
+        For every Moodle URL found in Brightspace topic HTML:
+          1. Download the file from Moodle (fresh authenticated tab)
+          2. Upload it to the Brightspace course file store
+          3. Fetch each affected topic's HTML, replace old URL → new URL, PUT back
+        """
+        if not moodle_links:
+            return
+
+        self.log("", "dim")
+        self.log("─" * 52, "dim")
+        self.log("🔗 Re-linking Moodle files in Brightspace…", "step")
+
+        # Group by href so each unique file is downloaded only once
+        by_href: dict = {}
+        for entry in moodle_links:
+            by_href.setdefault(entry["href"], []).append(entry)
+
+        unique_topics = {e["topic_id"] for e in moodle_links if e.get("topic_id")}
+        self.log(
+            f"  {len(by_href)} unique file(s) across {len(unique_topics)} topic(s)",
+            "info",
+        )
+
+        save_dir = Path(__file__).parent.parent / "downloads" / "relink"
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        # ── 1. Download from Moodle + upload to Brightspace ──────────────────
+        url_map: dict = {}   # moodle_href → brightspace_url
+        moodle_tab = await context.new_page()
+        try:
+            for idx, (href, entries) in enumerate(by_href.items(), 1):
+                label = entries[0]["text"] or href.split("/")[-1].split("?")[0][:60]
+                self.log(f"  [{idx}/{len(by_href)}] {label}", "info")
+                try:
+                    async with moodle_tab.expect_download(timeout=20000) as dl_info:
+                        await moodle_tab.goto(href, wait_until="domcontentloaded", timeout=20000)
+                    dl       = await dl_info.value
+                    filename = dl.suggested_filename or re.sub(r"[^\w\s\-.]", "", label).strip()[:80]
+                    local    = save_dir / filename
+                    await dl.save_as(str(local))
+                    self.log(f"    ↓ {filename}", "dim")
+
+                    bs_url = await self._upload_file_to_brightspace(bs_page, course_id, local)
+                    if bs_url:
+                        url_map[href] = bs_url
+                        self.log(f"    ↑ {bs_url}", "dim")
+                except Exception as e:
+                    self.log(f"    ✗ {e}", "error")
+        finally:
+            await moodle_tab.close()
+
+        if not url_map:
+            self.log("  ⚠ No files uploaded — re-link skipped", "warning")
+            return
+
+        # ── 2. Patch each affected topic's HTML and PUT it back ──────────────
+        # Build per-topic map: topic_id → {title, href→bs_url replacements}
+        topics: dict = {}
+        for entry in moodle_links:
+            tid = entry.get("topic_id")
+            if not tid or entry["href"] not in url_map:
+                continue
+            if tid not in topics:
+                topics[tid] = {"title": entry["topic"], "replacements": {}}
+            topics[tid]["replacements"][entry["href"]] = url_map[entry["href"]]
+
+        self.log("", "dim")
+        self.log(f"  Patching {len(topics)} topic(s)…", "info")
+        ok_count = 0
+        for topic_id, info in topics.items():
+            self.log(f"  📄 {info['title']}", "step")
+            replacements = info["replacements"]
+            try:
+                result = await bs_page.evaluate(
+                    """async ([courseId, topicId, replacements]) => {
+                    // GET current HTML
+                    const getR = await fetch(
+                        `/d2l/api/le/1.0/${courseId}/content/topics/${topicId}/file`,
+                        { credentials: 'include' }
+                    );
+                    if (!getR.ok) return { error: `GET ${getR.status}` };
+
+                    let html = await getR.text();
+                    let replaced = 0;
+                    for (const [oldUrl, newUrl] of Object.entries(replacements)) {
+                        const escaped = oldUrl.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+                        const before  = html;
+                        html = html.replace(new RegExp(escaped, 'g'), newUrl);
+                        if (html !== before) replaced++;
+                    }
+                    if (replaced === 0) return { skipped: true };
+
+                    // PUT updated HTML back
+                    const blob = new Blob([html], { type: 'text/html' });
+                    const form = new FormData();
+                    form.append('file', blob, 'index.html');
+                    const putR = await fetch(
+                        `/d2l/api/le/1.0/${courseId}/content/topics/${topicId}/file`,
+                        { method: 'PUT', body: form, credentials: 'include' }
+                    );
+                    const putBody = await putR.text().catch(() => '');
+                    return putR.ok
+                        ? { ok: true, replaced }
+                        : { error: `PUT ${putR.status}: ${putBody.slice(0, 200)}` };
+                }""",
+                    [course_id, topic_id, replacements],
+                )
+
+                if result and result.get("ok"):
+                    self.log(f"    ✅ {result['replaced']} link(s) re-hosted", "success")
+                    ok_count += 1
+                elif result and result.get("skipped"):
+                    self.log("    ○ no matching links in HTML", "dim")
+                else:
+                    self.log(f"    ✗ {(result or {}).get('error', 'unknown')}", "error")
+            except Exception as e:
+                self.log(f"    ✗ {e}", "error")
+
+        self.log("", "dim")
+        self.log(
+            f"✅ Re-link done — {len(url_map)}/{len(by_href)} uploaded, "
+            f"{ok_count}/{len(topics)} topics patched",
+            "success",
+        )
 
     def _log_link_report(self, moodle_links: list) -> None:
         """Log the Moodle-link-in-BS report section."""
@@ -1577,6 +1758,9 @@ class ContentChecker:
 
             self._log_report(results)
             self._log_link_report(moodle_links)
+
+            if moodle_links and getattr(self, "do_relink", False):
+                await self._relink_moodle_files(context, page, course_id, moodle_links)
 
             if self.on_complete:
                 self.on_complete()

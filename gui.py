@@ -907,17 +907,25 @@ class App(ctk.CTk):
         self._chk_moodle_entry.grid(row=3, column=0, sticky="ew", pady=(0, 12))
         self._bind_paste_menu(self._chk_moodle_entry)
 
+        # Re-link checkbox
+        self._chk_relink_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            body, text="Re-link Moodle files in Brightspace after check",
+            variable=self._chk_relink_var,
+            font=ctk.CTkFont(size=12),
+        ).grid(row=4, column=0, sticky="w", pady=(0, 8))
+
         # Run button
         self._chk_run_btn = ctk.CTkButton(
             body, text="▶  Run Check",
             height=42, font=ctk.CTkFont(size=14, weight="bold"),
             command=self._chk_start_run,
         )
-        self._chk_run_btn.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+        self._chk_run_btn.grid(row=5, column=0, sticky="ew", pady=(0, 8))
 
         # Ready button container
         self._chk_ready_container = ctk.CTkFrame(body, fg_color="transparent")
-        self._chk_ready_container.grid(row=5, column=0, sticky="ew")
+        self._chk_ready_container.grid(row=6, column=0, sticky="ew")
         self._chk_ready_btn = ctk.CTkButton(
             self._chk_ready_container, text="✅  Ready — Scrape Now",
             height=38, font=ctk.CTkFont(size=13, weight="bold"),
@@ -929,12 +937,13 @@ class App(ctk.CTk):
         ctk.CTkLabel(
             body, text="LOG",
             font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
-        ).grid(row=6, column=0, sticky="w", pady=(8, 4))
-        self._chk_log_box = _make_log_box_grid(body, row=7)
+        ).grid(row=7, column=0, sticky="w", pady=(8, 4))
+        self._chk_log_box = _make_log_box_grid(body, row=8)
 
     def _chk_start_run(self):
         bs_url     = self._chk_bs_entry.get().strip()
         moodle_url = self._chk_moodle_entry.get().strip()
+        do_relink  = self._chk_relink_var.get()
 
         if not bs_url and not moodle_url:
             _log_append(self._chk_log_box, "⚠  Paste at least one URL.", "warning")
@@ -973,14 +982,16 @@ class App(ctk.CTk):
 
             try:
                 from content_checker import ContentChecker
-                asyncio.run(ContentChecker(
+                checker = ContentChecker(
                     bs_url=bs_url,
                     moodle_url=moodle_url,
                     log=lambda msg, tag="info": q.put((msg, tag)),
                     on_complete=on_complete,
                     moodle_ready_event=ready_event,
                     on_moodle_waiting=on_moodle_waiting,
-                ).run())
+                )
+                checker.do_relink = do_relink
+                asyncio.run(checker.run())
             except Exception as e:
                 q.put((f"✗  {e}", "error"))
             finally:
