@@ -22,6 +22,7 @@ DisableProgramGroupPage=yes
 
 [Files]
 Source: "..\dist\BrightspacePagesAutomator\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+Source: "install_browsers.bat"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"
@@ -31,4 +32,5 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "Additional icons:"
 
 [Run]
+Filename: "{app}\install_browsers.bat"; StatusMsg: "Installing Chromium browser (one-time, ~2 min)..."; Flags: runhidden waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
