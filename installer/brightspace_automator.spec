@@ -34,6 +34,7 @@ a = Analysis(
     binaries=collect_binaries,
     datas=[
         (str(ROOT / "templates" / "style_reference.html"), "templates"),
+        (str(ROOT / "prompts"), "prompts"),
         *extra_datas,
         *collect_datas,
     ],

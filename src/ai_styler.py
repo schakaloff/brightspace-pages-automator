@@ -1,3 +1,4 @@
+import sys
 import time
 from google import genai
 from google.genai import errors as genai_errors
@@ -33,7 +34,11 @@ def _clean_html(html: str) -> str:
     result = body.decode_contents() if body else str(soup)
     return result.strip()
 
-_PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
+_PROMPTS_DIR = (
+    Path(sys._MEIPASS) / "prompts"
+    if getattr(sys, "frozen", False)
+    else Path(__file__).parent.parent / "prompts"
+)
 _MODEL = "gemini-2.5-flash"
 _MAX_RETRIES = 3
 _RETRY_DELAY = 8  # seconds between retries on 503
