@@ -1176,34 +1176,30 @@ class ContentChecker:
                 await tab.goto(settings_href, wait_until="domcontentloaded", timeout=15000)
                 await tab.wait_for_timeout(800)
 
-                # Step 3: expand ALL collapsed sections on the settings page
-                # (section IDs are collapseElement-0, -1, -2 … vary by module type)
-                collapsed = tab.locator('[id^="collapseElement-"][aria-expanded="false"]')
-                n_collapsed = await collapsed.count()
-                if n_collapsed > 0:
-                    self.log(f"    → Expanding {n_collapsed} collapsed section(s)…", "dim")
-                    for i in range(n_collapsed):
-                        try:
-                            await collapsed.nth(i).click()
-                            await tab.wait_for_timeout(300)
-                        except Exception:
-                            pass
-
-                # Step 4: check Allow download if not already checked
-                # mod/hvp           → #id_export
-                # mod/h5pactivity   → #id_enabledownload  OR  #id_displayopt_export
+                # Step 3 & 4: enable Allow download via JS — works regardless of
+                # whether the section is collapsed (checkbox is in DOM either way).
+                # Covers all three known field IDs across Moodle H5P module types.
                 self.log(f"    → Checking Allow download checkbox…", "dim")
-                checkbox = tab.locator(
-                    '#id_export, #id_enabledownload, #id_displayopt_export'
-                )
-                if await checkbox.count() == 0:
+                cb_result = await tab.evaluate("""() => {
+                    const ids = ['id_export', 'id_enabledownload', 'id_displayopt_export'];
+                    for (const id of ids) {
+                        const cb = document.getElementById(id);
+                        if (cb) {
+                            const was = cb.checked;
+                            cb.checked = true;
+                            if (!was) cb.dispatchEvent(new Event('change', { bubbles: true }));
+                            return { found: true, id, wasChecked: was };
+                        }
+                    }
+                    return { found: false };
+                }""")
+                if not cb_result or not cb_result.get("found"):
                     self.log(f"    ⚠ Allow download checkbox not found", "warning")
                     continue
-                if not await checkbox.first.is_checked():
-                    await checkbox.first.check()
-                    self.log(f"    ✓ Download enabled", "success")
-                else:
+                if cb_result.get("wasChecked"):
                     self.log(f"    ✓ Already enabled", "dim")
+                else:
+                    self.log(f"    ✓ Download enabled", "success")
 
                 # Step 5: Save and display (scroll into view — button is below the fold)
                 self.log(f"    → Clicking Save and display…", "dim")
