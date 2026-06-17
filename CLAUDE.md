@@ -20,6 +20,7 @@ gui.py                   CustomTkinter GUI with two tabs; spawns worker threads
 src/
   automator.py           Automator tab logic (PageAutomator class)
   style_migrator.py      Style Migrator tab logic (StyleMigrator class)
+  page_previewer.py      Style Preview tab logic (PagePreviewer class)
   ai_styler.py           Shared Gemini helper used by automator tab
   browser.py             Shared Playwright launch + login wait loop
   config.py              Shared constants (session file path etc.)
