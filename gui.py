@@ -57,6 +57,8 @@ PAGE_THEMES = {
                    bg_from="#ffeaf5", bg_to="#fff0f8", shadow_rgb="190,24,93",    circle="#EC4899"),
     "purple": dict(primary="#6D28D9", mid="#8B5CF6", accent="#C4B5FD",
                    bg_from="#f3eaff", bg_to="#f8f0ff", shadow_rgb="109,40,217",   circle="#8B5CF6"),
+    "oc":     dict(primary="#005F63", mid="#2ECDDC", accent="#FF8204",
+                   bg_from="#f0fafa", bg_to="#f8feff", shadow_rgb="0,95,99",      circle="#005F63"),
 }
 
 # ── Palette ───────────────────────────────────────────────────────────────────

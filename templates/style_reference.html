@@ -1,81 +1,67 @@
 <!DOCTYPE html>
 <html lang="en"><head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Reference</title>
-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;800&family=Noto+Serif:wght@400;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            --primary:    #0E72ED;
-            --mid:        #2D8CFF;
-            --accent:     #00C6D7;
+            --primary:    #005F63;
+            --mid:        #2ECDDC;
+            --accent:     #FF8204;
             --charcoal:   #50534C;
             --white:      #ffffff;
             --light-stone:#F8F9FA;
         }
         * { box-sizing: border-box; }
         body {
-            background: linear-gradient(135deg, #eaf4ff, #dffcff);
+            background-color: var(--light-stone);
             color: var(--charcoal);
             font-family: 'Poppins', sans-serif;
             margin: 0; padding: 0;
             display: flex; justify-content: center;
-            min-height: 100vh;
         }
         .main-container {
             max-width: 1000px; width: 95%;
-            margin: 2rem 0;
+            margin: 4rem 0;
             background: var(--white);
-            box-shadow: 0 20px 60px -10px rgba(14,114,237,0.2);
-            border-radius: 24px; overflow: hidden;
+            box-shadow: 0 40px 100px -20px rgba(0,0,0,0.12);
+            border-radius: 32px; overflow: hidden;
         }
         .hero {
-            background: linear-gradient(135deg, var(--primary) 0%, var(--mid) 50%, var(--accent) 100%);
-            padding: 2.5rem 2.5rem;
+            background: linear-gradient(135deg, var(--primary) 0%, var(--mid) 100%);
+            padding: 6rem 4rem;
             color: var(--white); position: relative;
         }
         .hero h1 {
-            font-size: 2.2rem; font-weight: 800;
+            font-size: 3.8rem; font-weight: 800;
             margin: 0; line-height: 1.1;
-            letter-spacing: -0.03em; text-transform: uppercase;
+            letter-spacing: -0.05em; text-transform: uppercase;
         }
         .hero-decoration {
-            position: absolute; bottom: -15px; right: 30px;
-            font-size: 6rem; font-weight: 900;
-            opacity: 0.1; user-select: none;
+            position: absolute; bottom: -30px; right: 40px;
+            font-size: 12rem; font-weight: 900;
+            opacity: 0.2; user-select: none; color: var(--white);
         }
-        .content-body { padding: 1.5rem 2rem; }
-        .section-header {
-            font-size: 1.2rem; color: var(--primary);
-            margin: 0 0 0.6rem 0; font-weight: 700;
-            border-bottom: 2px solid var(--light-stone);
-            padding-bottom: 0.3rem;
-        }
+        .content-body { padding: 4rem; }
         .action-card {
             background: var(--white);
-            border: 1px solid #eef0f2;
-            padding: 1rem 1.2rem;
-            border-radius: 12px;
-            margin-bottom: 0.8rem;
-            transition: all 0.3s ease;
+            padding: 3rem;
+            border-radius: 24px;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.05);
+            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            border: 1px solid rgba(0,0,0,0.05);
+            margin-bottom: 3rem;
         }
         .action-card:last-child { margin-bottom: 0; }
         .action-card:hover {
-            transform: translateY(-3px);
-            box-shadow: 0 10px 24px rgba(14,114,237,0.12);
+            transform: translateY(-15px);
+            box-shadow: 0 30px 60px rgba(0,0,0,0.15);
         }
-        ul { list-style: none; padding: 0; margin: 0; }
-        li { margin-bottom: 0.4rem; }
-        li:last-child { margin-bottom: 0; }
-        a { color: var(--primary); text-decoration: none; font-weight: 600; font-size: 1rem; }
+        .action-card h4 { font-family: 'Noto Serif', serif; color: var(--primary); margin-top: 0; }
+        .video-wrapper { position: relative; padding-bottom: 56.25%; height: 0; overflow: hidden; margin: 1.5rem 0; border-radius: 12px; }
+        .video-wrapper iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: none; }
+        a { color: var(--primary); text-decoration: underline; font-weight: 600; display: block; margin-bottom: 0.5rem; transition: color 0.3s; }
         a:hover { color: var(--accent); }
-        .section-block { margin-bottom: 1.2rem; }
-        .section-block:last-child { margin-bottom: 0; }
-        @media (max-width: 768px) {
-            .hero { padding: 2rem 1.5rem; }
-            .hero h1 { font-size: 1.6rem; }
-            .content-body { padding: 1rem 1.2rem; }
-        }
+        @media (max-width: 768px) { .hero { padding: 4rem 2rem; } .hero h1 { font-size: 2.5rem; } .content-body { padding: 2rem; } }
     </style>
 </head><body>
 <div class="main-container">
@@ -84,17 +70,18 @@
         <div class="hero-decoration">LABEL</div>
     </header>
     <div class="content-body">
-        <div class="section-block">
-            <h2 class="section-header">Section One</h2>
-            <div class="action-card">Content here</div>
+        <div class="action-card">
+            <h4>Section Title</h4>
+            <p>Description text goes here.</p>
+            <a href="#">Link One</a>
+            <a href="#">Link Two</a>
+            <div class="video-wrapper"><iframe src="about:blank"></iframe></div>
+            <a href="#">Video Link</a>
         </div>
-        <div class="section-block">
-            <h2 class="section-header">Section Two</h2>
-            <div class="action-card">Content here</div>
-        </div>
-        <div class="section-block">
-            <h2 class="section-header">Section Three</h2>
-            <div class="action-card">Content here</div>
+        <div class="action-card">
+            <h4>Assessment</h4>
+            <a href="#">Assignment Link</a>
+            <a href="#">Quiz Link</a>
         </div>
     </div>
 </div>

@@ -1,0 +1,7 @@
+Restyle the SOURCE HTML using the STYLE REFERENCE layout. Apply the OC BRAND theme: primary #005F63 (Lake), mid #2ECDDC (Sky), accent #FF8204 (Sunset), shadow rgba(0,95,99,0.2). Keep all text and links. Generous spacing — hero padding 6rem 4rem, card padding 3rem, 3rem margin between cards. Card headings (h4) in Noto Serif serif font. Each link is display:block. Cards hover lift translateY(-15px). Flat #F8F9FA page background. Return only the final HTML, no explanation.
+
+SOURCE:
+{source_html}
+
+REFERENCE:
+{style_reference_html}
