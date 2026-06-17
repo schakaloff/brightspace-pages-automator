@@ -120,6 +120,29 @@ All D2L components (`d2l-htmleditor-button`, `d2l-button-icon`, etc.) use shadow
 
 ---
 
+## Migration Context — How Brightspace Gets Content
+
+Okanagan College migrates courses from Moodle to Brightspace using Brightspace's built-in
+**Moodle backup import tool** (upload the `.mbz` backup, Brightspace imports it).
+
+This import is imperfect:
+- Most content (files, pages, quizzes) transfers across, but layout and styling is lost
+- **LTI tools almost always fail** — Cengage, Kaltura, Top Hat, Pearson, etc. don't transfer
+- H5P activities don't transfer (Brightspace H5P is a separate manual upload)
+- Some file links inside label/page HTML still point back to `mymoodle.okanagan.bc.ca`
+
+So Brightspace already has a version of the course — it's not empty. The job of this tool is:
+1. **Find what's missing or broken** (Checker tab comparison)
+2. **Re-host files** that are linked from Brightspace topics but still point to Moodle
+3. **Flag LTIs/H5P** that need manual instructor attention
+4. **Style the pages** to match OC's Brightspace theme (Page Changer / Style Migrator tabs)
+
+When scanning for "what needs downloading," the source of truth is **Brightspace's HTML** —
+scan each topic for `mymoodle.okanagan.bc.ca` hrefs, download only those files, re-upload
+to Brightspace, and replace the URLs. Do NOT blindly download everything from Moodle.
+
+---
+
 ## Git Branches
 
 | Branch | Owner | Purpose |
