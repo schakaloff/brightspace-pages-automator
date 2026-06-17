@@ -328,7 +328,7 @@ class UnitCollector:
                     .map(el => {
                         const hint = iconHint(el);
                         const subtitle = (el.getAttribute('sub-title-text') || '').toLowerCase();
-                        const isLink = hint.includes('link') || hint.includes('url');
+                        const isLink = hint.includes('link') || hint.includes('url') || hint.includes('media');
                         const isFile = !isLink && (
                             FILE_SUBTITLES.some(s => subtitle.includes(s)) ||
                             FILE_HINT_RE.test(hint)
@@ -691,6 +691,8 @@ class UnitCollector:
             # Step 4: Set the file
             fc = await fc_info.value
             await fc.set_files(file_item["path"])
+            # Give Brightspace time to start the XHR upload before we poll for completion
+            await page.wait_for_timeout(1500)
 
             # Step 5: Wait for Brightspace's XHR upload to finish, then click the footer
             # "Upload" button (NOT the file-chooser trigger — that one is inside
@@ -701,7 +703,11 @@ class UnitCollector:
                 if (progress) return false;
                 const files = document.querySelectorAll(
                     '.d2l-fileinput-filelist li:not(.d2l-fileinput-placeholder)');
-                return files.length > 0;
+                if (files.length > 0) return true;
+                // Also done when a file-error element is shown (file already exists)
+                const err = document.querySelector(
+                    '.d2l-fileinput-error, .d2l-alert-critical, [class*="fileinput-error"]');
+                return !!(err && err.offsetParent !== null);
             }"""
             _JS_CLICK_FOOTER_UPLOAD = """() => {
                 const footer = document.querySelector('.d2l-dialog-footer');
@@ -738,6 +744,7 @@ class UnitCollector:
                     continue
                 try:
                     if await frame.evaluate(_JS_CLICK_FOOTER_UPLOAD):
+                        self.log(f"  ↑ Clicked footer Upload button", "info")
                         uploaded = True
                         break
                 except Exception:
@@ -745,6 +752,70 @@ class UnitCollector:
 
             if not uploaded:
                 self.log(f"  ⚠ Footer Upload button not clicked for {file_item['filename']}", "warning")
+
+            # Step 5a: After clicking Upload in an error state, Brightspace may show
+            # an intermediate screen with an "Insert" button before the overwrite dialog.
+            _JS_CLICK_INSERT_ON_ERROR = """() => {
+                const footer = document.querySelector('.d2l-dialog-footer');
+                if (!footer) return false;
+                for (const b of footer.querySelectorAll('button')) {
+                    if (b.textContent.trim() === 'Insert' && b.offsetParent !== null) {
+                        b.click(); return true;
+                    }
+                }
+                return false;
+            }"""
+            for _ in range(10):
+                await page.wait_for_timeout(500)
+                clicked_insert_on_error = False
+                for frame in page.frames:
+                    if frame == page.main_frame:
+                        continue
+                    try:
+                        if await frame.evaluate(_JS_CLICK_INSERT_ON_ERROR):
+                            self.log("  ↩ File error: clicked Insert to proceed to overwrite dialog", "info")
+                            clicked_insert_on_error = True
+                            break
+                    except Exception:
+                        pass
+                if clicked_insert_on_error:
+                    await page.wait_for_timeout(800)
+                    break
+
+            # Step 5b: Handle overwrite dialog if the file already exists
+            _JS_OVERWRITE = """() => {
+                const ul = document.getElementById('SelectedOverwriteOption');
+                if (!ul) return false;
+                const radios = ul.querySelectorAll('input[type="radio"]');
+                for (const r of radios) {
+                    if (r.value === '2') { r.click(); break; }
+                }
+                const footer = document.querySelector('.d2l-dialog-footer');
+                if (footer) {
+                    for (const b of footer.querySelectorAll('button')) {
+                        if (b.hasAttribute('primary') && b.offsetParent !== null) { b.click(); return true; }
+                    }
+                    for (const b of footer.querySelectorAll('button')) {
+                        if (b.textContent.trim() === 'Save' && b.offsetParent !== null) { b.click(); return true; }
+                    }
+                }
+                return true;
+            }"""
+            for _ in range(10):
+                await page.wait_for_timeout(500)
+                for frame in page.frames:
+                    if frame == page.main_frame:
+                        continue
+                    try:
+                        handled = await frame.evaluate(_JS_OVERWRITE)
+                        if handled:
+                            self.log(f"  ↩ Overwrite dialog: selected 'Overwrite existing file'", "info")
+                            break
+                    except Exception:
+                        pass
+                else:
+                    continue
+                break
 
             # Step 6: Wait for "Insert" button (appears after upload completes) and click it
             _JS_CLICK_INSERT = """() => {
