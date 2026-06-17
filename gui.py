@@ -147,16 +147,21 @@ class App(ctk.CTk):
         self._log_queue              = queue.Queue()
         self._col_log_queue          = queue.Queue()
         self._chk_log_queue          = queue.Queue()
+        self._prev_log_queue         = queue.Queue()
         self._response_queue         = queue.Queue()
+        self._prev_response_queue    = queue.Queue()
         self._selected_theme         = "lake"
         self._swatch_frames          = {}
         self._selected_col_theme     = "lake"
         self._col_swatch_frames      = {}
+        self._selected_prev_theme    = "blue"
+        self._prev_swatch_frames     = {}
         self._chk_moodle_ready_event = None
         self._build_ui()
         self.after(100, self._poll_log)
         self.after(100, self._col_poll_log)
         self.after(100, self._chk_poll_log)
+        self.after(100, self._prev_poll_log)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._chromium_ready = False
@@ -407,6 +412,7 @@ class App(ctk.CTk):
         self._build_automator_tab(tabview.add("⚡ Page Changer"))
         self._build_collector_tab(tabview.add("📦 Unit Collector"))
         self._build_checker_tab(tabview.add("✅ Checker"))
+        self._build_preview_tab(tabview.add("🔍 Style Preview"))
 
     # ── Automator tab ─────────────────────────────────────────────────────────
 
@@ -1002,6 +1008,245 @@ class App(ctk.CTk):
         self._chk_ready_btn.pack_forget()
         if self._chk_moodle_ready_event:
             self._chk_moodle_ready_event.set()
+
+    # ── Style Preview tab ─────────────────────────────────────────────────────
+
+    def _build_preview_tab(self, parent):
+        hdr = ctk.CTkFrame(parent, fg_color="transparent")
+        hdr.pack(fill="x", padx=18, pady=(18, 0))
+
+        ctk.CTkLabel(
+            hdr, text="🔍 Style Preview",
+            font=ctk.CTkFont(size=22, weight="bold"),
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            hdr,
+            text="Preview AI-styled HTML injected into the live Brightspace page before committing",
+            font=ctk.CTkFont(size=12), text_color=_TEXT_DIM,
+        ).pack(anchor="w", pady=(4, 0))
+
+        ctk.CTkLabel(
+            hdr, text="PAGE THEME",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(14, 6))
+
+        swatches_row = ctk.CTkFrame(hdr, fg_color="transparent")
+        swatches_row.pack(anchor="w")
+
+        for name, theme in PAGE_THEMES.items():
+            ring = ctk.CTkFrame(
+                swatches_row, width=34, height=34, corner_radius=17,
+                fg_color="transparent", border_width=2,
+                border_color="#ffffff" if name == self._selected_prev_theme else _BG,
+            )
+            ring.pack(side="left", padx=4)
+            ring.pack_propagate(False)
+            ctk.CTkButton(
+                ring, width=26, height=26, corner_radius=13,
+                fg_color=theme["circle"], hover_color=theme["mid"], text="",
+                command=lambda n=name: self._prev_select_theme(n),
+            ).place(relx=0.5, rely=0.5, anchor="center")
+            self._prev_swatch_frames[name] = ring
+
+        ctk.CTkFrame(parent, height=1, fg_color=_DIVIDER).pack(fill="x", padx=18, pady=(14, 0))
+
+        body = ctk.CTkFrame(parent, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=14, pady=(14, 14))
+
+        ctk.CTkLabel(
+            body, text="BRIGHTSPACE PAGE URL",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(0, 4))
+
+        url_row = ctk.CTkFrame(body, fg_color="transparent")
+        url_row.pack(fill="x", pady=(0, 16))
+        url_row.columnconfigure(0, weight=1)
+
+        self._prev_url_entry = ctk.CTkEntry(
+            url_row,
+            placeholder_text="https://learn.okanagancollege.ca/d2l/le/content/…/topics/…/View",
+            height=42, font=ctk.CTkFont(size=13),
+        )
+        self._prev_url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 10))
+        self._bind_paste_menu(self._prev_url_entry)
+
+        self._prev_run_btn = ctk.CTkButton(
+            url_row, text="▶  Preview", width=110, height=42,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._prev_start_run,
+        )
+        self._prev_run_btn.grid(row=0, column=1)
+
+        # Action frame — hidden until preview is ready
+        self._prev_action_frame = ctk.CTkFrame(body, fg_color=_CARD, corner_radius=10)
+        # not packed yet
+
+        ctk.CTkLabel(
+            self._prev_action_frame,
+            text="FEEDBACK  (optional — describe what to change before regenerating)",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+
+        self._prev_feedback_entry = ctk.CTkEntry(
+            self._prev_action_frame,
+            placeholder_text="e.g. make the headings larger, use a darker background…",
+            height=38, font=ctk.CTkFont(size=13),
+        )
+        self._prev_feedback_entry.pack(fill="x", padx=12, pady=(0, 10))
+        self._bind_paste_menu(self._prev_feedback_entry)
+
+        btn_row = ctk.CTkFrame(self._prev_action_frame, fg_color="transparent")
+        btn_row.pack(fill="x", padx=12, pady=(0, 12))
+        btn_row.columnconfigure(0, weight=1)
+        btn_row.columnconfigure(1, weight=1)
+        btn_row.columnconfigure(2, weight=1)
+
+        ctk.CTkButton(
+            btn_row, text="✅  Apply",
+            height=40, font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#16A34A", hover_color="#15803D",
+            command=self._prev_on_apply,
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+        ctk.CTkButton(
+            btn_row, text="🔄  Regenerate",
+            height=40, font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#D97706", hover_color="#B45309",
+            command=self._prev_on_regenerate,
+        ).grid(row=0, column=1, sticky="ew", padx=3)
+
+        ctk.CTkButton(
+            btn_row, text="⏭  Skip",
+            height=40, font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="transparent", border_width=1, border_color=_DIVIDER,
+            hover_color=_DIVIDER,
+            command=self._prev_on_skip,
+        ).grid(row=0, column=2, sticky="ew", padx=(6, 0))
+
+        ctk.CTkLabel(
+            body, text="LOG",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(0, 4))
+        self._prev_log_label = ctk.CTkLabel(
+            body, text="LOG",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        )
+        # The real label was already packed above; store a hidden reference
+        # so _prev_poll_log can use before= to insert the action frame before it.
+        # We actually need the border frame, so create the log carefully:
+        self._prev_log_border = ctk.CTkFrame(body, fg_color=_LOG_BORDER, corner_radius=8)
+        self._prev_log_border.pack(fill="both", expand=True)
+        self._prev_log_box = ctk.CTkTextbox(
+            self._prev_log_border,
+            state="disabled",
+            font=ctk.CTkFont(family="Consolas", size=12),
+            fg_color=_LOG_BG,
+            corner_radius=6,
+            text_color=_TAG_COLORS["info"],
+            border_width=0,
+        )
+        self._prev_log_box.pack(fill="both", expand=True, padx=2, pady=2)
+        for tag, color in _TAG_COLORS.items():
+            self._prev_log_box._textbox.tag_configure(tag, foreground=color)
+
+    def _prev_select_theme(self, name: str):
+        if name == self._selected_prev_theme:
+            return
+        self._prev_swatch_frames[self._selected_prev_theme].configure(border_color=_BG)
+        self._selected_prev_theme = name
+        self._prev_swatch_frames[name].configure(border_color="#ffffff")
+
+    def _prev_start_run(self):
+        url = self._prev_url_entry.get().strip()
+        if not url:
+            _log_append(self._prev_log_box, "⚠  Paste a Brightspace page URL first.", "warning")
+            return
+
+        try:
+            from api_config import GEMINI_API_KEY
+            gemini_api_key = GEMINI_API_KEY
+        except ImportError:
+            gemini_api_key = ""
+
+        self._prev_action_frame.pack_forget()
+        self._prev_run_btn.configure(state="disabled", text="Running…")
+        self._prev_log_box.configure(state="normal")
+        self._prev_log_box.delete("1.0", "end")
+        self._prev_log_box.configure(state="disabled")
+
+        q  = self._prev_log_queue
+        rq = self._prev_response_queue
+
+        def on_user_action():
+            """Called from worker thread — puts sentinel in queue, blocks for GUI response."""
+            q.put(("__PREVIEW_READY__", ""))
+            return rq.get(timeout=600)  # (action, feedback)
+
+        def worker():
+            class _Capture:
+                def write(self, t):
+                    if t.strip():
+                        q.put((t.rstrip(), "dim"))
+                def flush(self): pass
+
+            old, sys.stdout = sys.stdout, _Capture()
+            done_sent = [False]
+
+            def on_complete():
+                if not done_sent[0]:
+                    done_sent[0] = True
+                    q.put(("__DONE__", ""))
+
+            try:
+                import sys as _sys
+                _sys.modules.pop('page_previewer', None)
+                from page_previewer import run as previewer_run
+                asyncio.run(previewer_run(
+                    url=url,
+                    theme_name=self._selected_prev_theme,
+                    gemini_api_key=gemini_api_key,
+                    log=lambda msg, tag="info": q.put((msg, tag)),
+                    on_complete=on_complete,
+                    on_user_action=on_user_action,
+                ))
+            except Exception as e:
+                q.put((f"✗  {e}", "error"))
+            finally:
+                sys.stdout = old
+                on_complete()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _prev_poll_log(self):
+        try:
+            while True:
+                msg, tag = self._prev_log_queue.get_nowait()
+                if msg == "__DONE__":
+                    self._prev_run_btn.configure(state="normal", text="▶  Preview")
+                    self._prev_action_frame.pack_forget()
+                elif msg == "__PREVIEW_READY__":
+                    self._prev_action_frame.pack(
+                        fill="x", pady=(0, 10), before=self._prev_log_border,
+                    )
+                else:
+                    _log_append(self._prev_log_box, msg, tag)
+        except queue.Empty:
+            pass
+        self.after(100, self._prev_poll_log)
+
+    def _prev_on_apply(self):
+        self._prev_action_frame.pack_forget()
+        self._prev_response_queue.put(("apply", ""))
+
+    def _prev_on_regenerate(self):
+        feedback = self._prev_feedback_entry.get().strip()
+        self._prev_feedback_entry.delete(0, "end")
+        self._prev_action_frame.pack_forget()
+        self._prev_response_queue.put(("regenerate", feedback))
+
+    def _prev_on_skip(self):
+        self._prev_action_frame.pack_forget()
+        self._prev_response_queue.put(("skip", ""))
 
     # ── Shared helpers ────────────────────────────────────────────────────────
 
