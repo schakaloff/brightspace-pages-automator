@@ -998,19 +998,17 @@ class ContentChecker:
                 and ("hvp" in i.get("hint", "") or "h5p" in i.get("hint", ""))
                 and i.get("href")
             ]
-            if h5p_pending and self.on_h5p_waiting:
+            if h5p_pending:
                 self.log("", "dim")
                 self.log("─" * 52, "dim")
+                self.log(f"🎮 {len(h5p_pending)} H5P file(s) to download.", "step")
+                # Auto-switch to Instructor role so edit controls appear
+                await self._switch_to_instructor_role(tab)
+
+            if h5p_pending and self.on_h5p_waiting:
                 self.log(
-                    f"🎮 {len(h5p_pending)} H5P file(s) ready to download.",
-                    "step",
-                )
-                self.log(
-                    "  Check the browser — make sure you're NOT in preview/student mode.",
-                    "warning",
-                )
-                self.log(
-                    "  Then click ✅ Ready — Download H5P in the app.",
+                    "  Verify the browser looks right, then click"
+                    " ✅ Ready — Download H5P in the app.",
                     "info",
                 )
                 self.on_h5p_waiting()
@@ -1095,6 +1093,46 @@ class ContentChecker:
         self.log(f"  Files: {success}/{len(file_items)} downloaded", "success")
         if success > 0:
             self.log(f"  Saved to: downloads/files/", "dim")
+
+    async def _switch_to_instructor_role(self, tab) -> None:
+        """
+        Click through Moodle's Switch role to → Instructor flow.
+        Required so teacher edit controls (including H5P download checkbox)
+        are visible. Safe to call when already in Instructor role — Moodle
+        just re-applies and redirects back.
+        """
+        self.log("  → Switching to Instructor role…", "dim")
+        try:
+            # Open user menu dropdown
+            toggle = tab.locator('#user-menu-toggle')
+            if await toggle.count() == 0:
+                self.log("  ⚠ User menu not found — role switch skipped", "warning")
+                return
+            await toggle.first.click()
+            await tab.wait_for_timeout(600)
+
+            # Find the "Switch role to..." link and get its href
+            switch_link = tab.locator('a[href*="switchrole.php"]').first
+            if await switch_link.count() == 0:
+                self.log("  ✓ No switchrole link found — skipping", "dim")
+                # Close the dropdown by pressing Escape
+                await tab.keyboard.press("Escape")
+                return
+            href = await switch_link.get_attribute("href")
+            await tab.goto(href, wait_until="domcontentloaded", timeout=15000)
+            await tab.wait_for_timeout(800)
+
+            # Click the Instructor role button on the selection page
+            instructor_btn = tab.locator('button:has-text("Instructor")')
+            if await instructor_btn.count() == 0:
+                self.log("  ⚠ Instructor button not found on role page", "warning")
+                return
+            await instructor_btn.first.click()
+            await tab.wait_for_load_state("domcontentloaded", timeout=15000)
+            await tab.wait_for_timeout(1000)
+            self.log("  ✓ Switched to Instructor role", "success")
+        except Exception as e:
+            self.log(f"  ⚠ Role switch failed: {e}", "warning")
 
     async def _enable_h5p_downloads(self, context, items: list) -> None:
         """
