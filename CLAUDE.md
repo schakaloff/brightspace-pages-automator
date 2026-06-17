@@ -162,13 +162,39 @@ to Brightspace, and replace the URLs. Do NOT blindly download everything from Mo
 
 ---
 
-## What Still Needs Work
+## Migration Pipeline Status (as of 2026-06-17)
 
-- [ ] Confirm Source Code dialog open → extract → AI restyle → write-back → Save flow works end-to-end
+### ✅ Done
+- Moodle scrape: sections, items, accordions (Bootstrap .card structure detected + displayed)
+- H5P download: role-switch → settings → JS checkbox → Save → Reuse → download
+  - Covers mod/hvp and mod/h5pactivity; fresh page per item; pause point before downloads
+  - Downloaded files go to `downloads/h5p/<name>.h5p`
+- Brightspace TOC fetch + comparison log (exact / fuzzy / missing / found_in_search / found_in_content)
+- Moodle link scan: every Brightspace topic HTML fetched via API, Moodle hrefs collected
+  with topic_id so they can be patched back
+- Re-link method built (`_relink_moodle_files`): download → upload → HTML patch → PUT back
+  - **NOT YET TESTED against a real course** — this is the immediate next thing to run
+
+### 🔜 Next (in order)
+1. **Test re-link**: run Checker with real BS URL + "Re-link files" ticked, paste log output
+2. **H5P Brightspace upload**: need user to walk through Create New → Page → H5P upload
+   flow in browser and share HTML — then automate Steps 8+ from H5P_DOWNLOAD_STEPS.txt
+3. **Accordion file downloads**: files inside accordion cards use mod/resource/view.php
+   links (not pluginfile.php) — _download_moodle_files currently skips these
+4. **Log file**: logs/YYYY-MM-DD.txt per run (mentioned in H5P_DOWNLOAD_STEPS.txt)
+5. **Unit Collector (Filip)** runs last — after all links and files are correct
+
+### Key decisions made
+- Files embedded as links in Moodle labels usually don't transfer via the backup import
+- Re-link approach: scan BS HTML for mymoodle URLs → check if file already in BS
+  (notify user if yes) → if not, download from Moodle + bulk upload to matching section
+- H5P gets its own new Brightspace Page per activity in the matched section
+- Unit Collector assembles AFTER re-link and H5P pages are in place
+
+## What Still Needs Work (original items)
+
 - [ ] Verify Unit Collector batch flow works end-to-end
-- [ ] Verify Checker comparison output is accurate for real courses
 - [ ] Clean up diagnostic/debug logging in `automator.py` if any remains
-- [ ] Add `__pycache__/` to `.gitignore` so compiled bytecode is never committed
 
 ---
 

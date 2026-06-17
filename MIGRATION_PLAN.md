@@ -163,11 +163,47 @@ Filip is building a tab that:
 
 ### 2026-06-16
 - Style Preview tab fully implemented and pushed to origin/nick
-  - `src/page_previewer.py`: PagePreviewer class — navigates to Brightspace
-    topic in view mode, extracts source HTML via Options → Edit → Source Code,
-    sends to Gemini for restyling, injects styled HTML into live page DOM,
-    blocks on user action (Apply / Regenerate with feedback / Skip),
-    Apply writes back via Source Code editor + Save and Close
-  - `gui.py`: Style Preview tab wired — theme swatches, URL entry,
-    action frame (Apply / Regenerate / Skip), _prev_* queue/polling pattern
 - **Next:** Stage 2 — download files from Moodle using authenticated session
+
+### 2026-06-17 — H5P download fully working + re-link architecture decided
+
+**H5P download (all working):**
+- Auto role-switch: clicks user menu → Switch role to... → Instructor before downloads
+- Checkbox fix: JS-based check (no collapsible expansion needed), covers id_export /
+  id_enabledownload / id_displayopt_export across both mod/hvp and mod/h5pactivity
+- Fresh page per H5P item (context isolation, no browser crash cascade)
+- Pause point: "Ready — Download H5P" button appears after scrape so user can verify
+  browser state before downloads start
+- All 13 H5P files downloaded successfully on real course test
+
+**Re-link architecture decided:**
+- Brightspace already has course imported from Moodle backup, but embedded file links
+  (PDFs, DOCX, etc.) often still point to mymoodle.okanagan.bc.ca — especially
+  files that were embedded as links inside label HTML (not standalone FILE activities)
+- Standalone FILE activities sometimes transfer correctly via the import tool
+- **Approach:**
+  1. Scan each Brightspace topic HTML for mymoodle.okanagan.bc.ca hrefs (already built)
+  2. For each Moodle URL found: check if a file with the same name already exists in
+     Brightspace file store → if yes, notify user and let them verify → if no, download
+     from Moodle and bulk-upload to the matching Brightspace section
+  3. Replace all Moodle URLs in topic HTML with new Brightspace URLs
+- `_relink_moodle_files` method is built but not yet tested against a real course
+- `moodle_links` scan already collects {topic, topic_id, text, href} per Moodle link found
+- D2L manage-files upload endpoint used: POST /d2l/api/lp/1.0/{courseId}/managefiles/file/
+- Topic HTML update: GET + string-replace + PUT /d2l/api/le/1.0/{courseId}/content/topics/{id}/file
+
+**H5P Brightspace upload (next after re-link):**
+- Each H5P gets its own new Page in the matched Brightspace section
+- Step 8: Create New button in section → d2l-button.create-new-btn (shadow DOM)
+- Step 9: Click Page option → TBD (need HTML from user walkthrough)
+- Unmatched sections → popup + log file at end of run
+- OC Brightspace H5P type unknown (built-in D2L vs LTI) — need user to show upload flow
+
+**Unit Collector (Filip) runs LAST:**
+- After all files are re-linked and H5P pages are created
+- Assembles topics into one combined collapsible page per section
+- File link replacement slots in after HTML assembly
+
+**Pending decisions:**
+- Does OC Brightspace have H5P as built-in tool or LTI? (affects upload automation)
+- Log file (logs/YYYY-MM-DD.txt) — build after re-link is confirmed working
