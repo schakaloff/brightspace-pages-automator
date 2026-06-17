@@ -156,8 +156,9 @@ class App(ctk.CTk):
         self._col_swatch_frames      = {}
         self._selected_prev_theme    = "blue"
         self._prev_swatch_frames     = {}
-        self._chk_moodle_ready_event = None
-        self._chk_h5p_ready_event    = None
+        self._chk_moodle_ready_event      = None
+        self._chk_h5p_ready_event         = None
+        self._chk_file_checklist_event    = None
         self._build_ui()
         self.after(100, self._poll_log)
         self.after(100, self._col_poll_log)
@@ -909,7 +910,7 @@ class App(ctk.CTk):
         self._bind_paste_menu(self._chk_moodle_entry)
 
         # Re-link checkbox
-        self._chk_relink_var = ctk.BooleanVar(value=False)
+        self._chk_relink_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
             body, text="Re-link Moodle files in Brightspace after check",
             variable=self._chk_relink_var,
@@ -933,6 +934,12 @@ class App(ctk.CTk):
             fg_color="#16A34A", hover_color="#15803D",
             command=self._chk_moodle_ready,
         )
+        self._chk_h5p_skip_btn = ctk.CTkButton(
+            self._chk_ready_container, text="⏭  Skip H5P",
+            height=38, width=130,
+            fg_color="#6B7280", hover_color="#4B5563",
+            command=self._chk_h5p_skip,
+        )
 
         # Log
         ctk.CTkLabel(
@@ -953,10 +960,15 @@ class App(ctk.CTk):
         self._save_config({"chk_bs_url": bs_url, "chk_moodle_url": moodle_url})
 
         import threading as _threading
-        ready_event     = _threading.Event()
-        h5p_ready_event = _threading.Event()
-        self._chk_moodle_ready_event = ready_event
-        self._chk_h5p_ready_event    = h5p_ready_event
+        ready_event           = _threading.Event()
+        h5p_ready_event       = _threading.Event()
+        file_checklist_event  = _threading.Event()
+        file_checklist_result = []
+        h5p_skip_flag         = [False]
+        self._chk_moodle_ready_event   = ready_event
+        self._chk_h5p_ready_event      = h5p_ready_event
+        self._chk_file_checklist_event = file_checklist_event
+        self._chk_h5p_skip_flag        = h5p_skip_flag
         self._chk_ready_btn.pack_forget()
 
         self._chk_run_btn.configure(state="disabled", text="Running…")
@@ -984,7 +996,10 @@ class App(ctk.CTk):
                 q.put(("__CHK_MOODLE_WAITING__", ""))
 
             def on_h5p_waiting():
-                q.put(("__CHK_H5P_WAITING__", ""))
+                q.put(("__CHK_H5P_WAITING__", h5p_skip_flag))
+
+            def on_file_checklist(data_json):
+                q.put(("__CHK_FILE_CHECKLIST__", (data_json, file_checklist_result, file_checklist_event)))
 
             try:
                 from content_checker import ContentChecker
@@ -997,8 +1012,12 @@ class App(ctk.CTk):
                     on_moodle_waiting=on_moodle_waiting,
                     h5p_ready_event=h5p_ready_event,
                     on_h5p_waiting=on_h5p_waiting,
+                    file_checklist_event=file_checklist_event,
+                    on_file_checklist=on_file_checklist,
                 )
                 checker.do_relink = do_relink
+                checker.file_checklist_result = file_checklist_result
+                checker.h5p_skip_flag = h5p_skip_flag
                 asyncio.run(checker.run())
             except Exception as e:
                 q.put((f"✗  {e}", "error"))
@@ -1026,7 +1045,11 @@ class App(ctk.CTk):
                         text="✅  Ready — Download H5P",
                         command=self._chk_h5p_ready,
                     )
-                    self._chk_ready_btn.pack(fill="x", pady=(0, 8))
+                    self._chk_ready_btn.pack(side="left", fill="x", expand=True, padx=(0, 6), pady=(0, 8))
+                    self._chk_h5p_skip_btn.pack(side="left", pady=(0, 8))
+                elif msg == "__CHK_FILE_CHECKLIST__":
+                    data_json, result_list, event = tag
+                    self._show_file_checklist(data_json, result_list, event)
                 else:
                     _log_append(self._chk_log_box, msg, tag)
         except queue.Empty:
@@ -1040,8 +1063,124 @@ class App(ctk.CTk):
 
     def _chk_h5p_ready(self):
         self._chk_ready_btn.pack_forget()
+        self._chk_h5p_skip_btn.pack_forget()
         if self._chk_h5p_ready_event:
             self._chk_h5p_ready_event.set()
+
+    def _chk_h5p_skip(self):
+        self._chk_ready_btn.pack_forget()
+        self._chk_h5p_skip_btn.pack_forget()
+        if hasattr(self, "_chk_h5p_skip_flag") and self._chk_h5p_skip_flag:
+            self._chk_h5p_skip_flag[0] = True
+        if self._chk_h5p_ready_event:
+            self._chk_h5p_ready_event.set()
+
+    def _show_file_checklist(self, data_json: str, result_list: list, event):
+        import json as _json
+        files = _json.loads(data_json)
+        if not files:
+            event.set()
+            return
+
+        win = ctk.CTkToplevel(self)
+        win.title("Missing Files — Select to Download")
+        win.geometry("580x540")
+        win.resizable(False, True)
+        win.grab_set()
+
+        ctk.CTkLabel(
+            win,
+            text=f"📋  {len(files)} file(s) missing from Brightspace",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).pack(padx=20, pady=(18, 4))
+        ctk.CTkLabel(
+            win,
+            text="Files will be downloaded from Moodle and uploaded to the matching section.",
+            text_color="gray70",
+            wraplength=520,
+        ).pack(padx=20, pady=(0, 6))
+        ctk.CTkLabel(
+            win,
+            text="Uncheck any you already have or don't need.",
+            text_color="gray60",
+        ).pack(padx=20, pady=(0, 10))
+
+        scroll = ctk.CTkScrollableFrame(win, height=280)
+        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+
+        checkboxes: list = []
+        cur_section = None
+        for f in files:
+            sec = f.get("section") or "Other"
+            if sec != cur_section:
+                cur_section = sec
+                ctk.CTkLabel(
+                    scroll,
+                    text=f"── {sec} ──",
+                    text_color="gray55",
+                    font=ctk.CTkFont(size=11),
+                ).pack(anchor="w", padx=8, pady=(10, 2))
+            var = ctk.BooleanVar(value=True)
+            ctk.CTkCheckBox(scroll, text=f["name"], variable=var).pack(
+                anchor="w", padx=24, pady=2
+            )
+            checkboxes.append((var, f))
+
+        # Select / deselect row
+        tog = ctk.CTkFrame(win, fg_color="transparent")
+        tog.pack(fill="x", padx=16, pady=(0, 4))
+
+        count_lbl = ctk.CTkLabel(win, text="")
+        count_lbl.pack(pady=(0, 4))
+
+        # Defined before buttons so _update can reference dl_btn via closure after creation
+        _dl_btn_ref = [None]
+
+        def _update(*_):
+            n = sum(1 for v, _ in checkboxes if v.get())
+            if _dl_btn_ref[0]:
+                _dl_btn_ref[0].configure(
+                    text=f"⬇  Download {n} Selected" if n else "⬇  Download 0 Selected"
+                )
+            count_lbl.configure(text=f"{n} of {len(files)} selected")
+
+        for v, _ in checkboxes:
+            v.trace_add("write", _update)
+
+        def _select_all():
+            for v, _ in checkboxes:
+                v.set(True)
+
+        def _deselect_all():
+            for v, _ in checkboxes:
+                v.set(False)
+
+        ctk.CTkButton(tog, text="Select All",   width=110, command=_select_all).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(tog, text="Deselect All", width=110, command=_deselect_all).pack(side="left")
+
+        def _download():
+            selected = [f for v, f in checkboxes if v.get()]
+            result_list.clear()
+            result_list.extend(selected)
+            win.destroy()
+            event.set()
+
+        def _skip():
+            result_list.clear()
+            win.destroy()
+            event.set()
+
+        btn_row = ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=(0, 16))
+
+        dl_btn = ctk.CTkButton(
+            btn_row, text="", fg_color="#2a7d4f", hover_color="#226b41", command=_download
+        )
+        _dl_btn_ref[0] = dl_btn
+        dl_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkButton(btn_row, text="Skip All", width=100, command=_skip).pack(side="left")
+
+        _update()
 
     # ── Style Preview tab ─────────────────────────────────────────────────────
 

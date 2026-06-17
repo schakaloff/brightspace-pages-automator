@@ -259,17 +259,22 @@ class ContentChecker:
         on_complete:         Callable           = None,
         moodle_ready_event:  threading.Event    = None,
         on_moodle_waiting:   Callable           = None,
-        h5p_ready_event:     threading.Event    = None,
-        on_h5p_waiting:      Callable           = None,
+        h5p_ready_event:      threading.Event    = None,
+        on_h5p_waiting:       Callable           = None,
+        file_checklist_event: threading.Event    = None,
+        on_file_checklist:    Callable           = None,
     ):
-        self.bs_url             = bs_url.strip()
-        self.moodle_url         = moodle_url.strip()
-        self.log                = log
-        self.on_complete        = on_complete
-        self.moodle_ready_event = moodle_ready_event
-        self.on_moodle_waiting  = on_moodle_waiting
-        self.h5p_ready_event    = h5p_ready_event
-        self.on_h5p_waiting     = on_h5p_waiting
+        self.bs_url                 = bs_url.strip()
+        self.moodle_url             = moodle_url.strip()
+        self.log                    = log
+        self.on_complete            = on_complete
+        self.moodle_ready_event     = moodle_ready_event
+        self.on_moodle_waiting      = on_moodle_waiting
+        self.h5p_ready_event        = h5p_ready_event
+        self.on_h5p_waiting         = on_h5p_waiting
+        self.file_checklist_event   = file_checklist_event
+        self.on_file_checklist      = on_file_checklist
+        self.file_checklist_result  = []
 
     # ── Brightspace TOC ───────────────────────────────────────────────────────
 
@@ -595,7 +600,7 @@ class ContentChecker:
                 form.append('file', blob, filename);
 
                 const resp = await fetch(
-                    `/d2l/api/lp/1.0/${courseId}/managefiles/file/`,
+                    `/d2l/api/le/1.0/${courseId}/managefiles/file/`,
                     { method: 'POST', body: form, credentials: 'include' }
                 );
 
@@ -613,6 +618,202 @@ class ContentChecker:
             return None
 
         return f"/content/enforced/{course_id}/{filename}"
+
+    # ── Missing file download + upload ────────────────────────────────────────
+
+    async def _offer_missing_file_download(
+        self,
+        context: "BrowserContext",
+        bs_page: "Page",
+        course_id: str,
+        results: list,
+        bs_flat: list,
+    ) -> None:
+        import json as _json
+
+        bs_module_by_title = {i["title"]: i for i in (bs_flat or []) if i["kind"] == "MODULE"}
+        section_to_bs: dict = {}
+        for r in results:
+            if r.get("type") == "SECTION" and r.get("matched"):
+                matched  = r["matched"]
+                bs_title = matched[0] if isinstance(matched, tuple) else matched
+                bs_mod   = bs_module_by_title.get(bs_title, {})
+                section_to_bs[r["name"]] = {"id": bs_mod.get("id"), "title": bs_title}
+
+        missing_files = [
+            {
+                "name":            r["name"],
+                "section":         r.get("section", ""),
+                "href":            r["href"],
+                "bs_module_id":    section_to_bs.get(r.get("section", ""), {}).get("id"),
+                "bs_module_title": section_to_bs.get(r.get("section", ""), {}).get(
+                    "title", r.get("section", "")
+                ),
+            }
+            for r in results
+            if r.get("status") == "missing"
+            and r.get("type") == "FILE"
+            and r.get("href")
+        ]
+
+        if not missing_files:
+            return
+
+        self.log(f"📥 {len(missing_files)} missing FILE(s) — waiting for your selection…", "step")
+        self.on_file_checklist(_json.dumps(missing_files))
+
+        if self.file_checklist_event:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self.file_checklist_event.wait)
+
+        selected = list(self.file_checklist_result) if self.file_checklist_result else []
+        if not selected:
+            self.log("  ↷ Skipped — no files selected.", "dim")
+            return
+
+        await self._download_and_upload_missing(context, bs_page, course_id, selected)
+
+    async def _download_and_upload_missing(
+        self,
+        context: "BrowserContext",
+        bs_page: "Page",
+        course_id: str,
+        files: list,
+    ) -> None:
+        # Per-course subfolder so re-runs and multiple courses stay separate
+        save_dir = Path("downloads") / "files" / course_id
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        self.log("─" * 52, "dim")
+        self.log(f"📥 Downloading {len(files)} file(s) from Moodle…", "step")
+        self.log(f"   Saving to: downloads/files/{course_id}/", "dim")
+
+        ok_count = fail_count = 0
+        for idx, f in enumerate(files, 1):
+            name      = f["name"]
+            href      = f["href"]
+            mod_id    = f.get("bs_module_id")
+            mod_title = f.get("bs_module_title") or f.get("section", "?")
+
+            self.log(f"  [{idx}/{len(files)}] {name}", "info")
+            tab = await context.new_page()
+            try:
+                # Phase 1: navigate to view.php to discover what we get.
+                # Sometimes it redirects directly to the file (download fires).
+                # Sometimes it shows an intermediate "Click here" HTML page.
+                try:
+                    await tab.goto(href, wait_until="domcontentloaded", timeout=20000)
+                except Exception:
+                    pass  # navigation may "fail" when it triggers a download
+                await tab.wait_for_timeout(300)
+
+                # Resolve the actual download URL from the intermediate page.
+                # Prefer the resourceworkaround link; fall back to any pluginfile link;
+                # fall back to retrying the original view.php URL with expect_download.
+                dl_href = href
+                wk = tab.locator('.resourceworkaround a[href*="pluginfile.php"]')
+                if await wk.count() > 0:
+                    dl_href = await wk.first.get_attribute("href")
+                    self.log(f"    → Intermediate page — following download link", "dim")
+                elif "pluginfile.php" in tab.url:
+                    dl_href = tab.url
+                else:
+                    any_pf = tab.locator('a[href*="pluginfile.php"]')
+                    if await any_pf.count() > 0:
+                        dl_href = await any_pf.first.get_attribute("href")
+                        self.log(f"    → Found pluginfile link on page", "dim")
+
+                # Phase 2: navigate to the resolved URL and catch the download.
+                # Append ?forcedownload=1 to pluginfile URLs so Moodle sends
+                # Content-Disposition: attachment instead of opening inline in Chrome.
+                if "pluginfile.php" in dl_href and "forcedownload" not in dl_href:
+                    dl_href += ("&" if "?" in dl_href else "?") + "forcedownload=1"
+                async with tab.expect_download(timeout=30000) as dl_info:
+                    try:
+                        await tab.goto(dl_href, wait_until="domcontentloaded", timeout=20000)
+                    except Exception as _nav_err:
+                        if "Download is starting" not in str(_nav_err):
+                            raise  # real navigation error — re-raise
+                        # Otherwise the download already started — fall through to dl_info.value
+                dl       = await dl_info.value
+                filename = dl.suggested_filename
+                local    = save_dir / filename
+
+                if local.exists():
+                    self.log(f"    ℹ Already cached: {filename} — reusing", "dim")
+                else:
+                    await dl.save_as(str(local))
+                    self.log(f"    ✓ Downloaded: {filename}", "success")
+
+                bs_url = await self._upload_file_to_brightspace(bs_page, course_id, local)
+                if not bs_url:
+                    fail_count += 1
+                    continue
+
+                if mod_id:
+                    created = await self._create_bs_file_topic(
+                        bs_page, course_id, mod_id, name, bs_url
+                    )
+                    if created:
+                        self.log(f"    ✓ Topic created in BS › {mod_title}", "success")
+                    else:
+                        self.log(
+                            f"    ⚠ File uploaded — add topic manually in: {mod_title}", "warning"
+                        )
+                else:
+                    self.log(
+                        f"    ⚠ No BS module match — file saved to downloads/files/{course_id}/",
+                        "warning",
+                    )
+                ok_count += 1
+            except Exception as e:
+                self.log(f"    ✗ {e}", "error")
+                fail_count += 1
+            finally:
+                try:
+                    await tab.close()
+                except Exception:
+                    pass
+
+        self.log(f"📥 Done: {ok_count} uploaded, {fail_count} failed", "step")
+
+    async def _create_bs_file_topic(
+        self, bs_page: "Page", course_id: str, module_id, title: str, file_url: str
+    ) -> bool:
+        result = await bs_page.evaluate(
+            """async ([courseId, moduleId, title, fileUrl]) => {
+                try {
+                    const resp = await fetch(
+                        `/d2l/api/le/1.0/${courseId}/content/modules/${moduleId}/structure/`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'include',
+                            body: JSON.stringify({
+                                Title: title,
+                                ShortTitle: '',
+                                Type: 1,
+                                TopicType: 1,
+                                Url: fileUrl,
+                                IsHidden: false,
+                                IsLocked: false
+                            })
+                        }
+                    );
+                    const body = await resp.text().catch(() => '');
+                    return { ok: resp.ok, status: resp.status, body: body.slice(0, 500) };
+                } catch (e) {
+                    return { ok: false, status: 0, body: String(e) };
+                }
+            }""",
+            [course_id, str(module_id), title, file_url],
+        )
+        if result and result.get("ok"):
+            return True
+        self.log(
+            f"    ✗ Topic API ({result.get('status','?')}): {result.get('body','')}", "error"
+        )
+        return False
 
     async def _relink_moodle_files(
         self, context: "BrowserContext", bs_page: "Page",
@@ -796,7 +997,14 @@ class ContentChecker:
 
             if "login" in tab.url.lower() or "course" not in tab.url.lower():
                 try:
-                    from api_config import MOODLE_USERNAME as moodle_user, MOODLE_PASSWORD as moodle_pass
+                    from api_config import (
+                        MOODLE_USERNAME as moodle_user,
+                        MOODLE_PASSWORD as moodle_pass,
+                    )
+                    try:
+                        from api_config import MICROSOFT_SSO_PASSWORD as sso_pass
+                    except ImportError:
+                        sso_pass = moodle_pass
                 except ImportError:
                     moodle_user, moodle_pass = "", ""
 
@@ -857,7 +1065,7 @@ class ContentChecker:
                         try:
                             pwd_input = tab.locator('#i0118')
                             await pwd_input.wait_for(state="visible", timeout=8000)
-                            await pwd_input.fill(moodle_pass)
+                            await pwd_input.fill(sso_pass)
                             await tab.locator('#idSIButton9').click()
                             await tab.wait_for_load_state("domcontentloaded", timeout=15000)
                             await tab.wait_for_timeout(2000)
@@ -1017,7 +1225,14 @@ class ContentChecker:
                     await loop.run_in_executor(None, self.h5p_ready_event.wait)
 
             # H5P: enable download on each activity so files can be fetched
-            await self._enable_h5p_downloads(context, items)
+            h5p_skipped = (
+                getattr(self, "h5p_skip_flag", None)
+                and self.h5p_skip_flag[0]
+            )
+            if h5p_skipped:
+                self.log("  ⏭ H5P download skipped.", "dim")
+            else:
+                await self._enable_h5p_downloads(context, items)
 
             # Stage 2: download all embedded files from Moodle
             await self._download_moodle_files(tab, items)
@@ -1154,11 +1369,24 @@ class ContentChecker:
         self.log(f"🎮 H5P activities found: {len(h5p_items)}", "step")
         self.log("  Enabling download on each…", "dim")
 
-        success = 0
+        save_dir = Path(__file__).parent.parent / "downloads" / "h5p"
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        success = skipped = 0
         for idx, item in enumerate(h5p_items, 1):
-            name = item["name"]
-            url  = item["href"]
+            name      = item["name"]
+            url       = item["href"]
+            safe_name = re.sub(r'[^\w\s\-]', '', name).strip()[:80]
+            save_path = save_dir / f"{safe_name}.h5p"
+
             self.log(f"  [{idx}/{len(h5p_items)}] {name}", "info")
+
+            if save_path.exists():
+                self.log(f"    ℹ Already downloaded — skipping", "dim")
+                success += 1
+                skipped += 1
+                continue
+
             tab = await context.new_page()
             try:
                 # Step 1: navigate to H5P activity
@@ -1250,10 +1478,6 @@ class ContentChecker:
                     continue
 
                 # Step 7: wait for download dialog then click "Download as an .h5p file"
-                save_dir = Path(__file__).parent.parent / "downloads" / "h5p"
-                save_dir.mkdir(parents=True, exist_ok=True)
-                safe_name = re.sub(r'[^\w\s\-]', '', name).strip()[:80]
-                save_path = save_dir / f"{safe_name}.h5p"
 
                 dl_frame = None
                 for _ in range(10):
@@ -1290,8 +1514,15 @@ class ContentChecker:
                     pass
 
         self.log("", "dim")
-        self.log(f"  H5P: {success}/{len(h5p_items)} downloaded", "success")
-        if success > 0:
+        new_downloads = success - skipped
+        if skipped:
+            self.log(
+                f"  H5P: {new_downloads} downloaded, {skipped} already cached ({success}/{len(h5p_items)} total)",
+                "success",
+            )
+        else:
+            self.log(f"  H5P: {success}/{len(h5p_items)} downloaded", "success")
+        if new_downloads > 0:
             self.log(f"  Saved to: downloads/h5p/", "dim")
 
     async def _scan_moodle_labels_inline(self, tab, items: list) -> list:
@@ -1832,6 +2063,9 @@ class ContentChecker:
 
             self._log_report(results)
             self._log_link_report(moodle_links)
+
+            if self.on_file_checklist:
+                await self._offer_missing_file_download(context, page, course_id, results, bs_flat)
 
             if moodle_links and getattr(self, "do_relink", False):
                 await self._relink_moodle_files(context, page, course_id, moodle_links)

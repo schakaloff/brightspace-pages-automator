@@ -162,33 +162,51 @@ to Brightspace, and replace the URLs. Do NOT blindly download everything from Mo
 
 ---
 
-## Migration Pipeline Status (as of 2026-06-17)
+## Migration Pipeline Status (as of 2026-06-17 session 2)
 
 ### ✅ Done
 - Moodle scrape: sections, items, accordions (Bootstrap .card structure detected + displayed)
 - H5P download: role-switch → settings → JS checkbox → Save → Reuse → download
   - Covers mod/hvp and mod/h5pactivity; fresh page per item; pause point before downloads
+  - Skip-if-cached: checks `downloads/h5p/<name>.h5p` exists before opening any browser tab
+  - H5P pause now shows TWO buttons: "✅ Ready — Download H5P" and "⏭ Skip H5P"
   - Downloaded files go to `downloads/h5p/<name>.h5p`
 - Brightspace TOC fetch + comparison log (exact / fuzzy / missing / found_in_search / found_in_content)
 - Moodle link scan: every Brightspace topic HTML fetched via API, Moodle hrefs collected
   with topic_id so they can be patched back
 - Re-link method built (`_relink_moodle_files`): download → upload → HTML patch → PUT back
-  - **NOT YET TESTED against a real course** — this is the immediate next thing to run
+  - Checkbox is now ON by default
+  - NOT YET TESTED against a real course with actual Moodle links in BS HTML
+- Missing file checklist + bulk download pipeline:
+  - After comparison, modal shows all missing FILEs grouped by section with checkboxes
+  - "Select All" / "Deselect All" + live count label + "Download N Selected" / "Skip All"
+  - Two-phase download: navigate view.php → detect intermediate page → resolve pluginfile URL
+  - `?forcedownload=1` appended so Moodle serves attachment not inline viewer
+  - "Download is starting" error caught inside expect_download block (download still captured)
+  - Skip-if-cached: reuses local file if already in `downloads/files/<course_id>/`
+  - Files organized per-course: `downloads/files/<bs_course_id>/`
+  - Upload: POST `/d2l/api/le/1.0/{courseId}/managefiles/file/` (changed from lp → le)
+  - Topic creation: POST `/d2l/api/le/1.0/{courseId}/content/modules/{moduleId}/structure/`
+  - **Upload API not yet confirmed working** — last run got 404 on lp (now fixed to le)
+- Credentials: `MOODLE_PASSWORD` = manual Moodle login, `MICROSOFT_SSO_PASSWORD` = MS SSO
+  (both in `src/api_config.py`, gitignored)
 
 ### 🔜 Next (in order)
-1. **Test re-link**: run Checker with real BS URL + "Re-link files" ticked, paste log output
-2. **H5P Brightspace upload**: need user to walk through Create New → Page → H5P upload
+1. **Confirm file upload API works** — run again, check if `le` endpoint returns 200
+   - If still fails: fall back to browser UI automation (navigate to module → Upload Files)
+   - Need HTML of D2L "Upload Files" button if browser fallback needed
+2. **Test re-link**: run Checker with real BS course URL (imported from Moodle) + "Re-link
+   files" ticked — should find mymoodle.okanagan.bc.ca hrefs in topic HTML
+3. **H5P Brightspace upload**: need user to walk through Create New → Page → H5P upload
    flow in browser and share HTML — then automate Steps 8+ from H5P_DOWNLOAD_STEPS.txt
-3. **Accordion file downloads**: files inside accordion cards use mod/resource/view.php
-   links (not pluginfile.php) — _download_moodle_files currently skips these
-4. **Log file**: logs/YYYY-MM-DD.txt per run (mentioned in H5P_DOWNLOAD_STEPS.txt)
-5. **Unit Collector (Filip)** runs last — after all links and files are correct
+4. **Unit Collector (Filip)** runs last — after all links and files are correct
 
 ### Key decisions made
 - Files embedded as links in Moodle labels usually don't transfer via the backup import
-- Re-link approach: scan BS HTML for mymoodle URLs → check if file already in BS
-  (notify user if yes) → if not, download from Moodle + bulk upload to matching section
+- Re-link approach: scan BS HTML for mymoodle URLs → download → upload → replace URLs in HTML
+- Missing FILE activities: checklist modal → user selects → bulk download → upload → create topic
 - H5P gets its own new Brightspace Page per activity in the matched section
+- Browser UI fallback for upload if D2L REST API keeps failing
 - Unit Collector assembles AFTER re-link and H5P pages are in place
 
 ## What Still Needs Work (original items)
