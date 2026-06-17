@@ -8,8 +8,9 @@
 AppId={{5A075E1F-F468-4591-9278-72C85EC912BB}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-DefaultDirName={autopf}\{#MyAppName}
+DefaultDirName={localappdata}\BrightspacePagesAutomator
 DefaultGroupName={#MyAppName}
+PrivilegesRequired=lowest
 OutputDir=output
 OutputBaseFilename=BrightspacePagesAutomator-Setup-{#MyAppVersion}
 SetupIconFile=..\assets\icon.ico
