@@ -1176,19 +1176,26 @@ class ContentChecker:
                 await tab.goto(settings_href, wait_until="domcontentloaded", timeout=15000)
                 await tab.wait_for_timeout(800)
 
-                # Step 3: expand Display Options if collapsed
-                toggle = tab.locator('#collapseElement-0')
-                if await toggle.count() > 0:
-                    expanded = await toggle.first.get_attribute("aria-expanded")
-                    if expanded == "false":
-                        self.log(f"    → Expanding Display Options…", "dim")
-                        await toggle.first.click()
-                        await tab.wait_for_timeout(400)
+                # Step 3: expand ALL collapsed sections on the settings page
+                # (section IDs are collapseElement-0, -1, -2 … vary by module type)
+                collapsed = tab.locator('[id^="collapseElement-"][aria-expanded="false"]')
+                n_collapsed = await collapsed.count()
+                if n_collapsed > 0:
+                    self.log(f"    → Expanding {n_collapsed} collapsed section(s)…", "dim")
+                    for i in range(n_collapsed):
+                        try:
+                            await collapsed.nth(i).click()
+                            await tab.wait_for_timeout(300)
+                        except Exception:
+                            pass
 
                 # Step 4: check Allow download if not already checked
+                # mod/hvp           → #id_export
+                # mod/h5pactivity   → #id_enabledownload  OR  #id_displayopt_export
                 self.log(f"    → Checking Allow download checkbox…", "dim")
-                # mod/hvp uses #id_export; mod/h5pactivity uses #id_enabledownload
-                checkbox = tab.locator('#id_export, #id_enabledownload')
+                checkbox = tab.locator(
+                    '#id_export, #id_enabledownload, #id_displayopt_export'
+                )
                 if await checkbox.count() == 0:
                     self.log(f"    ⚠ Allow download checkbox not found", "warning")
                     continue
