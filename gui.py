@@ -875,8 +875,8 @@ class App(ctk.CTk):
 
         body = ctk.CTkFrame(parent, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=14, pady=(14, 14))
-        # Row 7 (log box) gets all extra vertical space
-        body.grid_rowconfigure(7, weight=1)
+        # Row 9 (log box) gets all extra vertical space
+        body.grid_rowconfigure(9, weight=1)
         body.grid_columnconfigure(0, weight=1)
 
         # Brightspace URL
@@ -915,7 +915,16 @@ class App(ctk.CTk):
             body, text="Re-link Moodle files in Brightspace after check",
             variable=self._chk_relink_var,
             font=ctk.CTkFont(size=12),
-        ).grid(row=4, column=0, sticky="w", pady=(0, 8))
+        ).grid(row=4, column=0, sticky="w", pady=(0, 4))
+
+        # H5P embed checkbox
+        self._chk_h5p_embed_var = ctk.BooleanVar(value=False)
+        self._chk_h5p_embed_cb = ctk.CTkCheckBox(
+            body, text="Upload H5P to Brightspace",
+            variable=self._chk_h5p_embed_var,
+            font=ctk.CTkFont(size=12),
+        )
+        self._chk_h5p_embed_cb.grid(row=5, column=0, sticky="w", pady=(0, 8))
 
         # Run button
         self._chk_run_btn = ctk.CTkButton(
@@ -923,11 +932,11 @@ class App(ctk.CTk):
             height=42, font=ctk.CTkFont(size=14, weight="bold"),
             command=self._chk_start_run,
         )
-        self._chk_run_btn.grid(row=5, column=0, sticky="ew", pady=(0, 8))
+        self._chk_run_btn.grid(row=6, column=0, sticky="ew", pady=(0, 8))
 
         # Ready button container
         self._chk_ready_container = ctk.CTkFrame(body, fg_color="transparent")
-        self._chk_ready_container.grid(row=6, column=0, sticky="ew")
+        self._chk_ready_container.grid(row=7, column=0, sticky="ew")
         self._chk_ready_btn = ctk.CTkButton(
             self._chk_ready_container, text="✅  Ready — Scrape Now",
             height=38, font=ctk.CTkFont(size=13, weight="bold"),
@@ -945,13 +954,14 @@ class App(ctk.CTk):
         ctk.CTkLabel(
             body, text="LOG",
             font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
-        ).grid(row=7, column=0, sticky="w", pady=(8, 4))
-        self._chk_log_box = _make_log_box_grid(body, row=8)
+        ).grid(row=8, column=0, sticky="w", pady=(8, 4))
+        self._chk_log_box = _make_log_box_grid(body, row=9)
 
     def _chk_start_run(self):
-        bs_url     = self._chk_bs_entry.get().strip()
-        moodle_url = self._chk_moodle_entry.get().strip()
-        do_relink  = self._chk_relink_var.get()
+        bs_url        = self._chk_bs_entry.get().strip()
+        moodle_url    = self._chk_moodle_entry.get().strip()
+        do_relink     = self._chk_relink_var.get()
+        do_h5p_embed  = self._chk_h5p_embed_var.get()
 
         if not bs_url and not moodle_url:
             _log_append(self._chk_log_box, "⚠  Paste at least one URL.", "warning")
@@ -977,6 +987,19 @@ class App(ctk.CTk):
         self._chk_log_box.configure(state="disabled")
 
         q = self._chk_log_queue
+        root_ref = self
+
+        import tkinter.messagebox as _mbox
+
+        def confirm_fn(msg):
+            result = [None]
+            ev = _threading.Event()
+            def _ask():
+                result[0] = _mbox.askyesno("Continue?", msg, parent=root_ref)
+                ev.set()
+            root_ref.after(0, _ask)
+            ev.wait()
+            return bool(result[0])
 
         def worker():
             class _Capture:
@@ -1014,8 +1037,10 @@ class App(ctk.CTk):
                     on_h5p_waiting=on_h5p_waiting,
                     file_checklist_event=file_checklist_event,
                     on_file_checklist=on_file_checklist,
+                    confirm_fn=confirm_fn,
                 )
                 checker.do_relink = do_relink
+                checker.do_h5p_embed = do_h5p_embed
                 checker.file_checklist_result = file_checklist_result
                 checker.h5p_skip_flag = h5p_skip_flag
                 asyncio.run(checker.run())

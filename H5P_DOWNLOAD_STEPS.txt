@@ -38,46 +38,37 @@ PHASE 2 — BRIGHTSPACE SIDE: Upload + embed each H5P  [NOT YET IMPLEMENTED]
 ================================================================
 Done one H5P at a time. The loop is:
   for each downloaded .h5p file:
-    determine type → create BS content → upload to H5P cloud → insert → save
+    create BS content → upload to H5P cloud → read type → insert → fill title → save
 
---- STEP A: Determine H5P type ---
-
-Type is read from the H5P cloud content list AFTER uploading (Step H).
-  In the content list table, each row shows:
-    span.item-content-type  →  e.g. "Flashcards", "Quiz Set", "Interactive Video"
-
-  Rule:
-    If span.item-content-type text contains "Quiz" (case-insensitive)
-      → create Brightspace QUIZ
-    Otherwise (Flashcards, Interactive Video, Course Presentation, etc.)
-      → create Brightspace PAGE
-
-  Brightspace doesn't have native equivalents for most H5P types, so Page is
-  the safe default. Only actual quiz content needs the Quiz container so that
-  Unit Collector skips it.
-
-Why: Unit Collector skips Quiz-type topics, collects Page-type topics.
+  [PAUSE] "Found X H5P files. Ready to start uploading to Brightspace. Continue?"
 
 --- STEP B: Navigate to the matching Brightspace module ---
 
 Navigate to: /d2l/le/content/{course_id}/Home
 Click the module link (use existing deepFind logic — same as file upload).
 
+  [PAUSE] "Opened module: <module name>. Continue?"
+
 --- STEP C: Click "Create New" button ---
 
 Outer element: d2l-button.create-new-btn  (aria-label="Create New")
 JS click on inner button:
   document.querySelector('d2l-button.create-new-btn').shadowRoot.querySelector('button').click()
+→ Navigates to "What would you like to create?" tile page
 
-→ Navigates to a "What would you like to create?" tile page
+  [PAUSE] "Step C done — Create New opened. Continue?"
 
 --- STEP D: Choose content type tile ---
 
-For PAGE:  a.add-material-tile[href*="loadActivity/file/"]   (text: "Page")
-For QUIZ:  div#quiz-mat-tile                                  (text: "Quiz")
+NOTE: Type is not yet known at this point — we default to PAGE and correct after
+reading span.item-content-type in Step H. If the type turns out to be Quiz, the
+guardrail UI (after Step G7) lets the user reassign before embedding proceeds.
+
+For PAGE (default):  a.add-material-tile[href*="loadActivity/file/"]
+For QUIZ:            div#quiz-mat-tile
 Click the tile — navigates to the editor for that content type.
 
-Set the page/quiz title = the Moodle H5P activity name.
+  [PAUSE] "Step D done — <Page / Quiz> editor opened. Continue?"
 
 --- STEP E: Activate the editor toolbar ---
 
@@ -87,13 +78,17 @@ For QUIZ: must click into the Description box FIRST to activate the inline toolb
                   → d2l-htmleditor[type="inline"]
   Use JS to click the inner editable div.
 
---- STEP F: Open Creator+ Authoring Tools → Interactives ---
+In both cases the toolbar renders with data-state="chomping" — same overflow handling as
+the Page Changer tab: click the three-dots overflow button first, wait 700ms, then proceed.
 
-In the toolbar, find and click the "Creator+ Authoring Tools" button (opens a dropdown).
-In the dropdown, click "Interactives":
-  d2l-htmleditor-menu-item[cmd="h5p"]  (text: "Interactives", aria-label: "Interactives")
+--- STEP F: Open Interactives ---
+
+The button is labeled "Interactives" in the toolbar (same button for both Page and Quiz).
+  Selector: d2l-htmleditor-menu-item[cmd="h5p"]
 → "Interactives" fullscreen dialog opens (d2l-dialog-fullscreen#d2l-h5p-dialog)
   The dialog body contains an LTI iframe loading ocedtech.h5p.com
+
+  [PAUSE] "Step F done — Interactives dialog open. Continue?"
 
 --- STEP G: Upload the .h5p file to H5P cloud ---
 
@@ -106,7 +101,6 @@ G2. Click "Add Content" link
 
 G3. Click "Upload" tab
     Selector (inside iframe): a#h5p-hub-upload
-    (other tabs: "Create Content", "Create from OER Content")
 
 G4. Click "Upload a file" button → file chooser
     Selector (inside iframe): button.h5p-hub-upload-button
@@ -114,14 +108,17 @@ G4. Click "Upload a file" button → file chooser
     Set the .h5p file for this H5P activity.
 
 G5. Wait for upload to complete (file processes on H5P cloud).
+    [unknown wait time — TBD from testing]
 
 G6. Click "Save" button (saves to H5P cloud, stays on view page)
     Selector (inside iframe): label.save-action  or  input[name="submitter"][value="Save"]
     Note: do NOT click "Save and Insert" — that's a different flow.
 
 G7. Click "See content list" (folder icon — goes back to the H5P content list)
-    Selector (inside iframe): a.btn-white.btn-folder  or  a[alt="Back to Content List"]
-    (the button with the folder icon image and tooltip "See content list")
+    Selector (inside iframe): a.btn-white.btn-folder
+    (tooltip "See content list", folder icon image)
+
+  [PAUSE] "Step G done — uploaded <filename>. Type detected: <type>. Continue to insert?"
 
 --- STEP H: Insert the uploaded H5P from the content list ---
 
@@ -132,15 +129,14 @@ Each row has:
   - Insert button: button with text "Insert" inside td.moves-to-bulk-menu
 
 H1. Find the row matching this H5P (by title text matching activity name).
+    Also read span.item-content-type → determines Page vs Quiz (Step A rule).
 H2. Click its "Insert" button
     Selector: td.moves-to-bulk-menu button:has-text("Insert")
-    (this submits the ltiselect form with the content_id set)
+    (submits the ltiselect form with the content_id set)
 
 H3. The Interactives dialog updates — click the "Insert" button in the dialog footer
     d2l-button[data-dialog-action="insert"]  (text: "Insert")
-    JS click on inner button:
-      document.querySelector('d2l-button[data-dialog-action="insert"]')
-              .shadowRoot.querySelector('button').click()
+    JS shadow DOM click on inner button.
 
 --- STEP I: Handle "Add Grade Item" dialog ---
 
@@ -148,33 +144,36 @@ After Insert, D2L shows an "Add Grade Item" dialog (h2 text: "Add Grade Item").
 Click "Skip" to dismiss it without creating a grade item.
   Use deepFind to find button with text "Skip" — ID is dynamic (d2l-uid-*).
 
+  [PAUSE] "Step H done — inserted <filename> into <module>. Continue to save?"
+
 --- STEP I.5: Fill in the title ---
 
-Before clicking Save and Close, set the page/quiz title to the Moodle activity name.
-  Selector: input.d2l-input[maxlength="150"]
-  (ID like d2l-uid-88 is dynamic — use the class + maxlength instead)
-  Fill with: the Moodle H5P activity name (same name used to find the file)
+Before clicking Save and Close, set the title to the Moodle activity name.
+Default is "Untitled" for both Page and Quiz — clear it and type the name.
+
+  For PAGE: input.d2l-input[maxlength="150"]
+  For QUIZ: input.d2l-input[maxlength="256"]  (required field — aria-required="true")
+  IDs like d2l-uid-88 / d2l-uid-6 are dynamic — use class + maxlength to distinguish.
 
 --- STEP J: Save and Close ---
 
-For PAGE: click "Save and Close" button
+Same button for both PAGE and QUIZ:
   d2l-button.d2l-desktop  (text: "Save and Close", primary)
-  JS shadow DOM click on inner button.
+  JS shadow DOM click on inner button:
+    document.querySelector('d2l-button.d2l-desktop').shadowRoot.querySelector('button').click()
 
-For QUIZ: TBD — need to confirm the quiz save button selector.
-  Likely similar primary d2l-button with text "Save and Close".
+  [PAUSE] "Step J done — saved '<filename>' as <Page/Quiz> in '<module>'. Continue to next H5P?"
 
-→ Returns to the module content page. H5P is now embedded as a topic.
+→ Returns to the module content page. Loop continues with next .h5p file.
 
 ---
 
 ================================================================
 OPEN ITEMS
 ================================================================
-  - STEP J for QUIZ: confirm save/close button selector after quiz H5P insert
-  - Selector for "Creator+ Authoring Tools" toolbar button (the one that opens
-    the dropdown with Insert Element / Insert Practice / Layouts / Interactives)
   - Confirm wait time needed after G5 (upload processing) before G6 is clickable
+  - Guardrail UI design: interactive panel showing detected H5P→section→type mappings
+    with drag-and-drop to correct before Phase 3 embedding begins
   - Unmatched sections (no BS module found for Moodle section) → log warning, skip
 
 ================================================================
