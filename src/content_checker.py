@@ -1779,30 +1779,29 @@ class ContentChecker:
     async def _h5p_open_interactives(self, tab, for_quiz: bool = False) -> bool:
         df = self._DEEP_FIND_JS
         try:
+            # Use Playwright native click so the browser properly fires focus/blur events.
+            # JS .click() bypasses the browser's focus machinery — the toolbar stays inactive.
+            editor_clicked = False
             if for_quiz:
-                await self._eval_in_any_frame(tab, f"""() => {{
-                    {df}
-                    var host = deepFind(document, function(e) {{
-                        return e.tagName && e.tagName.toUpperCase() === 'D2L-ACTIVITY-TEXT-EDITOR'
-                            && e.getAttribute('htmleditortype') === 'inline';
-                    }});
-                    if (!host) return false;
-                    var inner = host.shadowRoot
-                        ? host.shadowRoot.querySelector('div[contenteditable="true"]')
-                        : null;
-                    if (inner) {{ inner.click(); return true; }}
-                    return false;
-                }}""")
-            else:
-                await self._eval_in_any_frame(tab, f"""() => {{
-                    {df}
-                    var el = deepFind(document, function(e) {{
-                        return e.getAttribute && e.getAttribute('contenteditable') === 'true'
-                            && e.tagName && e.tagName.toUpperCase() === 'DIV';
-                    }});
-                    if (!el) return false;
-                    el.click(); return true;
-                }}""")
+                try:
+                    await tab.locator("d2l-activity-text-editor").click(timeout=5000)
+                    editor_clicked = True
+                except Exception:
+                    pass
+            if not editor_clicked:
+                for sel in (
+                    "d2l-htmleditor [contenteditable='true']",
+                    "[contenteditable='true']",
+                    "d2l-htmleditor",
+                ):
+                    try:
+                        await tab.locator(sel).first.click(timeout=3000)
+                        editor_clicked = True
+                        break
+                    except Exception:
+                        continue
+            if not editor_clicked:
+                self.log("  ⚠ Could not click editor body — toolbar may not activate", "warn")
             await tab.wait_for_timeout(1500)
 
             # Open the Creator+ Authoring Tools dropdown — retry up to 6s for toolbar to render
