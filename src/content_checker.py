@@ -1748,16 +1748,13 @@ class ContentChecker:
                 }}""")
             await tab.wait_for_timeout(700)
 
+            # Open the Creator+ Authoring Tools dropdown
             await self._eval_in_any_frame(tab, f"""() => {{
                 {df}
                 var btn = deepFind(document, function(e) {{
                     if (e.tagName !== 'BUTTON') return false;
-                    var svgs = e.querySelectorAll ? e.querySelectorAll('svg path') : [];
-                    for (var i = 0; i < svgs.length; i++) {{
-                        var d = svgs[i].getAttribute('d') || '';
-                        if (d.startsWith('M2,7') || d.startsWith('M2 7')) return true;
-                    }}
-                    return false;
+                    var aria = (e.getAttribute && e.getAttribute('aria-label') || '').toLowerCase();
+                    return aria.includes('creator+') || aria.includes('authoring tools');
                 }});
                 if (!btn) return false;
                 btn.click(); return true;
