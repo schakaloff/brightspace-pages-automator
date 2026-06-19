@@ -296,6 +296,63 @@ class ContentChecker:
                 pass
         return False
 
+    async def _diagnose(self, tab, keywords: list) -> None:
+        """
+        When a button isn't found, scan all frames + shadow DOM for elements whose
+        tag, aria-label, text, or cmd attribute contain any of the given keywords.
+        Logs findings so we can identify the right selector without manual inspection.
+        """
+        kw_js = "[" + ", ".join(f'"{k.lower()}"' for k in keywords) + "]"
+        scan_js = f"""() => {{
+            var keywords = {kw_js};
+            function matches(e) {{
+                var tag  = (e.tagName || '').toLowerCase();
+                var txt  = (e.textContent || '').trim().toLowerCase().slice(0, 120);
+                var aria = (e.getAttribute && e.getAttribute('aria-label') || '').toLowerCase();
+                var cmd  = (e.getAttribute && e.getAttribute('cmd') || '').toLowerCase();
+                var cls  = (e.getAttribute && e.getAttribute('class') || '').toLowerCase();
+                var str  = tag + ' ' + txt + ' ' + aria + ' ' + cmd + ' ' + cls;
+                return keywords.some(function(k) {{ return str.includes(k); }});
+            }}
+            function walk(root, hits, depth) {{
+                if (!root || depth <= 0) return;
+                var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+                for (var i = 0; i < all.length; i++) {{
+                    var e = all[i];
+                    if (matches(e)) {{
+                        hits.push({{
+                            tag:  e.tagName,
+                            aria: e.getAttribute && e.getAttribute('aria-label') || '',
+                            cmd:  e.getAttribute && e.getAttribute('cmd') || '',
+                            txt:  (e.textContent || '').trim().slice(0, 80),
+                            html: e.outerHTML.slice(0, 180)
+                        }});
+                    }}
+                    if (e.shadowRoot) walk(e.shadowRoot, hits, depth - 1);
+                }}
+            }}
+            var hits = [];
+            walk(document, hits, 10);
+            return hits;
+        }}"""
+
+        self.log(f"  🔍 Diagnosing missing element (keywords: {keywords})…", "dim")
+        for fi, frame in enumerate(tab.frames):
+            try:
+                hits = await frame.evaluate(scan_js)
+                label = "main" if fi == 0 else f"frame[{fi}] {frame.url[:60]}"
+                if hits:
+                    for h in hits:
+                        self.log(
+                            f"    [{label}] <{h['tag']}> aria='{h['aria']}' cmd='{h['cmd']}' txt='{h['txt'][:50]}'",
+                            "dim",
+                        )
+                        self.log(f"      html: {h['html'][:120]}", "dim")
+                else:
+                    self.log(f"    [{label}] nothing found", "dim")
+            except Exception:
+                pass
+
     # ── Brightspace TOC ───────────────────────────────────────────────────────
 
     async def _fetch_bs_toc(self, page: Page, course_id: str) -> Optional[list]:
@@ -1749,7 +1806,7 @@ class ContentChecker:
             await tab.wait_for_timeout(700)
 
             # Open the Creator+ Authoring Tools dropdown
-            await self._eval_in_any_frame(tab, f"""() => {{
+            creator_found = await self._eval_in_any_frame(tab, f"""() => {{
                 {df}
                 var btn = deepFind(document, function(e) {{
                     if (e.tagName !== 'BUTTON') return false;
@@ -1759,6 +1816,10 @@ class ContentChecker:
                 if (!btn) return false;
                 btn.click(); return true;
             }}""")
+            if not creator_found:
+                self.log("  ✗ Creator+ Authoring Tools button not found", "error")
+                await self._diagnose(tab, ["creator", "authoring", "toolbar", "htmleditor"])
+                return False
             await tab.wait_for_timeout(700)
 
             found = await self._eval_in_any_frame(tab, f"""() => {{
@@ -1775,7 +1836,8 @@ class ContentChecker:
             }}""")
 
             if not found:
-                self.log("  ✗ Interactives button not found", "error")
+                self.log("  ✗ Interactives (h5p) menu item not found", "error")
+                await self._diagnose(tab, ["h5p", "interactive", "creator", "menu-item"])
                 return False
 
             await tab.wait_for_timeout(2000)
@@ -2015,7 +2077,7 @@ class ContentChecker:
                 if not await self._confirm(f"[{idx}/{N}] Opened module: {bs_module_title}. Continue?"):
                     return
 
-                await self._eval_in_any_frame(tab, f"""() => {{
+                create_ok = await self._eval_in_any_frame(tab, f"""() => {{
                     {df}
                     var btn = deepFind(document, function(e) {{
                         var tag = e.tagName && e.tagName.toUpperCase();
@@ -2028,12 +2090,16 @@ class ContentChecker:
                     if (inner) {{ inner.click(); return true; }}
                     btn.click(); return true;
                 }}""")
+                if not create_ok:
+                    self.log(f"    ✗ Create New button not found", "error")
+                    await self._diagnose(tab, ["create new", "create-new", "new", "add"])
+                    continue
                 await tab.wait_for_timeout(2000)
 
                 if not await self._confirm(f"[{idx}/{N}] Create New opened. Continue?"):
                     return
 
-                await self._eval_in_any_frame(tab, f"""() => {{
+                tile_ok = await self._eval_in_any_frame(tab, f"""() => {{
                     {df}
                     var el = deepFind(document, function(e) {{
                         var tag = e.tagName && e.tagName.toUpperCase();
@@ -2045,6 +2111,10 @@ class ContentChecker:
                     if (!el) return false;
                     el.click(); return true;
                 }}""")
+                if not tile_ok:
+                    self.log(f"    ✗ Page tile not found", "error")
+                    await self._diagnose(tab, ["page", "material-tile", "add-material", "file"])
+                    continue
                 try:
                     await tab.wait_for_load_state("domcontentloaded", timeout=15000)
                 except Exception:
