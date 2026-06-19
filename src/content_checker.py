@@ -1803,10 +1803,10 @@ class ContentChecker:
                     if (!el) return false;
                     el.click(); return true;
                 }}""")
-            await tab.wait_for_timeout(700)
+            await tab.wait_for_timeout(1500)
 
-            # Open the Creator+ Authoring Tools dropdown
-            creator_found = await self._eval_in_any_frame(tab, f"""() => {{
+            # Open the Creator+ Authoring Tools dropdown — retry up to 6s for toolbar to render
+            creator_js = f"""() => {{
                 {df}
                 var btn = deepFind(document, function(e) {{
                     if (e.tagName !== 'BUTTON') return false;
@@ -1815,12 +1815,20 @@ class ContentChecker:
                 }});
                 if (!btn) return false;
                 btn.click(); return true;
-            }}""")
+            }}"""
+            creator_found = False
+            for attempt in range(6):
+                creator_found = await self._eval_in_any_frame(tab, creator_js)
+                if creator_found:
+                    break
+                self.log(f"  … waiting for toolbar (attempt {attempt + 1}/6)…", "dim")
+                await tab.wait_for_timeout(1000)
+
             if not creator_found:
-                self.log("  ✗ Creator+ Authoring Tools button not found", "error")
+                self.log("  ✗ Creator+ Authoring Tools button not found after 6s", "error")
                 await self._diagnose(tab, ["creator", "authoring", "toolbar", "htmleditor"])
                 return False
-            await tab.wait_for_timeout(700)
+            await tab.wait_for_timeout(1000)
 
             found = await self._eval_in_any_frame(tab, f"""() => {{
                 {df}
