@@ -353,6 +353,36 @@ class ContentChecker:
             except Exception:
                 pass
 
+    async def _auto_dismiss(self, tab, texts: list) -> bool:
+        """
+        Automatically click any dialog button whose text matches one of `texts`.
+        Checks all frames and shadow DOM. Returns True if something was clicked.
+        Used to silently dismiss known popups (e.g. 'Proceed Without Grade Item').
+        """
+        df = self._DEEP_FIND_JS
+        texts_lower = [t.lower() for t in texts]
+        for frame in tab.frames:
+            try:
+                clicked = await frame.evaluate(f"""() => {{
+                    {df}
+                    var texts = {texts_lower!r};
+                    var btn = deepFind(document, function(e) {{
+                        var tag = (e.tagName || '').toUpperCase();
+                        if (tag !== 'D2L-BUTTON' && tag !== 'BUTTON') return false;
+                        var txt = (e.textContent || '').trim().toLowerCase();
+                        return texts.some(function(t) {{ return txt.includes(t); }});
+                    }});
+                    if (!btn) return false;
+                    var inner = btn.shadowRoot && btn.shadowRoot.querySelector('button');
+                    if (inner) {{ inner.click(); return true; }}
+                    btn.click(); return true;
+                }}""")
+                if clicked:
+                    return True
+            except Exception:
+                pass
+        return False
+
     # ── Brightspace TOC ───────────────────────────────────────────────────────
 
     async def _fetch_bs_toc(self, page: Page, course_id: str) -> Optional[list]:
@@ -876,7 +906,7 @@ class ContentChecker:
     # ─────────────────────────────────────────────────────────────────────────
     _DEEP_FIND_JS = """
     function deepFind(root, fn, depth) {
-        depth = depth === undefined ? 8 : depth;
+        depth = depth === undefined ? 15 : depth;
         if (!root || depth <= 0) return null;
         var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
         for (var i = 0; i < all.length; i++) {
@@ -1804,48 +1834,120 @@ class ContentChecker:
                 self.log("  ⚠ Could not click editor body — toolbar may not activate", "warn")
             await tab.wait_for_timeout(1500)
 
-            # Open the Creator+ Authoring Tools dropdown — retry up to 6s for toolbar to render
-            creator_js = f"""() => {{
-                {df}
-                var btn = deepFind(document, function(e) {{
-                    if (e.tagName !== 'BUTTON') return false;
-                    var aria = (e.getAttribute && e.getAttribute('aria-label') || '').toLowerCase();
-                    return aria.includes('creator+') || aria.includes('authoring tools');
-                }});
-                if (!btn) return false;
-                btn.click(); return true;
-            }}"""
-            creator_found = False
-            for attempt in range(6):
-                creator_found = await self._eval_in_any_frame(tab, creator_js)
-                if creator_found:
-                    break
-                self.log(f"  … waiting for toolbar (attempt {attempt + 1}/6)…", "dim")
+            if for_quiz:
+                # Quiz editor: open via Creator+ Authoring Tools → H5P menu item.
+                creator_js = f"""() => {{
+                    {df}
+                    var btn = deepFind(document, function(e) {{
+                        if (e.tagName !== 'BUTTON') return false;
+                        var aria = (e.getAttribute && e.getAttribute('aria-label') || '').toLowerCase();
+                        return aria.includes('creator+') || aria.includes('authoring tools');
+                    }});
+                    if (!btn) return false;
+                    btn.click(); return true;
+                }}"""
+                creator_found = False
+                for _ in range(3):
+                    creator_found = await self._eval_in_any_frame(tab, creator_js)
+                    if creator_found:
+                        break
+                    await tab.wait_for_timeout(1000)
+
+                if not creator_found:
+                    self.log("  Toolbar chomped — clicking More Actions…", "dim")
+                    chomper_js = f"""() => {{
+                        {df}
+                        var chomper = deepFind(document, function(e) {{
+                            if ((e.tagName || '').toUpperCase() !== 'D2L-HTMLEDITOR-BUTTON-TOGGLE') return false;
+                            return ((e.getAttribute && e.getAttribute('class')) || '').includes('chomper');
+                        }});
+                        if (!chomper) return false;
+                        var inner = chomper.shadowRoot && chomper.shadowRoot.querySelector('button');
+                        if (inner) {{ inner.click(); return true; }}
+                        chomper.click(); return true;
+                    }}"""
+                    await self._eval_in_any_frame(tab, chomper_js)
+                    await tab.wait_for_timeout(700)
+                    for attempt in range(8):
+                        creator_found = await self._eval_in_any_frame(tab, creator_js)
+                        if creator_found:
+                            break
+                        self.log(f"  … waiting for toolbar (attempt {attempt + 1}/8)…", "dim")
+                        await tab.wait_for_timeout(1000)
+
+                if not creator_found:
+                    self.log("  ✗ Creator+ Authoring Tools button not found", "error")
+                    await self._diagnose(tab, ["creator", "authoring", "toolbar", "htmleditor"])
+                    return False
                 await tab.wait_for_timeout(1000)
 
-            if not creator_found:
-                self.log("  ✗ Creator+ Authoring Tools button not found after 6s", "error")
-                await self._diagnose(tab, ["creator", "authoring", "toolbar", "htmleditor"])
-                return False
-            await tab.wait_for_timeout(1000)
+                found = await self._eval_in_any_frame(tab, f"""() => {{
+                    {df}
+                    var item = deepFind(document, function(e) {{
+                        return e.tagName && e.tagName.toUpperCase() === 'D2L-HTMLEDITOR-MENU-ITEM'
+                            && e.getAttribute && e.getAttribute('cmd') === 'h5p';
+                    }});
+                    if (!item) return false;
+                    var inner = item.shadowRoot ? item.shadowRoot.querySelector('button') : null;
+                    if (inner) {{ inner.click(); return true; }}
+                    item.click();
+                    return true;
+                }}""")
 
-            found = await self._eval_in_any_frame(tab, f"""() => {{
-                {df}
-                var item = deepFind(document, function(e) {{
-                    return e.tagName && e.tagName.toUpperCase() === 'D2L-HTMLEDITOR-MENU-ITEM'
-                        && e.getAttribute && e.getAttribute('cmd') === 'h5p';
-                }});
-                if (!item) return false;
-                var inner = item.shadowRoot ? item.shadowRoot.querySelector('button') : null;
-                if (inner) {{ inner.click(); return true; }}
-                item.click();
-                return true;
-            }}""")
+                if not found:
+                    self.log("  ✗ Interactives (h5p) menu item not found", "error")
+                    await self._diagnose(tab, ["h5p", "interactive", "creator", "menu-item"])
+                    return False
 
-            if not found:
-                self.log("  ✗ Interactives (h5p) menu item not found", "error")
-                await self._diagnose(tab, ["h5p", "interactive", "creator", "menu-item"])
-                return False
+            else:
+                # Page editor: use Insert Stuff button (cmd="d2l-isf") — always visible, not chomped.
+                self.log("  → Clicking Insert Stuff toolbar button…", "dim")
+                isf_js = f"""() => {{
+                    {df}
+                    var btn = deepFind(document, function(e) {{
+                        if ((e.tagName || '').toUpperCase() !== 'D2L-HTMLEDITOR-BUTTON') return false;
+                        return e.getAttribute && e.getAttribute('cmd') === 'd2l-isf';
+                    }});
+                    if (!btn) return false;
+                    var inner = btn.shadowRoot && btn.shadowRoot.querySelector('button');
+                    if (inner) {{ inner.click(); return true; }}
+                    btn.click(); return true;
+                }}"""
+                isf_found = False
+                for attempt in range(6):
+                    isf_found = await self._eval_in_any_frame(tab, isf_js)
+                    if isf_found:
+                        break
+                    self.log(f"  … waiting for Insert Stuff button (attempt {attempt + 1}/6)…", "dim")
+                    await tab.wait_for_timeout(1000)
+
+                if not isf_found:
+                    self.log("  ✗ Insert Stuff button not found", "error")
+                    await self._diagnose(tab, ["insert stuff", "isf", "d2l-isf", "toolbar"])
+                    return False
+
+                self.log("  ✓ Insert Stuff dialog opened — looking for H5P provider…", "dim")
+                await tab.wait_for_timeout(2000)
+
+                # The Insert Stuff dialog lists providers; find and click the H5P one.
+                h5p_provider_found = False
+                for attempt in range(5):
+                    try:
+                        # H5P usually appears as a link or list item in the dialog
+                        isf_frame = tab.frame_locator('iframe[class*="insert"], iframe[title*="Insert"], iframe[src*="isf"], d2l-dialog iframe').first
+                        h5p_link = isf_frame.locator('a, li, button').filter(has_text="H5P").first
+                        await h5p_link.click(timeout=3000)
+                        h5p_provider_found = True
+                        self.log("  ✓ H5P provider selected", "dim")
+                        break
+                    except Exception:
+                        pass
+                    await tab.wait_for_timeout(1000)
+
+                if not h5p_provider_found:
+                    self.log("  ✗ H5P provider not found in Insert Stuff dialog", "error")
+                    await self._diagnose(tab, ["h5p", "insert", "provider", "lti"])
+                    return False
 
             await tab.wait_for_timeout(2000)
             return True
@@ -1853,9 +1955,223 @@ class ContentChecker:
             self.log(f"  ✗ _h5p_open_interactives error: {e}", "error")
             return False
 
+    async def _h5p_upload_one(self, tab, h5p_frame, h5p_file, item_name) -> bool:
+        """Upload one .h5p to H5P cloud via an already-open content list frame. Returns to list after."""
+        try:
+            await h5p_frame.locator('a.create-content, a[href*="/content/create"]').first.click(timeout=10000)
+            await tab.wait_for_timeout(2500)
+
+            editor_frame = None
+            for _ in range(10):
+                for frame in tab.frames:
+                    if "h5p.com" in frame.url and "content" in frame.url:
+                        editor_frame = frame
+                        break
+                if editor_frame:
+                    break
+                await tab.wait_for_timeout(1000)
+            if not editor_frame:
+                self.log("  ✗ H5P editor frame lost after Add Content", "error")
+                return False
+
+            hub_frame = None
+            for _ in range(10):
+                for frame in tab.frames:
+                    try:
+                        if await frame.evaluate("() => !!document.querySelector('a#h5p-hub-upload')"):
+                            hub_frame = frame
+                            break
+                    except Exception:
+                        pass
+                if hub_frame:
+                    break
+                await tab.wait_for_timeout(1000)
+            if not hub_frame:
+                self.log("  ✗ H5P hub frame not found", "error")
+                return False
+
+            await hub_frame.evaluate("""() => {
+                var el = document.querySelector('a#h5p-hub-upload');
+                if (el) el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+            }""")
+            await tab.wait_for_timeout(800)
+
+            try:
+                async with tab.expect_file_chooser(timeout=5000) as fc_info:
+                    await hub_frame.locator('button.h5p-hub-upload-button').first.click()
+                fc = await fc_info.value
+                await fc.set_files(str(h5p_file))
+            except Exception:
+                await hub_frame.locator('input[type="file"][accept=".h5p"]').first.set_input_files(str(h5p_file))
+
+            await tab.wait_for_timeout(1000)
+            self.log("  → Clicking Use…", "dim")
+            await hub_frame.locator('button.h5p-hub-use-button').first.click(timeout=10000)
+            self.log("  → Waiting for H5P editor to load after Use…", "dim")
+            await tab.wait_for_timeout(6000)
+
+            dismissed = await self._auto_dismiss(tab, ["skip", "proceed without"])
+            if dismissed:
+                self.log("  → Dismissed skip/grade dialog", "dim")
+                await tab.wait_for_timeout(500)
+
+            # Set content title — search all frames for the input
+            self.log("  → Setting title…", "dim")
+            title_set = False
+            self.log(f"    frames available: {[f.url[:60] for f in tab.frames]}", "dim")
+            for frame in tab.frames:
+                try:
+                    count = await frame.locator('input.h5peditor-text[maxlength="255"]').count()
+                    self.log(f"    frame {frame.url[:50]!r}: found {count} title input(s)", "dim")
+                    if count > 0:
+                        inp = frame.locator('input.h5peditor-text[maxlength="255"]').first
+                        current = await inp.input_value()
+                        self.log(f"    current title value: {current!r}", "dim")
+                        await inp.click(click_count=3)
+                        await inp.fill(item_name)
+                        after = await inp.input_value()
+                        self.log(f"    title set to: {after!r}", "dim")
+                        title_set = True
+                        break
+                except Exception as te:
+                    self.log(f"    frame error: {te}", "dim")
+            if not title_set:
+                self.log("  ⚠ Title input not found — title not set", "warning")
+
+            self.log("  → Clicking Save…", "dim")
+            await editor_frame.locator('label.save-action').first.click(timeout=10000)
+            await tab.wait_for_timeout(2000)
+
+            await editor_frame.locator('a.btn-white.btn-folder').first.click(timeout=10000)
+            try:
+                await editor_frame.wait_for_url("**/content**", timeout=5000)
+            except Exception:
+                await tab.wait_for_timeout(1500)
+
+            self.log(f"  ✓ Uploaded: {item_name}", "success")
+            return True
+        except Exception as e:
+            self.log(f"  ✗ Upload failed for {item_name}: {e}", "error")
+            return False
+
+    async def _h5p_insert_from_list(self, tab, h5p_frame, item_name) -> bool:
+        """Find item by name in H5P content list and insert into BS editor."""
+        df = self._DEEP_FIND_JS
+        try:
+            self.log(f"  → Finding '{item_name}' in content list…", "dim")
+            name_key = item_name[:25].lower()
+            clicked = False
+            for _ in range(5):
+                try:
+                    result = await h5p_frame.evaluate(f"""() => {{
+                        var key = {name_key!r};
+                        var rows = document.querySelectorAll('tr.content-item');
+                        for (var i = 0; i < rows.length; i++) {{
+                            var el = rows[i].querySelector('a.fable-title, .content-title, td a');
+                            var title = el ? el.textContent.trim().toLowerCase() : '';
+                            if (title.includes(key)) {{
+                                var btn = rows[i].querySelector('button.lti-inserter, button');
+                                if (btn) {{ btn.click(); return title; }}
+                            }}
+                        }}
+                        var all = document.querySelectorAll('button.lti-inserter');
+                        if (all.length === 1) {{ all[0].click(); return 'only-one'; }}
+                        return null;
+                    }}""")
+                    if result:
+                        self.log(f"  ✓ Clicked Insert for: {result}", "dim")
+                        clicked = True
+                        break
+                except Exception:
+                    pass
+                await tab.wait_for_timeout(1000)
+
+            if not clicked:
+                self.log(f"  ✗ '{item_name}' not found in H5P content list", "error")
+                return False
+
+            # Click Insert in dialog footer (d2l-button[data-dialog-action="insert"])
+            await tab.wait_for_timeout(1500)
+            self.log("  → Clicking Insert in dialog footer…", "dim")
+            for _ in range(5):
+                try:
+                    ok = await tab.evaluate(f"""async () => {{
+                        {df}
+                        var btn = deepFind(document, function(e) {{
+                            if ((e.tagName || '').toUpperCase() !== 'D2L-BUTTON') return false;
+                            return e.getAttribute('data-dialog-action') === 'insert';
+                        }});
+                        if (!btn) return false;
+                        var inner = btn.shadowRoot && btn.shadowRoot.querySelector('button');
+                        (inner || btn).click();
+                        return true;
+                    }}""")
+                    if ok:
+                        break
+                except Exception:
+                    pass
+                await tab.wait_for_timeout(1000)
+
+            # "Add Grade Item" dialog appears after Insert — dismiss it
+            await tab.wait_for_timeout(1500)
+            self.log("  → Checking for 'Add Grade Item' dialog…", "dim")
+            dismissed = await self._auto_dismiss(tab, ["proceed without grade item", "proceed without", "skip"])
+            if dismissed:
+                self.log("  → Dismissed 'Add Grade Item' dialog", "dim")
+                await tab.wait_for_timeout(1000)
+                # After dismissing, a plain <button class="d2l-button" primary>Insert</button>
+                # appears in the Interactives dialog — search all frames for it
+                self.log("  → Clicking Insert again after grade item dismiss…", "dim")
+                second_insert_clicked = False
+                for attempt in range(8):
+                    for frame in tab.frames:
+                        try:
+                            clicked = await frame.evaluate(f"""() => {{
+                                {df}
+                                // plain <button class="d2l-button"> with text Insert
+                                var btns = document.querySelectorAll('button.d2l-button, button[primary]');
+                                for (var i = 0; i < btns.length; i++) {{
+                                    if ((btns[i].textContent || '').trim().toLowerCase() === 'insert') {{
+                                        btns[i].click();
+                                        return true;
+                                    }}
+                                }}
+                                // also try deepFind for d2l-button custom element with data-dialog-action
+                                var btn = deepFind(document, function(e) {{
+                                    if ((e.tagName || '').toUpperCase() !== 'D2L-BUTTON') return false;
+                                    return e.getAttribute('data-dialog-action') === 'insert';
+                                }});
+                                if (btn) {{
+                                    var inner = btn.shadowRoot && btn.shadowRoot.querySelector('button');
+                                    (inner || btn).click();
+                                    return true;
+                                }}
+                                return false;
+                            }}""")
+                            if clicked:
+                                self.log(f"  ✓ Second Insert clicked (frame: {frame.url[:50]})", "dim")
+                                second_insert_clicked = True
+                                break
+                        except Exception:
+                            pass
+                    if second_insert_clicked:
+                        break
+                    await tab.wait_for_timeout(800)
+                if not second_insert_clicked:
+                    self.log("  ⚠ Second Insert button not found", "warning")
+            else:
+                self.log("  → No grade item dialog found (ok)", "dim")
+
+            return True
+        except Exception as e:
+            self.log(f"  ✗ _h5p_insert_from_list error: {e}", "error")
+            return False
+
     async def _h5p_upload_to_cloud(self, tab, h5p_file) -> tuple:
         df = self._DEEP_FIND_JS
         try:
+            # "Import Existing Interactive" only appears in the quiz Creator+ flow — skip if absent.
+            self.log("  → Checking for 'Import Existing Interactive' button…", "dim")
             await tab.evaluate(f"""async () => {{
                 {df}
                 var btn = deepFind(document, function(e) {{
@@ -1867,67 +2183,150 @@ class ContentChecker:
             }}""")
             await tab.wait_for_timeout(1500)
 
-            lti_frame = tab.frame_locator('[data-test-id="lti-launch-frame"]')
-            await lti_frame.locator('a.create-content, a[href*="/content/create"]').first.click()
-            await tab.wait_for_timeout(1500)
+            # Find the H5P frame by URL — the frame selector differs between Creator+ and Insert Stuff paths.
+            self.log("  → Waiting for H5P LTI frame…", "dim")
+            h5p_frame = None
+            for _ in range(10):
+                for frame in tab.frames:
+                    if "h5p.com" in frame.url:
+                        h5p_frame = frame
+                        break
+                if h5p_frame:
+                    break
+                await tab.wait_for_timeout(1000)
 
-            await lti_frame.locator('a#h5p-hub-upload').first.click()
+            if not h5p_frame:
+                self.log("  ✗ H5P LTI frame not found (no h5p.com frame appeared)", "error")
+                return (None, None)
+
+            self.log(f"  ✓ H5P frame found: {h5p_frame.url[:60]}…", "dim")
+            self.log("  → Clicking 'Add Content'…", "dim")
+            await h5p_frame.locator('a.create-content, a[href*="/content/create"]').first.click(timeout=10000)
+
+            # Frame navigates to /content/create — re-find it by URL.
+            self.log("  → Waiting for H5P editor to load…", "dim")
+            await tab.wait_for_timeout(2500)
+            h5p_frame = None
+            for _ in range(10):
+                for frame in tab.frames:
+                    if "h5p.com" in frame.url and "content" in frame.url:
+                        h5p_frame = frame
+                        break
+                if h5p_frame:
+                    break
+                await tab.wait_for_timeout(1000)
+            if not h5p_frame:
+                self.log("  ✗ H5P editor frame not found after Add Content", "error")
+                return (None, None)
+            self.log(f"  ✓ H5P editor frame: {h5p_frame.url[:60]}…", "dim")
+
+            # The H5P hub editor renders in a child iframe of the H5P frame.
+            # Scan ALL tab.frames to find the one that actually contains the Upload tab.
+            self.log("  → Finding H5P hub editor frame (Upload tab)…", "dim")
+            hub_frame = None
+            for _ in range(10):
+                for frame in tab.frames:
+                    try:
+                        has_it = await frame.evaluate("() => !!document.querySelector('a#h5p-hub-upload')")
+                        if has_it:
+                            hub_frame = frame
+                            break
+                    except Exception:
+                        pass
+                if hub_frame:
+                    break
+                await tab.wait_for_timeout(1000)
+            if not hub_frame:
+                self.log("  ✗ H5P hub editor frame not found", "error")
+                return (None, None)
+            self.log(f"  ✓ Hub frame found: {hub_frame.url[:60]}…", "dim")
+
+            self.log("  → Clicking 'Upload' tab…", "dim")
+            await hub_frame.evaluate("""() => {
+                var el = document.querySelector('a#h5p-hub-upload');
+                if (el) el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+            }""")
             await tab.wait_for_timeout(800)
 
-            upload_btn_count = await lti_frame.locator('button.h5p-hub-upload-button').count()
-            if upload_btn_count > 0:
-                async with tab.expect_file_chooser() as fc_info:
-                    await lti_frame.locator('button.h5p-hub-upload-button').first.click()
+            self.log("  → Selecting file to upload…", "dim")
+            # The upload panel has a styled button over a hidden file input.
+            # Try triggering the file chooser via the visible button first.
+            try:
+                async with tab.expect_file_chooser(timeout=5000) as fc_info:
+                    await hub_frame.locator('button.h5p-hub-upload-button').first.click()
                 fc = await fc_info.value
                 await fc.set_files(str(h5p_file))
-            else:
-                file_input_count = await lti_frame.locator('input[type="file"][accept=".h5p"]').count()
-                if file_input_count > 0:
-                    await lti_frame.locator('input[type="file"][accept=".h5p"]').first.set_input_files(str(h5p_file))
-                else:
-                    self.log("  ✗ No file upload control found in H5P frame", "error")
-                    return (None, None)
+            except Exception:
+                # Fallback: set file directly on hidden input
+                await hub_frame.locator('input[type="file"][accept=".h5p"]').first.set_input_files(str(h5p_file))
 
-            self.log("  → Uploading…", "dim")
+            # After file is chosen, the "Use" button activates — click it.
+            self.log("  → Clicking 'Use'…", "dim")
+            await tab.wait_for_timeout(1000)
+            await hub_frame.locator('button.h5p-hub-use-button').first.click(timeout=10000)
+
+            self.log("  → Uploading (waiting for H5P editor)…", "dim")
             await tab.wait_for_timeout(6000)
 
-            save_loc = lti_frame.locator('label.save-action, input[name="submitter"][value="Save"]')
-            await save_loc.first.click()
-            await tab.wait_for_timeout(2000)
+            self.log("  → Saving…", "dim")
+            # "Save and Insert" closes the Insert Stuff dialog and embeds H5P into the BS editor.
+            # After it's clicked the dialog frame detaches — do NOT try to interact with it further.
+            saved_and_inserted = False
+            try:
+                await h5p_frame.locator('button.lti-inserter.visible-for-many').first.click(timeout=5000)
+                self.log("  ✓ Clicked 'Save and Insert' — H5P embedded in page editor", "dim")
+                saved_and_inserted = True
+            except Exception:
+                pass
 
-            content_id = None
-            for frame in tab.frames:
-                if "h5p.com" in frame.url and "/content/" in frame.url:
-                    m = re.search(r'/content/(\d+)', frame.url)
-                    if m:
-                        content_id = m.group(1)
-                        break
-
-            if not content_id:
+            if not saved_and_inserted:
+                # Plain Save: stays in H5P.com, then we navigate back to content list.
                 try:
-                    edit_href = await lti_frame.locator('a.edit-link[href*="/content/"]').first.get_attribute("href", timeout=3000)
-                    if edit_href:
-                        m = re.search(r'/content/(\d+)', edit_href)
+                    await h5p_frame.locator('label.save-action').first.click(timeout=10000)
+                    self.log("  ✓ Clicked 'Save'", "dim")
+                except Exception as e:
+                    self.log(f"  ✗ Save failed: {e}", "error")
+                    return (None, None)
+                await tab.wait_for_timeout(3000)
+
+                content_id = None
+                for frame in tab.frames:
+                    if "h5p.com" in frame.url and "/content/" in frame.url:
+                        m = re.search(r'/content/(\d+)', frame.url)
                         if m:
                             content_id = m.group(1)
-                except Exception:
-                    pass
+                            break
+                if not content_id:
+                    try:
+                        edit_href = await h5p_frame.locator('a.edit-link[href*="/content/"]').first.get_attribute("href", timeout=3000)
+                        if edit_href:
+                            m = re.search(r'/content/(\d+)', edit_href)
+                            if m:
+                                content_id = m.group(1)
+                    except Exception:
+                        pass
 
-            await lti_frame.locator('a.btn-white.btn-folder').first.click()
-            await tab.wait_for_timeout(1500)
+                self.log("  → Returning to H5P library…", "dim")
+                await h5p_frame.locator('a.btn-white.btn-folder').first.click()
+                await tab.wait_for_timeout(1500)
 
-            h5p_type = ""
-            try:
-                if content_id:
-                    type_el = lti_frame.locator(f'tr.content-item:has(button[onclick*="{content_id}"]) span.item-content-type')
-                    h5p_type = (await type_el.text_content(timeout=5000) or "").strip()
-                else:
-                    type_el = lti_frame.locator('tr.content-item span.item-content-type').first
-                    h5p_type = (await type_el.text_content(timeout=5000) or "").strip()
-            except Exception:
                 h5p_type = ""
+                try:
+                    if content_id:
+                        type_el = h5p_frame.locator(f'tr.content-item:has(button[onclick*="{content_id}"]) span.item-content-type')
+                        h5p_type = (await type_el.text_content(timeout=5000) or "").strip()
+                    else:
+                        type_el = h5p_frame.locator('tr.content-item span.item-content-type').first
+                        h5p_type = (await type_el.text_content(timeout=5000) or "").strip()
+                except Exception:
+                    h5p_type = ""
 
-            return (content_id, h5p_type)
+                return (content_id, h5p_type)
+
+            # "Save and Insert" path: dialog is closed, H5P is now in the BS editor.
+            # Return content_id=None so caller knows to skip _h5p_insert_existing.
+            await tab.wait_for_timeout(2000)
+            return (None, "Page")
 
         except Exception as e:
             self.log(f"  ✗ _h5p_upload_to_cloud error: {e}", "error")
@@ -1963,41 +2362,121 @@ class ContentChecker:
     async def _h5p_finalize(self, tab, title: str, is_quiz: bool) -> bool:
         df = self._DEEP_FIND_JS
         try:
-            skipped = await tab.evaluate(f"""async () => {{
-                {df}
-                var btn = deepFind(document, function(e) {{
-                    return e.tagName === 'BUTTON'
-                        && (e.textContent || '').trim().toLowerCase() === 'skip';
-                }});
-                if (btn) {{ btn.click(); return true; }}
-                return false;
-            }}""")
-            if not skipped:
-                self.log("  ⚠ Skip button not found — continuing", "warning")
-            await tab.wait_for_timeout(1000)
-
-            selector = 'input.d2l-input[maxlength="256"]' if is_quiz else 'input.d2l-input[maxlength="150"]'
-            title_input = tab.locator(selector).first
-            await title_input.triple_click()
-            await title_input.type(title)
+            # Fill title — prefer exact maxlength match, fall back to any d2l-input
+            self.log(f"  → Setting title: {title!r}…", "dim")
+            title_filled = False
+            for sel in [
+                'input.d2l-input[maxlength="256"]' if is_quiz else 'input.d2l-input[maxlength="150"]',
+                'input.d2l-input[maxlength="256"]',
+                'input.d2l-input[maxlength="150"]',
+                'input.d2l-input',
+            ]:
+                try:
+                    loc = tab.locator(sel).first
+                    if await loc.count() > 0:
+                        await loc.click(click_count=3)
+                        await loc.fill(title)
+                        title_filled = True
+                        break
+                except Exception:
+                    pass
+            if not title_filled:
+                self.log("  ⚠ Title input not found", "warning")
             await tab.wait_for_timeout(500)
 
-            await tab.evaluate(f"""async () => {{
+            # Save and Close — use d2l-button.d2l-desktop (documented selector)
+            self.log("  → Clicking Save and Close…", "dim")
+            saved = await tab.evaluate(f"""async () => {{
                 {df}
                 var btn = deepFind(document, function(e) {{
-                    return e.tagName && e.tagName.toUpperCase() === 'D2L-BUTTON'
+                    return (e.tagName || '').toUpperCase() === 'D2L-BUTTON'
                         && e.classList && e.classList.contains('d2l-desktop');
                 }});
-                if (!btn) return;
-                var inner = btn.shadowRoot ? btn.shadowRoot.querySelector('button') : null;
-                if (inner) inner.click();
-                else btn.click();
+                if (!btn) return false;
+                var inner = btn.shadowRoot && btn.shadowRoot.querySelector('button');
+                (inner || btn).click();
+                return true;
             }}""")
-            await tab.wait_for_timeout(3000)
+            if not saved:
+                self.log("  ⚠ d2l-button.d2l-desktop not found — Save and Close may have failed", "warning")
+
+            # After Save and Close: "Add Grade Item" dialog → click "Proceed Without Grade Item"
+            await tab.wait_for_timeout(2000)
+            dismissed = await self._auto_dismiss(tab, ["proceed without grade item", "proceed without"])
+            if dismissed:
+                self.log("  → Auto-dismissed 'Add Grade Item' dialog", "dim")
+            await tab.wait_for_timeout(2000)
             return True
         except Exception as e:
             self.log(f"  ✗ _h5p_finalize error: {e}", "error")
             return False
+
+    async def _open_editor_and_get_h5p_frame(self, tab, bs_base, course_id, module_id):
+        """Navigate to a module, Create New Page, open Insert Stuff → H5P. Returns h5p_frame or None."""
+        df = self._DEEP_FIND_JS
+        await tab.goto(
+            f"{bs_base}/d2l/le/lessons/{course_id}/units/{module_id}",
+            wait_until="domcontentloaded", timeout=20000,
+        )
+        await tab.wait_for_timeout(2000)
+
+        create_ok = await self._eval_in_any_frame(tab, f"""() => {{
+            {df}
+            var btn = deepFind(document, function(e) {{
+                var tag = (e.tagName || '').toUpperCase();
+                if (tag !== 'D2L-BUTTON') return false;
+                return (e.classList && e.classList.contains('create-new-btn'))
+                    || ((e.getAttribute && e.getAttribute('aria-label') || '').includes('Create New'));
+            }});
+            if (!btn) return false;
+            var inner = btn.shadowRoot ? btn.shadowRoot.querySelector('button') : null;
+            (inner || btn).click(); return true;
+        }}""")
+        if not create_ok:
+            self.log("  ✗ Create New button not found", "error")
+            return None
+        await tab.wait_for_timeout(2000)
+
+        tile_ok = await self._eval_in_any_frame(tab, f"""() => {{
+            {df}
+            var el = deepFind(document, function(e) {{
+                return (e.tagName || '').toUpperCase() === 'A'
+                    && e.classList && e.classList.contains('add-material-tile')
+                    && (e.getAttribute('href') || '').includes('loadActivity/file/');
+            }});
+            if (!el) return false;
+            el.click(); return true;
+        }}""")
+        if not tile_ok:
+            self.log("  ✗ Page tile not found", "error")
+            return None
+
+        try:
+            await tab.wait_for_load_state("domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+        await tab.wait_for_timeout(1500)
+
+        dismissed = await self._auto_dismiss(tab, ["proceed without grade item", "proceed without"])
+        if dismissed:
+            self.log("  → Auto-dismissed 'Proceed Without Grade Item'", "dim")
+            await tab.wait_for_timeout(800)
+
+        ok = await self._h5p_open_interactives(tab, for_quiz=False)
+        if not ok:
+            self.log("  ✗ Could not open Insert Stuff / H5P", "error")
+            return None
+
+        h5p_frame = None
+        for _ in range(10):
+            for frame in tab.frames:
+                if "h5p.com" in frame.url:
+                    h5p_frame = frame
+                    break
+            if h5p_frame:
+                break
+            await tab.wait_for_timeout(1000)
+        return h5p_frame
 
     async def _embed_h5p_in_brightspace(self, context, moodle_items, bs_flat, bs_base, course_id) -> None:
         from urllib.parse import urlparse
@@ -2017,8 +2496,8 @@ class ContentChecker:
                 safe = re.sub(r'[^\w\s\-]', '', item["name"]).strip()[:80]
                 section_map[safe] = current_section
 
-        bs_mod_map: dict = {}   # normalized title → module id
-        bs_mod_orig: dict = {}  # normalized title → original title
+        bs_mod_map: dict = {}
+        bs_mod_orig: dict = {}
         for item in bs_flat:
             if item["kind"] == "MODULE" and item.get("id"):
                 nk = _norm(item["title"])
@@ -2037,192 +2516,106 @@ class ContentChecker:
                     bs_module_title = bs_mod_orig[close[0]]
                     bs_module_id = bs_mod_map[close[0]]
             assignments.append({
-                "file": f,
-                "name": name,
+                "file": f, "name": name,
                 "moodle_section": moodle_section,
                 "bs_module_title": bs_module_title,
                 "bs_module_id": bs_module_id,
-                "h5p_type": None,
-                "bs_content_type": "Page",
             })
 
-        # Sort by course order (position of matched module in bs_flat TOC)
         mod_order = {item["id"]: i for i, item in enumerate(bs_flat) if item["kind"] == "MODULE" and item.get("id")}
         assignments.sort(key=lambda a: mod_order.get(a["bs_module_id"], 9999))
 
+        matched = [a for a in assignments if a["bs_module_id"]]
         self.log("", "dim")
-        self.log(f"🎮 H5P Phase 2: {len(assignments)} files to embed in Brightspace", "step")
-        for item in assignments:
-            mod_label = item["bs_module_title"] or "⚠ no match"
-            self.log(f"   {item['name']}  →  {mod_label}", "info")
+        self.log(f"🎮 H5P Phase 2: {len(assignments)} files  ({len(matched)} matched to BS modules)", "step")
+        for a in assignments:
+            self.log(f"   {a['name']}  →  {a['bs_module_title'] or '⚠ no match'}", "info")
 
-        if not await self._confirm(f"Found {len(assignments)} H5P file(s). Ready to upload to Brightspace. Continue?"):
-            return
+        phase_b_only = getattr(self, "h5p_phase_b_only", False)
 
-        df = self._DEEP_FIND_JS
-        N = len(assignments)
+        if not phase_b_only:
+            if not await self._confirm(f"Found {len(assignments)} H5P file(s). Start Phase A (upload all to cloud)?"):
+                return
+
+        # ── Phase A: Upload all files to H5P cloud in one session ────────────
+        if phase_b_only:
+            self.log("⏭ Phase A skipped — going straight to Phase B", "info")
+        else:
+            self.log("", "dim")
+            self.log("Phase A — uploading all H5P files to cloud…", "step")
+
+        if not phase_b_only:
+            first = next((a for a in matched), None)
+            if not first:
+                self.log("  ✗ No matched modules — cannot open editor", "error")
+                return
+
+            upload_tab = await context.new_page()
+            try:
+                h5p_frame = await self._open_editor_and_get_h5p_frame(
+                    upload_tab, bs_base, course_id, first["bs_module_id"]
+                )
+                if not h5p_frame:
+                    self.log("  ✗ Could not open H5P content list for upload phase", "error")
+                    return
+
+                for idx, item in enumerate(assignments, 1):
+                    self.log(f"  [{idx}/{len(assignments)}] Uploading: {item['name']}…", "info")
+                    ok = await self._h5p_upload_one(upload_tab, h5p_frame, item["file"], item["name"])
+                    if not ok:
+                        self.log(f"    ✗ Upload failed — will skip insert for this item", "warning")
+                        item["upload_failed"] = True
+            finally:
+                try:
+                    await upload_tab.close()
+                except Exception:
+                    pass
+
+            self.log("✓ Phase A complete — all files uploaded to H5P cloud", "success")
+
+        if not phase_b_only:
+            if not await self._confirm("Phase A done. Start Phase B (insert each into BS pages)?"):
+                return
+
+        # ── Phase B: Create a BS page per item and insert from cloud list ─────
+        self.log("", "dim")
+        self.log("Phase B — inserting H5P into Brightspace pages…", "step")
+        N = len(matched)
         embedded_count = 0
 
-        for idx, item in enumerate(assignments, 1):
+        for idx, item in enumerate(matched, 1):
+            if item.get("upload_failed"):
+                self.log(f"  [{idx}/{N}] Skipping {item['name']} (upload failed)", "warning")
+                continue
+
             name = item["name"]
             bs_module_title = item["bs_module_title"]
             bs_module_id = item["bs_module_id"]
-            self.log(f"  [{idx}/{N}] {name}  →  {bs_module_title or '(no module)'}", "info")
-
-            if not bs_module_id:
-                self.log(f"    ⚠ No Brightspace module matched — skipping", "warning")
-                continue
+            self.log(f"  [{idx}/{N}] {name}  →  {bs_module_title}", "info")
 
             tab = await context.new_page()
             try:
-                await tab.goto(
-                    f"{bs_base}/d2l/le/lessons/{course_id}/units/{bs_module_id}",
-                    wait_until="domcontentloaded", timeout=20000,
+                h5p_frame = await self._open_editor_and_get_h5p_frame(
+                    tab, bs_base, course_id, bs_module_id
                 )
-                await tab.wait_for_timeout(2000)
-
-                if not await self._confirm(f"[{idx}/{N}] Opened module: {bs_module_title}. Continue?"):
-                    return
-
-                create_ok = await self._eval_in_any_frame(tab, f"""() => {{
-                    {df}
-                    var btn = deepFind(document, function(e) {{
-                        var tag = e.tagName && e.tagName.toUpperCase();
-                        if (tag !== 'D2L-BUTTON') return false;
-                        return (e.classList && e.classList.contains('create-new-btn'))
-                            || ((e.getAttribute && e.getAttribute('aria-label') || '').includes('Create New'));
-                    }});
-                    if (!btn) return false;
-                    var inner = btn.shadowRoot ? btn.shadowRoot.querySelector('button') : null;
-                    if (inner) {{ inner.click(); return true; }}
-                    btn.click(); return true;
-                }}""")
-                if not create_ok:
-                    self.log(f"    ✗ Create New button not found", "error")
-                    await self._diagnose(tab, ["create new", "create-new", "new", "add"])
+                if not h5p_frame:
+                    self.log(f"    ✗ Could not open H5P content list — skipping", "error")
                     continue
-                await tab.wait_for_timeout(2000)
 
-                if not await self._confirm(f"[{idx}/{N}] Create New opened. Continue?"):
-                    return
-
-                tile_ok = await self._eval_in_any_frame(tab, f"""() => {{
-                    {df}
-                    var el = deepFind(document, function(e) {{
-                        var tag = e.tagName && e.tagName.toUpperCase();
-                        if (tag !== 'A') return false;
-                        var cls = e.classList && e.classList.contains('add-material-tile');
-                        var href = e.getAttribute && e.getAttribute('href') || '';
-                        return cls && href.includes('loadActivity/file/');
-                    }});
-                    if (!el) return false;
-                    el.click(); return true;
-                }}""")
-                if not tile_ok:
-                    self.log(f"    ✗ Page tile not found", "error")
-                    await self._diagnose(tab, ["page", "material-tile", "add-material", "file"])
-                    continue
-                try:
-                    await tab.wait_for_load_state("domcontentloaded", timeout=15000)
-                except Exception:
-                    pass
-                await tab.wait_for_timeout(1500)
-
-                if not await self._confirm(f"[{idx}/{N}] Page editor opened. Continue?"):
-                    return
-
-                ok = await self._h5p_open_interactives(tab, for_quiz=False)
+                ok = await self._h5p_insert_from_list(tab, h5p_frame, name)
                 if not ok:
+                    self.log(f"    ✗ Insert failed — skipping", "error")
                     continue
 
-                if not await self._confirm(f"[{idx}/{N}] Interactives dialog open. Continue to upload?"):
-                    return
-
-                content_id, h5p_type = await self._h5p_upload_to_cloud(tab, item["file"])
-                if h5p_type is None:
-                    self.log(f"    ⚠ Upload failed or type undetected — skipping", "warning")
-                    continue
-
-                item["h5p_type"] = h5p_type
-                is_quiz = "quiz" in h5p_type.lower()
-                item["bs_content_type"] = "Quiz" if is_quiz else "Page"
-                self.log(f"    ✓ Type detected: {h5p_type} → BS: {item['bs_content_type']}", "success")
-
-                if not await self._confirm(f"[{idx}/{N}] Uploaded {name}. Type: {h5p_type}. Continue to insert?"):
-                    return
-
-                if is_quiz:
-                    self.log("    ⚠ Quiz type — closing Page editor, reopening as Quiz", "warning")
-                    await tab.close()
-                    tab = await context.new_page()
-
-                    await tab.goto(
-                        f"{bs_base}/d2l/le/lessons/{course_id}/units/{bs_module_id}",
-                        wait_until="domcontentloaded", timeout=20000,
-                    )
-                    await tab.wait_for_timeout(2000)
-
-                    await self._eval_in_any_frame(tab, f"""() => {{
-                        {df}
-                        var btn = deepFind(document, function(e) {{
-                            var tag = e.tagName && e.tagName.toUpperCase();
-                            if (tag !== 'D2L-BUTTON') return false;
-                            return (e.classList && e.classList.contains('create-new-btn'))
-                                || ((e.getAttribute && e.getAttribute('aria-label') || '').includes('Create New'));
-                        }});
-                        if (!btn) return false;
-                        var inner = btn.shadowRoot ? btn.shadowRoot.querySelector('button') : null;
-                        if (inner) {{ inner.click(); return true; }}
-                        btn.click(); return true;
-                    }}""")
-                    await tab.wait_for_timeout(2000)
-
-                    await self._eval_in_any_frame(tab, f"""() => {{
-                        {df}
-                        var el = deepFind(document, function(e) {{
-                            return e.id === 'quiz-mat-tile';
-                        }});
-                        if (!el) return false;
-                        el.click(); return true;
-                    }}""")
-                    try:
-                        await tab.wait_for_load_state("domcontentloaded", timeout=15000)
-                    except Exception:
-                        pass
-                    await tab.wait_for_timeout(1500)
-
-                    await self._h5p_open_interactives(tab, for_quiz=True)
-
-                    await tab.evaluate(f"""async () => {{
-                        {df}
-                        var btn = deepFind(document, function(e) {{
-                            var tag = e.tagName && e.tagName.toUpperCase();
-                            if (tag !== 'D2L-BUTTON' && tag !== 'BUTTON') return false;
-                            return (e.textContent || '').trim() === 'Import Existing Interactive';
-                        }});
-                        if (btn) btn.click();
-                    }}""")
-                    await tab.wait_for_timeout(1500)
-
-                ok = await self._h5p_insert_existing(tab, content_id)
+                ok = await self._h5p_finalize(tab, name, is_quiz=False)
                 if not ok:
-                    continue
+                    self.log(f"    ⚠ Finalize had errors", "warning")
 
-                if not await self._confirm(f"[{idx}/{N}] Inserted {name} into {bs_module_title}. Continue to save?"):
-                    return
-
-                ok = await self._h5p_finalize(tab, item["name"], is_quiz)
-                if not ok:
-                    self.log(f"    ⚠ Finalize step had errors", "warning")
-
-                self.log(f"    ✓ Saved: {name} → {bs_module_title} ({item['bs_content_type']})", "success")
+                self.log(f"    ✓ Done: {name} → {bs_module_title}", "success")
                 embedded_count += 1
 
-                if not await self._confirm(f"[{idx}/{N}] Done. Continue to next H5P?"):
-                    return
-
             except Exception as e:
-                self.log(f"    ✗ Error processing {name}: {e}", "error")
+                self.log(f"    ✗ Error on {name}: {e}", "error")
             finally:
                 try:
                     await tab.close()
@@ -2230,7 +2623,7 @@ class ContentChecker:
                     pass
 
         self.log("", "dim")
-        self.log(f"✅ H5P embed complete: {embedded_count}/{N} embedded", "success")
+        self.log(f"✅ H5P embed complete: {embedded_count}/{N} inserted", "success")
 
     async def _scan_moodle_labels_inline(self, tab, items: list) -> list:
         """

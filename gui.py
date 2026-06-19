@@ -260,7 +260,7 @@ class App(ctk.CTk):
     # ── Self-update check ────────────────────────────────────────────────────
 
     def _any_job_running(self) -> bool:
-        for btn in (self._run_btn, self._col_run_btn, self._chk_run_btn):
+        for btn in (self._run_btn, self._col_run_btn, self._chk_run_btn, self._chk_phase_b_btn):
             if btn.cget("state") == "disabled":
                 return True
         return False
@@ -926,13 +926,26 @@ class App(ctk.CTk):
         )
         self._chk_h5p_embed_cb.grid(row=5, column=0, sticky="w", pady=(0, 8))
 
-        # Run button
+        # Run buttons row
+        btn_row = ctk.CTkFrame(body, fg_color="transparent")
+        btn_row.grid(row=6, column=0, sticky="ew", pady=(0, 8))
+        btn_row.columnconfigure(0, weight=3)
+        btn_row.columnconfigure(1, weight=1)
+
         self._chk_run_btn = ctk.CTkButton(
-            body, text="▶  Run Check",
+            btn_row, text="▶  Run Check",
             height=42, font=ctk.CTkFont(size=14, weight="bold"),
             command=self._chk_start_run,
         )
-        self._chk_run_btn.grid(row=6, column=0, sticky="ew", pady=(0, 8))
+        self._chk_run_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+        self._chk_phase_b_btn = ctk.CTkButton(
+            btn_row, text="⏩ Phase B",
+            height=42, font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#7C3AED", hover_color="#6D28D9",
+            command=self._chk_start_phase_b,
+        )
+        self._chk_phase_b_btn.grid(row=0, column=1, sticky="ew")
 
         # Ready button container
         self._chk_ready_container = ctk.CTkFrame(body, fg_color="transparent")
@@ -1052,12 +1065,103 @@ class App(ctk.CTk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _chk_start_phase_b(self):
+        bs_url     = self._chk_bs_entry.get().strip()
+        moodle_url = self._chk_moodle_entry.get().strip()
+        if not bs_url:
+            _log_append(self._chk_log_box, "⚠  Paste a Brightspace URL first.", "warning")
+            return
+
+        self._save_config({"chk_bs_url": bs_url, "chk_moodle_url": moodle_url})
+
+        import threading as _threading
+        ready_event           = _threading.Event()
+        h5p_ready_event       = _threading.Event()
+        file_checklist_event  = _threading.Event()
+        file_checklist_result = []
+        h5p_skip_flag         = [False]
+        self._chk_moodle_ready_event   = ready_event
+        self._chk_h5p_ready_event      = h5p_ready_event
+        self._chk_file_checklist_event = file_checklist_event
+        self._chk_h5p_skip_flag        = h5p_skip_flag
+        self._chk_ready_btn.pack_forget()
+
+        self._chk_run_btn.configure(state="disabled")
+        self._chk_phase_b_btn.configure(state="disabled", text="Running…")
+        self._chk_log_box.configure(state="normal")
+        self._chk_log_box.delete("1.0", "end")
+        self._chk_log_box.configure(state="disabled")
+
+        q = self._chk_log_queue
+        root_ref = self
+
+        import tkinter.messagebox as _mbox
+
+        def confirm_fn(msg):
+            result = [None]
+            ev = _threading.Event()
+            def _ask():
+                result[0] = _mbox.askyesno("Continue?", msg, parent=root_ref)
+                ev.set()
+            root_ref.after(0, _ask)
+            ev.wait()
+            return bool(result[0])
+
+        def worker():
+            class _Capture:
+                def write(self, t):
+                    if t.strip(): q.put((t.rstrip(), "dim"))
+                def flush(self): pass
+            old, sys.stdout = sys.stdout, _Capture()
+            done_sent = [False]
+
+            def on_complete():
+                if not done_sent[0]:
+                    done_sent[0] = True
+                    q.put(("__DONE__", ""))
+
+            try:
+                from content_checker import ContentChecker
+                def on_h5p_waiting():
+                    q.put(("__CHK_H5P_WAITING__", h5p_skip_flag))
+
+                def on_file_checklist(data_json):
+                    q.put(("__CHK_FILE_CHECKLIST__", (data_json, file_checklist_result, file_checklist_event)))
+
+                checker = ContentChecker(
+                    bs_url=bs_url,
+                    moodle_url=moodle_url,
+                    log=lambda msg, tag="info": q.put((msg, tag)),
+                    on_complete=on_complete,
+                    moodle_ready_event=ready_event,
+                    on_moodle_waiting=lambda: q.put(("__CHK_MOODLE_WAITING__", "")),
+                    h5p_ready_event=h5p_ready_event,
+                    on_h5p_waiting=on_h5p_waiting,
+                    file_checklist_event=file_checklist_event,
+                    on_file_checklist=on_file_checklist,
+                    confirm_fn=confirm_fn,
+                )
+                checker.do_relink = False
+                checker.do_h5p_embed = True
+                checker.h5p_phase_b_only = True
+                checker.file_checklist_result = file_checklist_result
+                checker.h5p_skip_flag = h5p_skip_flag
+                asyncio.run(checker.run())
+            except Exception as e:
+                q.put((f"✗  {e}", "error"))
+            finally:
+                sys.stdout = old
+                on_complete()
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _chk_poll_log(self):
         try:
             while True:
                 msg, tag = self._chk_log_queue.get_nowait()
                 if msg == "__DONE__":
                     self._chk_run_btn.configure(state="normal", text="▶  Run Check")
+                    self._chk_phase_b_btn.configure(state="normal", text="⏩ Phase B")
                     self._chk_ready_btn.pack_forget()
                 elif msg == "__CHK_MOODLE_WAITING__":
                     self._chk_ready_btn.configure(
