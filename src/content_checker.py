@@ -1966,6 +1966,10 @@ class ContentChecker:
                 "bs_content_type": "Page",
             })
 
+        # Sort by course order (position of matched module in bs_flat TOC)
+        mod_order = {item["id"]: i for i, item in enumerate(bs_flat) if item["kind"] == "MODULE" and item.get("id")}
+        assignments.sort(key=lambda a: mod_order.get(a["bs_module_id"], 9999))
+
         self.log("", "dim")
         self.log(f"🎮 H5P Phase 2: {len(assignments)} files to embed in Brightspace", "step")
         for item in assignments:
@@ -1991,18 +1995,11 @@ class ContentChecker:
 
             tab = await context.new_page()
             try:
-                await tab.goto(f"{bs_base}/d2l/le/content/{course_id}/Home", wait_until="domcontentloaded", timeout=20000)
+                await tab.goto(
+                    f"{bs_base}/d2l/le/lessons/{course_id}/units/{bs_module_id}",
+                    wait_until="domcontentloaded", timeout=20000,
+                )
                 await tab.wait_for_timeout(2000)
-
-                await tab.evaluate(f"""(moduleId) => {{
-                    {df}
-                    var el = deepFind(document, function(e) {{
-                        var href = e.getAttribute && e.getAttribute('href') || '';
-                        return href.includes('/' + moduleId);
-                    }});
-                    if (el) el.click();
-                }}""", str(bs_module_id))
-                await tab.wait_for_timeout(1000)
 
                 if not await self._confirm(f"[{idx}/{N}] Opened module: {bs_module_title}. Continue?"):
                     return
@@ -2070,18 +2067,11 @@ class ContentChecker:
                     await tab.close()
                     tab = await context.new_page()
 
-                    await tab.goto(f"{bs_base}/d2l/le/content/{course_id}/Home", wait_until="domcontentloaded", timeout=20000)
+                    await tab.goto(
+                        f"{bs_base}/d2l/le/lessons/{course_id}/units/{bs_module_id}",
+                        wait_until="domcontentloaded", timeout=20000,
+                    )
                     await tab.wait_for_timeout(2000)
-
-                    await tab.evaluate(f"""(moduleId) => {{
-                        {df}
-                        var el = deepFind(document, function(e) {{
-                            var href = e.getAttribute && e.getAttribute('href') || '';
-                            return href.includes('/' + moduleId);
-                        }});
-                        if (el) el.click();
-                    }}""", str(bs_module_id))
-                    await tab.wait_for_timeout(1000)
 
                     await tab.evaluate(f"""() => {{
                         {df}
