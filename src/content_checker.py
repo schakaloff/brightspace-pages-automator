@@ -298,34 +298,37 @@ class ContentChecker:
 
     async def _diagnose(self, tab, keywords: list) -> None:
         """
-        When a button isn't found, scan all frames + shadow DOM for elements whose
-        tag, aria-label, text, or cmd attribute contain any of the given keywords.
-        Logs findings so we can identify the right selector without manual inspection.
+        Scan all frames + shadow DOM for interactive elements matching keywords.
+        Only logs buttons/links/menu-items with a meaningful aria/cmd/text attribute.
+        Capped at 10 results so the log stays readable.
         """
         kw_js = "[" + ", ".join(f'"{k.lower()}"' for k in keywords) + "]"
         scan_js = f"""() => {{
             var keywords = {kw_js};
+            var INTERACTIVE = {{'BUTTON':1,'A':1,'INPUT':1,'D2L-BUTTON':1,
+                'D2L-HTMLEDITOR-MENU-ITEM':1,'D2L-HTMLEDITOR-BUTTON':1,
+                'D2L-HTMLEDITOR-BUTTON-MENU':1,'D2L-BUTTON-ICON':1}};
             function matches(e) {{
-                var tag  = (e.tagName || '').toLowerCase();
-                var txt  = (e.textContent || '').trim().toLowerCase().slice(0, 120);
+                var tag  = (e.tagName || '').toUpperCase();
+                if (!INTERACTIVE[tag]) return false;
                 var aria = (e.getAttribute && e.getAttribute('aria-label') || '').toLowerCase();
                 var cmd  = (e.getAttribute && e.getAttribute('cmd') || '').toLowerCase();
-                var cls  = (e.getAttribute && e.getAttribute('class') || '').toLowerCase();
-                var str  = tag + ' ' + txt + ' ' + aria + ' ' + cmd + ' ' + cls;
+                var txt  = (e.textContent || '').trim().toLowerCase().slice(0, 60);
+                if (!aria && !cmd && !txt) return false;
+                var str  = aria + ' ' + cmd + ' ' + txt;
                 return keywords.some(function(k) {{ return str.includes(k); }});
             }}
             function walk(root, hits, depth) {{
-                if (!root || depth <= 0) return;
+                if (!root || depth <= 0 || hits.length >= 10) return;
                 var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
-                for (var i = 0; i < all.length; i++) {{
+                for (var i = 0; i < all.length && hits.length < 10; i++) {{
                     var e = all[i];
                     if (matches(e)) {{
                         hits.push({{
                             tag:  e.tagName,
                             aria: e.getAttribute && e.getAttribute('aria-label') || '',
                             cmd:  e.getAttribute && e.getAttribute('cmd') || '',
-                            txt:  (e.textContent || '').trim().slice(0, 80),
-                            html: e.outerHTML.slice(0, 180)
+                            txt:  (e.textContent || '').trim().slice(0, 50)
                         }});
                     }}
                     if (e.shadowRoot) walk(e.shadowRoot, hits, depth - 1);
@@ -336,20 +339,17 @@ class ContentChecker:
             return hits;
         }}"""
 
-        self.log(f"  🔍 Diagnosing missing element (keywords: {keywords})…", "dim")
+        self.log(f"  🔍 Diagnose (keywords: {keywords}):", "dim")
         for fi, frame in enumerate(tab.frames):
             try:
                 hits = await frame.evaluate(scan_js)
-                label = "main" if fi == 0 else f"frame[{fi}] {frame.url[:60]}"
+                label = "main" if fi == 0 else f"frame[{fi}]"
                 if hits:
                     for h in hits:
-                        self.log(
-                            f"    [{label}] <{h['tag']}> aria='{h['aria']}' cmd='{h['cmd']}' txt='{h['txt'][:50]}'",
-                            "dim",
-                        )
-                        self.log(f"      html: {h['html'][:120]}", "dim")
-                else:
-                    self.log(f"    [{label}] nothing found", "dim")
+                        aria = f" aria='{h['aria']}'" if h['aria'] else ""
+                        cmd  = f" cmd='{h['cmd']}'" if h['cmd'] else ""
+                        txt  = f" txt='{h['txt']}'" if h['txt'] else ""
+                        self.log(f"    [{label}] <{h['tag']}>{aria}{cmd}{txt}", "dim")
             except Exception:
                 pass
 
