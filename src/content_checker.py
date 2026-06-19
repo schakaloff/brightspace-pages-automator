@@ -285,6 +285,17 @@ class ContentChecker:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.confirm_fn, msg)
 
+    async def _eval_in_any_frame(self, tab, js: str) -> bool:
+        """Run js in each frame until one returns truthy. Returns True if any frame matched."""
+        for frame in tab.frames:
+            try:
+                result = await frame.evaluate(js)
+                if result:
+                    return True
+            except Exception:
+                pass
+        return False
+
     # ── Brightspace TOC ───────────────────────────────────────────────────────
 
     async def _fetch_bs_toc(self, page: Page, course_id: str) -> Optional[list]:
@@ -1712,30 +1723,32 @@ class ContentChecker:
         df = self._DEEP_FIND_JS
         try:
             if for_quiz:
-                await tab.evaluate(f"""async () => {{
+                await self._eval_in_any_frame(tab, f"""() => {{
                     {df}
                     var host = deepFind(document, function(e) {{
                         return e.tagName && e.tagName.toUpperCase() === 'D2L-ACTIVITY-TEXT-EDITOR'
                             && e.getAttribute('htmleditortype') === 'inline';
                     }});
-                    if (!host) return;
+                    if (!host) return false;
                     var inner = host.shadowRoot
                         ? host.shadowRoot.querySelector('div[contenteditable="true"]')
                         : null;
-                    if (inner) inner.click();
+                    if (inner) {{ inner.click(); return true; }}
+                    return false;
                 }}""")
             else:
-                await tab.evaluate(f"""async () => {{
+                await self._eval_in_any_frame(tab, f"""() => {{
                     {df}
                     var el = deepFind(document, function(e) {{
                         return e.getAttribute && e.getAttribute('contenteditable') === 'true'
                             && e.tagName && e.tagName.toUpperCase() === 'DIV';
                     }});
-                    if (el) el.click();
+                    if (!el) return false;
+                    el.click(); return true;
                 }}""")
             await tab.wait_for_timeout(700)
 
-            await tab.evaluate(f"""async () => {{
+            await self._eval_in_any_frame(tab, f"""() => {{
                 {df}
                 var btn = deepFind(document, function(e) {{
                     if (e.tagName !== 'BUTTON') return false;
@@ -1746,11 +1759,12 @@ class ContentChecker:
                     }}
                     return false;
                 }});
-                if (btn) btn.click();
+                if (!btn) return false;
+                btn.click(); return true;
             }}""")
             await tab.wait_for_timeout(700)
 
-            found = await tab.evaluate(f"""async () => {{
+            found = await self._eval_in_any_frame(tab, f"""() => {{
                 {df}
                 var item = deepFind(document, function(e) {{
                     return e.tagName && e.tagName.toUpperCase() === 'D2L-HTMLEDITOR-MENU-ITEM'
@@ -2004,7 +2018,7 @@ class ContentChecker:
                 if not await self._confirm(f"[{idx}/{N}] Opened module: {bs_module_title}. Continue?"):
                     return
 
-                await tab.evaluate(f"""() => {{
+                await self._eval_in_any_frame(tab, f"""() => {{
                     {df}
                     var btn = deepFind(document, function(e) {{
                         var tag = e.tagName && e.tagName.toUpperCase();
@@ -2012,17 +2026,17 @@ class ContentChecker:
                         return (e.classList && e.classList.contains('create-new-btn'))
                             || ((e.getAttribute && e.getAttribute('aria-label') || '').includes('Create New'));
                     }});
-                    if (btn) {{
-                        var inner = btn.shadowRoot ? btn.shadowRoot.querySelector('button') : null;
-                        if (inner) inner.click(); else btn.click();
-                    }}
+                    if (!btn) return false;
+                    var inner = btn.shadowRoot ? btn.shadowRoot.querySelector('button') : null;
+                    if (inner) {{ inner.click(); return true; }}
+                    btn.click(); return true;
                 }}""")
                 await tab.wait_for_timeout(2000)
 
                 if not await self._confirm(f"[{idx}/{N}] Create New opened. Continue?"):
                     return
 
-                await tab.evaluate(f"""() => {{
+                await self._eval_in_any_frame(tab, f"""() => {{
                     {df}
                     var el = deepFind(document, function(e) {{
                         var tag = e.tagName && e.tagName.toUpperCase();
@@ -2031,7 +2045,8 @@ class ContentChecker:
                         var href = e.getAttribute && e.getAttribute('href') || '';
                         return cls && href.includes('loadActivity/file/');
                     }});
-                    if (el) el.click();
+                    if (!el) return false;
+                    el.click(); return true;
                 }}""")
                 try:
                     await tab.wait_for_load_state("domcontentloaded", timeout=15000)
@@ -2073,7 +2088,7 @@ class ContentChecker:
                     )
                     await tab.wait_for_timeout(2000)
 
-                    await tab.evaluate(f"""() => {{
+                    await self._eval_in_any_frame(tab, f"""() => {{
                         {df}
                         var btn = deepFind(document, function(e) {{
                             var tag = e.tagName && e.tagName.toUpperCase();
@@ -2081,19 +2096,20 @@ class ContentChecker:
                             return (e.classList && e.classList.contains('create-new-btn'))
                                 || ((e.getAttribute && e.getAttribute('aria-label') || '').includes('Create New'));
                         }});
-                        if (btn) {{
-                            var inner = btn.shadowRoot ? btn.shadowRoot.querySelector('button') : null;
-                            if (inner) inner.click(); else btn.click();
-                        }}
+                        if (!btn) return false;
+                        var inner = btn.shadowRoot ? btn.shadowRoot.querySelector('button') : null;
+                        if (inner) {{ inner.click(); return true; }}
+                        btn.click(); return true;
                     }}""")
                     await tab.wait_for_timeout(2000)
 
-                    await tab.evaluate(f"""() => {{
+                    await self._eval_in_any_frame(tab, f"""() => {{
                         {df}
                         var el = deepFind(document, function(e) {{
                             return e.id === 'quiz-mat-tile';
                         }});
-                        if (el) el.click();
+                        if (!el) return false;
+                        el.click(); return true;
                     }}""")
                     try:
                         await tab.wait_for_load_state("domcontentloaded", timeout=15000)
