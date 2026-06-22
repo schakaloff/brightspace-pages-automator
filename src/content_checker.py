@@ -1958,6 +1958,22 @@ class ContentChecker:
     async def _h5p_upload_one(self, tab, h5p_frame, h5p_file, item_name) -> bool:
         """Upload one .h5p to H5P cloud via an already-open content list frame. Returns to list after."""
         try:
+            # Check if already exists in cloud content list — skip if found
+            name_key = item_name[:25].lower()
+            already_exists = await h5p_frame.evaluate(f"""() => {{
+                var key = {name_key!r};
+                var rows = document.querySelectorAll('tr.content-item');
+                for (var i = 0; i < rows.length; i++) {{
+                    var el = rows[i].querySelector('a.fable-title, .content-title, td a');
+                    var title = el ? el.textContent.trim().toLowerCase() : '';
+                    if (title.includes(key)) return true;
+                }}
+                return false;
+            }}""")
+            if already_exists:
+                self.log(f"  ✓ Already in H5P cloud: {item_name} — skipping upload", "dim")
+                return True
+
             await h5p_frame.locator('a.create-content, a[href*="/content/create"]').first.click(timeout=10000)
             await tab.wait_for_timeout(2500)
 
@@ -2592,6 +2608,22 @@ class ContentChecker:
             bs_module_title = item["bs_module_title"]
             bs_module_id = item["bs_module_id"]
             self.log(f"  [{idx}/{N}] {name}  →  {bs_module_title}", "info")
+
+            # Check if a topic with this name already exists in the module
+            existing_topics = [
+                t["title"] for t in bs_flat
+                if t.get("kind") == "TOPIC" and t.get("module") == bs_module_title
+            ]
+            name_norm = _norm(name)
+            already_in_bs = any(_norm(t) == name_norm for t in existing_topics)
+            if not already_in_bs and existing_topics:
+                # also try fuzzy — if very close match exists, treat as duplicate
+                close = difflib.get_close_matches(name_norm, [_norm(t) for t in existing_topics], n=1, cutoff=0.85)
+                already_in_bs = bool(close)
+            if already_in_bs:
+                self.log(f"    ✓ Already exists in BS module — skipping", "dim")
+                embedded_count += 1
+                continue
 
             tab = await context.new_page()
             try:
