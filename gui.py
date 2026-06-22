@@ -96,7 +96,7 @@ def _make_log_box(parent) -> ctk.CTkTextbox:
     box = ctk.CTkTextbox(
         border,
         state="disabled",
-        font=ctk.CTkFont(family="Consolas", size=12),
+        font=ctk.CTkFont(family="Consolas", size=14),
         fg_color=_LOG_BG,
         corner_radius=6,
         text_color=_TAG_COLORS["info"],
@@ -115,7 +115,7 @@ def _make_log_box_grid(parent, row: int, col: int = 0) -> ctk.CTkTextbox:
     box = ctk.CTkTextbox(
         border,
         state="disabled",
-        font=ctk.CTkFont(family="Consolas", size=12),
+        font=ctk.CTkFont(family="Consolas", size=14),
         fg_color=_LOG_BG,
         corner_radius=6,
         text_color=_TAG_COLORS["info"],
@@ -125,6 +125,79 @@ def _make_log_box_grid(parent, row: int, col: int = 0) -> ctk.CTkTextbox:
     for tag, color in _TAG_COLORS.items():
         box._textbox.tag_configure(tag, foreground=color)
     return box
+
+
+def _make_searchable_log(parent, use_grid=False, grid_row=0, grid_col=0):
+    """Search bar + log textbox in one wrapper. Returns (wrapper, box)."""
+    wrapper = ctk.CTkFrame(parent, fg_color="transparent")
+    if use_grid:
+        wrapper.grid(row=grid_row, column=grid_col, sticky="nsew")
+    else:
+        wrapper.pack(fill="both", expand=True)
+    wrapper.rowconfigure(1, weight=1)
+    wrapper.columnconfigure(0, weight=1)
+
+    # Search row
+    search_row = ctk.CTkFrame(wrapper, fg_color="transparent")
+    search_row.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+    search_row.columnconfigure(0, weight=1)
+
+    search_var = ctk.StringVar()
+    ctk.CTkEntry(
+        search_row,
+        textvariable=search_var,
+        placeholder_text="🔍  Search log…",
+        height=28,
+        font=ctk.CTkFont(size=12),
+        fg_color="#101016",
+        border_color="#2a2a38",
+    ).grid(row=0, column=0, sticky="ew", padx=(0, 5))
+
+    clear_btn = ctk.CTkButton(
+        search_row, text="✕", width=28, height=28,
+        fg_color="transparent", hover_color=_DIVIDER, text_color=_TEXT_DIM,
+        font=ctk.CTkFont(size=12),
+        command=lambda: search_var.set(""),
+    )
+    clear_btn.grid(row=0, column=1)
+
+    # Log box
+    border = ctk.CTkFrame(wrapper, fg_color=_LOG_BORDER, corner_radius=8)
+    border.grid(row=1, column=0, sticky="nsew")
+    box = ctk.CTkTextbox(
+        border, state="disabled",
+        font=ctk.CTkFont(family="Consolas", size=14),
+        fg_color=_LOG_BG, corner_radius=6,
+        text_color=_TAG_COLORS["info"], border_width=0,
+        wrap="word",
+    )
+    box.pack(fill="both", expand=True, padx=2, pady=2)
+    for tag, color in _TAG_COLORS.items():
+        box._textbox.tag_configure(tag, foreground=color)
+    box._textbox.tag_configure("search_hl", background="#1a4a20", foreground="#90ee90")
+
+    def _do_search(*_):
+        tb = box._textbox
+        tb.tag_remove("search_hl", "1.0", "end")
+        term = search_var.get().strip()
+        if not term:
+            return
+        start = "1.0"
+        first_hit = None
+        while True:
+            pos = tb.search(term, start, nocase=True, stopindex="end")
+            if not pos:
+                break
+            end_pos = f"{pos}+{len(term)}c"
+            tb.tag_add("search_hl", pos, end_pos)
+            if first_hit is None:
+                first_hit = pos
+            start = end_pos
+        if first_hit:
+            tb.see(first_hit)
+
+    search_var.trace_add("write", _do_search)
+    return wrapper, box
 
 
 def _log_append(box: ctk.CTkTextbox, text: str, tag: str = "info") -> None:
@@ -409,15 +482,15 @@ class App(ctk.CTk):
         self._build_checker_tab(tabview.add("✅ Checker"))
         self._build_collector_tab(tabview.add("📦 Unit Collector"))
         self._build_automator_tab(tabview.add("⚡ Page Changer"))
-        self._build_guide_tab(tabview.add("📖 Guide"))
+        self._build_settings_tab(tabview.add("⚙️ Settings"))
 
-    # ── Guide tab ─────────────────────────────────────────────────────────────
+    # ── Settings tab ──────────────────────────────────────────────────────────
 
-    def _build_guide_tab(self, parent):
+    def _build_settings_tab(self, parent):
         import webbrowser, os
 
-        body = ctk.CTkFrame(parent, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=24, pady=24)
+        body = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=16, pady=16)
 
         # Header
         ctk.CTkLabel(
@@ -612,7 +685,7 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
         ).pack(anchor="w", pady=(0, 4))
 
-        self._log_box = _make_log_box(body)
+        _, self._log_box = _make_searchable_log(body)
 
     def _select_theme(self, name: str):
         if name == self._selected_theme:
@@ -865,7 +938,7 @@ class App(ctk.CTk):
             body, text="LOG",
             font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
         ).pack(anchor="w", pady=(0, 4))
-        self._col_log_box = _make_log_box(body)
+        _, self._col_log_box = _make_searchable_log(body)
 
     def _col_select_theme(self, name: str):
         if name == self._selected_col_theme:
@@ -1077,7 +1150,7 @@ class App(ctk.CTk):
             body, text="LOG",
             font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
         ).grid(row=9, column=0, sticky="w", pady=(8, 4))
-        self._chk_log_box = _make_log_box_grid(body, row=10)
+        _, self._chk_log_box = _make_searchable_log(body, use_grid=True, grid_row=10)
         body.grid_rowconfigure(10, weight=1)
 
     def _chk_start_run(self):

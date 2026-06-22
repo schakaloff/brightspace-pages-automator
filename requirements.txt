@@ -1,6 +1,7 @@
 playwright
 customtkinter
 CTkMessagebox
+CTkToolTip
 google-genai
 beautifulsoup4
 lxml
