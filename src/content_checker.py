@@ -775,13 +775,8 @@ class ContentChecker:
 
         selected = list(self.file_checklist_result) if self.file_checklist_result else []
         if not selected:
-            if getattr(self, "do_pdf_upload", True):
-                # Checkbox is on but nothing selected — upload all cached files anyway
-                self.log("  ↷ Nothing selected — uploading any already-cached files…", "dim")
-                selected = missing_files
-            else:
-                self.log("  ↷ Skipped — no files selected.", "dim")
-                return
+            self.log("  ↷ Skipped — no files selected.", "dim")
+            return
 
         await self._download_and_upload_missing(context, bs_page, course_id, selected)
 
