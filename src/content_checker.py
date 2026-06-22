@@ -775,7 +775,28 @@ class ContentChecker:
 
         selected = list(self.file_checklist_result) if self.file_checklist_result else []
         if not selected:
-            self.log("  ↷ Skipped — no files selected.", "dim")
+            if not getattr(self, "do_pdf_upload", True):
+                self.log("  ↷ Skipped — PDF upload disabled.", "dim")
+                return
+            # Checkbox on but Skip All clicked — scan cache and upload what's already there
+            save_dir = Path("downloads") / "files" / course_id
+            cached_from_disk = []
+            if save_dir.exists():
+                cached_files = list(save_dir.iterdir())
+                for f in missing_files:
+                    name_norm = re.sub(r'[^\w]', '', f["name"]).lower()
+                    for cf in cached_files:
+                        cf_norm = re.sub(r'[^\w]', '', cf.stem).lower()
+                        if name_norm in cf_norm or cf_norm in name_norm:
+                            entry = dict(f)
+                            entry["cached_path"] = str(cf)
+                            cached_from_disk.append(entry)
+                            break
+            if cached_from_disk:
+                self.log(f"  → {len(cached_from_disk)} cached file(s) found — uploading to Brightspace…", "dim")
+                await self._download_and_upload_missing(context, bs_page, course_id, cached_from_disk)
+            else:
+                self.log("  ↷ No cached files found in downloads folder.", "dim")
             return
 
         await self._download_and_upload_missing(context, bs_page, course_id, selected)
@@ -806,6 +827,17 @@ class ContentChecker:
             name  = f["name"]
             href  = f["href"]
             self.log(f"  [{idx}/{len(files)}] {name}", "info")
+
+            # Fast-path: file already identified from local cache — skip Moodle entirely
+            if f.get("cached_path"):
+                local = Path(f["cached_path"])
+                if local.exists():
+                    self.log(f"    ℹ Using cached: {local.name}", "dim")
+                    downloaded.append((local, f))
+                else:
+                    self.log(f"    ✗ Cached path missing: {local}", "error")
+                continue
+
             tab = await context.new_page()
             try:
                 try:
