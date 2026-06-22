@@ -685,7 +685,7 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
         ).pack(anchor="w", pady=(0, 4))
 
-        _, self._log_box = _make_searchable_log(body)
+        self._log_box = _make_log_box(body)
 
     def _select_theme(self, name: str):
         if name == self._selected_theme:
@@ -938,7 +938,7 @@ class App(ctk.CTk):
             body, text="LOG",
             font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
         ).pack(anchor="w", pady=(0, 4))
-        _, self._col_log_box = _make_searchable_log(body)
+        self._col_log_box = _make_log_box(body)
 
     def _col_select_theme(self, name: str):
         if name == self._selected_col_theme:
@@ -1150,7 +1150,7 @@ class App(ctk.CTk):
             body, text="LOG",
             font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
         ).grid(row=9, column=0, sticky="w", pady=(8, 4))
-        _, self._chk_log_box = _make_searchable_log(body, use_grid=True, grid_row=10)
+        self._chk_log_box = _make_log_box_grid(body, row=10)
         body.grid_rowconfigure(10, weight=1)
 
     def _chk_start_run(self):
