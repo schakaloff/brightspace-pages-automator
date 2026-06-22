@@ -2059,10 +2059,13 @@ class ContentChecker:
             await tab.wait_for_timeout(2000)
 
             await editor_frame.locator('a.btn-white.btn-folder').first.click(timeout=10000)
+            # Wait for content list to fully reload before returning — prevents
+            # "Execution context was destroyed" on the next upload's evaluate call
             try:
-                await editor_frame.wait_for_url("**/content**", timeout=5000)
+                await editor_frame.wait_for_url("**/content**", timeout=8000)
+                await editor_frame.locator('tr.content-item').first.wait_for(timeout=8000)
             except Exception:
-                await tab.wait_for_timeout(1500)
+                await tab.wait_for_timeout(3000)
 
             self.log(f"  ✓ Uploaded: {item_name}", "success")
             return True
