@@ -5,460 +5,575 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Brightspace Migration Tool — Workflow Guide</title>
 <style>
-  :root {
-    --lake:    #005F63;
-    --sky:     #2ECDDC;
-    --sunset:  #FF8204;
-    --peach:   #DE4F3D;
-    --bg:      #f4f7f8;
-    --card:    #ffffff;
-    --text:    #1a2b2c;
-    --muted:   #5a7a7c;
-    --border:  #d4e5e6;
-    --pause:   #fff7ed;
-    --pause-b: #FF8204;
-  }
+:root {
+  --lake:   #005F63;
+  --lake-d: #004548;
+  --sky:    #2ECDDC;
+  --sunset: #FF8204;
+  --text:   #0f2829;
+  --muted:  #4a7070;
+  --bg:     #f0f7f7;
+  --card:   #ffffff;
+  --pause:  #fff7ed;
+  --border: #c8e3e4;
+}
+*{box-sizing:border-box;margin:0;padding:0}
 
-  * { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
 
-  body {
-    font-family: "Segoe UI", system-ui, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    line-height: 1.6;
-  }
+/* ── HEADER ─────────────────────── */
+.hero {
+  background: linear-gradient(135deg, var(--lake-d) 0%, var(--lake) 60%, #007a80 100%);
+  padding: 56px 40px 48px;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+.hero::before {
+  content:"";
+  position:absolute; inset:0;
+  background: radial-gradient(ellipse at 80% 50%, rgba(46,205,220,.18) 0%, transparent 60%),
+              radial-gradient(ellipse at 20% 80%, rgba(255,130,4,.10) 0%, transparent 50%);
+}
+.hero-inner { position:relative; z-index:1; max-width:780px; margin:0 auto; }
+.hero-eyebrow {
+  display:inline-flex; align-items:center; gap:8px;
+  background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.2);
+  border-radius:24px; padding:5px 16px; margin-bottom:20px;
+  font-size:12px; font-weight:600; letter-spacing:.06em;
+  text-transform:uppercase; color:rgba(255,255,255,.85);
+}
+.hero h1 {
+  font-size:clamp(26px,4vw,40px); font-weight:800;
+  color:#fff; letter-spacing:-.02em; line-height:1.15; margin-bottom:12px;
+}
+.hero h1 span { color:var(--sky); }
+.hero p { font-size:16px; color:rgba(255,255,255,.72); max-width:520px; margin:0 auto; }
 
-  /* ── Header ── */
-  .header {
-    background: linear-gradient(135deg, var(--lake) 0%, #008080 100%);
-    color: #fff;
-    padding: 48px 40px 40px;
-    position: relative;
-    overflow: hidden;
-  }
-  .header::after {
-    content: "";
-    position: absolute;
-    right: -60px; top: -60px;
-    width: 300px; height: 300px;
-    border-radius: 50%;
-    background: rgba(46,205,220,0.15);
-  }
-  .header-inner { max-width: 900px; margin: 0 auto; position: relative; z-index: 1; }
-  .header-tag {
-    display: inline-block;
-    background: rgba(255,255,255,0.18);
-    border: 1px solid rgba(255,255,255,0.3);
-    border-radius: 20px;
-    padding: 4px 14px;
-    font-size: 12px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    margin-bottom: 16px;
-  }
-  .header h1 { font-size: 32px; font-weight: 700; margin-bottom: 8px; }
-  .header p  { font-size: 15px; opacity: 0.82; max-width: 560px; }
+/* ── PHASE SELECTOR ──────────────── */
+.phase-nav {
+  display:flex; justify-content:center; align-items:center;
+  gap:0; padding:40px 24px 0;
+  max-width:900px; margin:0 auto;
+  position:relative;
+}
 
-  /* ── Phase strip ── */
-  .phase-strip {
-    background: var(--lake);
-    padding: 0 40px;
-  }
-  .phase-strip-inner {
-    max-width: 900px; margin: 0 auto;
-    display: flex; align-items: stretch;
-  }
-  .phase-pill {
-    flex: 1;
-    display: flex; align-items: center; gap: 10px;
-    padding: 14px 0;
-    color: rgba(255,255,255,0.55);
-    font-size: 13px; font-weight: 600;
-    border-bottom: 3px solid transparent;
-    cursor: default;
-    transition: color .2s;
-  }
-  .phase-pill.active  { color: #fff; border-color: var(--sky); }
-  .phase-pill .num {
-    width: 26px; height: 26px; border-radius: 50%;
-    background: rgba(255,255,255,0.12);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 12px; font-weight: 700; flex-shrink: 0;
-  }
-  .phase-pill.active .num { background: var(--sky); color: var(--lake); }
-  .phase-arrow {
-    color: rgba(255,255,255,0.25);
-    padding: 0 8px;
-    display: flex; align-items: center;
-    font-size: 18px;
-  }
+.phase-connector {
+  flex: 1; height:2px; max-width:80px;
+  background: var(--border);
+  position:relative; overflow:visible;
+}
+.phase-connector::after {
+  content:"";
+  position:absolute; top:-3px; left:0;
+  width:8px; height:8px; border-radius:50%;
+  background:var(--sky);
+  animation: flow-dot 2s ease-in-out infinite;
+  opacity:0;
+}
+.phase-connector:nth-child(2)::after { animation-delay:.0s; }
+.phase-connector:nth-child(4)::after { animation-delay:.7s; }
 
-  /* ── Main content ── */
-  .main { max-width: 900px; margin: 0 auto; padding: 40px 40px 60px; }
+@keyframes flow-dot {
+  0%   { left:0%;   opacity:0; }
+  10%  { opacity:1; }
+  90%  { opacity:1; }
+  100% { left:100%; opacity:0; }
+}
 
-  /* ── Section header ── */
-  .section-header {
-    display: flex; align-items: center; gap: 16px;
-    margin-bottom: 24px; margin-top: 48px;
-  }
-  .section-header:first-child { margin-top: 0; }
-  .step-badge {
-    width: 48px; height: 48px; border-radius: 14px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 22px; flex-shrink: 0;
-  }
-  .badge-checker   { background: #e0f5f5; }
-  .badge-collector { background: #fff0e6; }
-  .badge-changer   { background: #f0fafa; }
+.phase-card {
+  background:var(--card);
+  border:2px solid var(--border);
+  border-radius:20px;
+  padding:20px 24px;
+  min-width:200px; max-width:240px;
+  text-align:center;
+  cursor:pointer;
+  transition: border-color .25s, box-shadow .25s, transform .2s;
+  position:relative;
+}
+.phase-card:hover {
+  transform:translateY(-3px);
+  box-shadow:0 12px 32px rgba(0,95,99,.12);
+}
+.phase-card.active {
+  border-color:var(--lake);
+  box-shadow:0 0 0 4px rgba(0,95,99,.08), 0 8px 24px rgba(0,95,99,.12);
+}
+.phase-card .phase-num {
+  width:36px; height:36px; border-radius:50%;
+  background:var(--bg); border:2px solid var(--border);
+  display:flex; align-items:center; justify-content:center;
+  font-size:13px; font-weight:800; color:var(--muted);
+  margin:0 auto 10px;
+  transition: background .25s, border-color .25s, color .25s;
+}
+.phase-card.active .phase-num {
+  background:var(--lake); border-color:var(--lake); color:#fff;
+}
+.phase-card .phase-icon { font-size:26px; margin-bottom:6px; }
+.phase-card h3 { font-size:14px; font-weight:700; color:var(--text); margin-bottom:3px; }
+.phase-card p  { font-size:11px; color:var(--muted); }
 
-  .section-title h2  { font-size: 20px; font-weight: 700; color: var(--lake); }
-  .section-title p   { font-size: 13px; color: var(--muted); margin-top: 2px; }
+.phase-card .check-done {
+  position:absolute; top:-8px; right:-8px;
+  width:22px; height:22px; border-radius:50%;
+  background:#16a34a; color:#fff;
+  font-size:11px; font-weight:700;
+  display:flex; align-items:center; justify-content:center;
+  opacity:0; transition:opacity .3s;
+}
 
-  /* ── Steps ── */
-  .steps { display: flex; flex-direction: column; gap: 10px; }
+/* ── DETAIL PANEL ────────────────── */
+.detail-wrap {
+  max-width:900px; margin:0 auto; padding:32px 24px 60px;
+}
 
-  .step {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 16px 20px;
-    display: flex; gap: 16px; align-items: flex-start;
-  }
-  .step-num {
-    width: 28px; height: 28px; border-radius: 50%;
-    background: var(--lake); color: #fff;
-    font-size: 12px; font-weight: 700;
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0; margin-top: 1px;
-  }
-  .step-body h3  { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
-  .step-body p   { font-size: 13px; color: var(--muted); }
+.detail-panel {
+  display:none;
+  animation: fade-up .3s ease both;
+}
+.detail-panel.active { display:block; }
 
-  /* ── Pause callout ── */
-  .pause {
-    background: var(--pause);
-    border: 1px solid #fcd9a8;
-    border-left: 4px solid var(--pause-b);
-    border-radius: 12px;
-    padding: 16px 20px;
-    display: flex; gap: 14px; align-items: flex-start;
-  }
-  .pause-icon { font-size: 20px; flex-shrink: 0; margin-top: 1px; }
-  .pause-body h3 { font-size: 14px; font-weight: 700; color: #92400e; margin-bottom: 3px; }
-  .pause-body p  { font-size: 13px; color: #7c5228; }
+@keyframes fade-up {
+  from { opacity:0; transform:translateY(12px); }
+  to   { opacity:1; transform:translateY(0); }
+}
 
-  /* ── Connector arrow between phases ── */
-  .connector {
-    display: flex; align-items: center; gap: 12px;
-    margin: 32px 0 8px;
-    color: var(--muted); font-size: 13px;
-  }
-  .connector::before,
-  .connector::after {
-    content: ""; flex: 1;
-    height: 1px; background: var(--border);
-  }
-  .connector-badge {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 20px;
-    padding: 5px 16px;
-    font-weight: 600;
-    display: flex; align-items: center; gap: 6px;
-    white-space: nowrap;
-  }
+.panel-header {
+  display:flex; align-items:center; gap:14px;
+  margin-bottom:28px;
+}
+.panel-icon {
+  width:52px; height:52px; border-radius:16px;
+  display:flex; align-items:center; justify-content:center;
+  font-size:24px;
+}
+.icon-checker   { background:#e0f5f5; }
+.icon-collector { background:#fff0e6; }
+.icon-changer   { background:#f0f0ff; }
 
-  /* ── Tips box ── */
-  .tips {
-    background: linear-gradient(135deg, #e8f8f8 0%, #f0fcfc 100%);
-    border: 1px solid #b2e0e2;
-    border-radius: 14px;
-    padding: 24px 28px;
-    margin-top: 48px;
-  }
-  .tips h3 { font-size: 15px; font-weight: 700; color: var(--lake); margin-bottom: 12px; }
-  .tips ul { padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
-  .tips li { font-size: 13px; color: var(--text); }
-  .tips li span { color: var(--muted); }
+.panel-header h2 { font-size:22px; font-weight:800; color:var(--lake); }
+.panel-header p  { font-size:13px; color:var(--muted); margin-top:2px; }
 
-  /* ── Footer ── */
-  .footer {
-    background: var(--lake);
-    color: rgba(255,255,255,0.6);
-    text-align: center;
-    padding: 20px;
-    font-size: 12px;
-  }
-  .footer strong { color: #fff; }
+/* ── TIMELINE ────────────────────── */
+.timeline {
+  position:relative;
+  padding-left:40px;
+}
+.timeline::before {
+  content:"";
+  position:absolute; left:11px; top:8px; bottom:8px;
+  width:2px;
+  background: linear-gradient(to bottom, var(--lake) 0%, var(--sky) 50%, var(--lake) 100%);
+  background-size:100% 200%;
+  animation: line-flow 3s ease infinite;
+}
+@keyframes line-flow {
+  0%   { background-position: 0% 0%; }
+  100% { background-position: 0% 200%; }
+}
 
-  /* ── Print ── */
-  @media print {
-    .phase-strip { background: #333; -webkit-print-color-adjust: exact; }
-    body { background: #fff; }
-  }
+/* ── STEP ─────────────────────────── */
+.tl-step {
+  position:relative; margin-bottom:12px;
+}
+.tl-step::before {
+  content:"";
+  position:absolute; left:-34px; top:14px;
+  width:12px; height:12px; border-radius:50%;
+  background:var(--lake); border:2px solid var(--bg);
+  box-shadow:0 0 0 3px rgba(0,95,99,.15);
+  z-index:1;
+}
+
+.step-card {
+  background:var(--card);
+  border:1px solid var(--border);
+  border-radius:14px;
+  padding:16px 20px;
+  transition:box-shadow .2s, border-color .2s;
+}
+.step-card:hover {
+  border-color:#a0d4d6;
+  box-shadow:0 4px 16px rgba(0,95,99,.08);
+}
+.step-card h3 {
+  font-size:14px; font-weight:700; color:var(--text); margin-bottom:4px;
+}
+.step-card p { font-size:13px; color:var(--muted); line-height:1.5; }
+
+/* ── PAUSE ────────────────────────── */
+.tl-pause {
+  position:relative; margin-bottom:12px;
+}
+.tl-pause::before {
+  content:"⏸";
+  position:absolute; left:-38px; top:12px;
+  font-size:14px; width:20px; text-align:center;
+  z-index:1;
+}
+
+.pause-card {
+  background:var(--pause);
+  border:1px solid #fcd9a8;
+  border-left:4px solid var(--sunset);
+  border-radius:14px;
+  padding:16px 20px;
+}
+.pause-card h3 {
+  font-size:13px; font-weight:700; color:#92400e; margin-bottom:4px;
+  display:flex; align-items:center; gap:6px;
+}
+.pause-card p { font-size:13px; color:#7c5228; line-height:1.5; }
+
+/* ── PHASE SEPARATOR ─────────────── */
+.phase-sep {
+  display:flex; align-items:center; gap:14px;
+  margin:36px 0 4px;
+  font-size:12px; font-weight:700; color:var(--muted);
+  letter-spacing:.06em; text-transform:uppercase;
+}
+.phase-sep::before,.phase-sep::after {
+  content:""; flex:1; height:1px; background:var(--border);
+}
+
+/* ── TIPS ─────────────────────────── */
+.tips {
+  background:linear-gradient(135deg, #e4f4f5 0%, #f0fbfb 100%);
+  border:1px solid #b0d8da;
+  border-radius:16px;
+  padding:24px 28px;
+  margin-top:16px;
+}
+.tips h3 {
+  font-size:14px; font-weight:700; color:var(--lake);
+  margin-bottom:12px; display:flex; align-items:center; gap:8px;
+}
+.tips ul { padding-left:0; list-style:none; display:flex; flex-direction:column; gap:8px; }
+.tips li {
+  display:flex; gap:10px; align-items:flex-start;
+  font-size:13px; color:var(--text);
+}
+.tips li::before { content:"→"; color:var(--sky); font-weight:700; flex-shrink:0; }
+
+/* ── TAB SWITCHER ────────────────── */
+.tab-bar {
+  display:flex; gap:4px;
+  background:#e6f2f2;
+  border-radius:12px;
+  padding:4px;
+  margin-bottom:28px;
+  width:fit-content;
+}
+.tab-btn {
+  padding:8px 20px; border:none; border-radius:9px;
+  background:transparent; cursor:pointer;
+  font-size:13px; font-weight:600; color:var(--muted);
+  transition:background .2s, color .2s;
+}
+.tab-btn.active {
+  background:var(--card);
+  color:var(--lake);
+  box-shadow:0 2px 8px rgba(0,0,0,.08);
+}
+
+/* ── FOOTER ──────────────────────── */
+footer {
+  text-align:center; padding:24px;
+  font-size:12px; color:var(--muted);
+  border-top:1px solid var(--border);
+  background:var(--card);
+}
+footer a { color:var(--lake); text-decoration:none; }
+
+@media (max-width:680px) {
+  .phase-nav { flex-direction:column; gap:12px; }
+  .phase-connector { display:none; }
+  .phase-card { max-width:100%; width:100%; }
+}
 </style>
 </head>
 <body>
 
-<!-- ── Header ─────────────────────────────────────────────── -->
-<div class="header">
-  <div class="header-inner">
-    <div class="header-tag">Okanagan College — Educational Technology</div>
-    <h1>Brightspace Migration Tool</h1>
-    <p>A step-by-step guide for migrating Moodle courses to Brightspace (D2L). Follow the three phases in order for a complete migration.</p>
+<!-- HERO -->
+<div class="hero">
+  <div class="hero-inner">
+    <div class="hero-eyebrow">
+      🎓 Okanagan College — Educational Technology
+    </div>
+    <h1>Moodle → <span>Brightspace</span><br>Migration Workflow</h1>
+    <p>Follow three phases in order. Click a phase below to see exactly what happens at each step.</p>
   </div>
 </div>
 
-<!-- ── Phase strip ─────────────────────────────────────────── -->
-<div class="phase-strip">
-  <div class="phase-strip-inner">
-    <div class="phase-pill active">
-      <div class="num">1</div> Checker — Compare &amp; Transfer
-    </div>
-    <div class="phase-arrow">›</div>
-    <div class="phase-pill active">
-      <div class="num">2</div> Unit Collector — Assemble
-    </div>
-    <div class="phase-arrow">›</div>
-    <div class="phase-pill active">
-      <div class="num">3</div> Page Changer — Restyle
-    </div>
+<!-- PHASE SELECTOR -->
+<div class="phase-nav">
+  <div class="phase-card active" onclick="selectPhase(0)" id="pc0">
+    <div class="phase-num">1</div>
+    <div class="phase-icon">✅</div>
+    <h3>Checker</h3>
+    <p>Compare &amp; Transfer</p>
+    <div class="check-done">✓</div>
+  </div>
+
+  <div class="phase-connector"></div>
+
+  <div class="phase-card" onclick="selectPhase(1)" id="pc1">
+    <div class="phase-num">2</div>
+    <div class="phase-icon">📦</div>
+    <h3>Unit Collector</h3>
+    <p>Assemble</p>
+    <div class="check-done">✓</div>
+  </div>
+
+  <div class="phase-connector"></div>
+
+  <div class="phase-card" onclick="selectPhase(2)" id="pc2">
+    <div class="phase-num">3</div>
+    <div class="phase-icon">⚡</div>
+    <h3>Page Changer</h3>
+    <p>Restyle</p>
+    <div class="check-done">✓</div>
   </div>
 </div>
 
-<!-- ── Main ────────────────────────────────────────────────── -->
-<div class="main">
+<!-- DETAIL PANELS -->
+<div class="detail-wrap">
 
-  <!-- ═══ PHASE 1 ═══ -->
-  <div class="section-header">
-    <div class="step-badge badge-checker">✅</div>
-    <div class="section-title">
-      <h2>Phase 1 — Checker Tab</h2>
-      <p>Compares your Moodle course against Brightspace and fills in everything that's missing.</p>
+  <!-- ═══ PHASE 1: CHECKER ═══ -->
+  <div class="detail-panel active" id="panel0">
+    <div class="panel-header">
+      <div class="panel-icon icon-checker">✅</div>
+      <div>
+        <h2>Phase 1 — Checker</h2>
+        <p>Finds everything missing from Brightspace and migrates it automatically.</p>
+      </div>
+    </div>
+
+    <div class="timeline">
+      <div class="tl-step">
+        <div class="step-card">
+          <h3>Log in to Brightspace</h3>
+          <p>The app opens a browser window. Sign in with your OC account and complete MFA. The script continues automatically once you reach the home page.</p>
+        </div>
+      </div>
+
+      <div class="tl-pause">
+        <div class="pause-card">
+          <h3>⏸ Pause — Navigate to your Moodle course</h3>
+          <p>A Moodle tab opens. Go to the correct course page, then click <strong>✅ Ready — Scrape Now</strong> in the app. This confirms you're on the right course before anything is read.</p>
+        </div>
+      </div>
+
+      <div class="tl-step">
+        <div class="step-card">
+          <h3>Scrape Moodle course structure</h3>
+          <p>Every section, file, link, quiz, and H5P activity is read from Moodle and catalogued.</p>
+        </div>
+      </div>
+
+      <div class="tl-pause">
+        <div class="pause-card">
+          <h3>⏸ Pause — Verify instructor role for H5P</h3>
+          <p>H5P downloads require Teacher access. The app tries to switch roles automatically — if it can't, it stops here for you to confirm before clicking <strong>✅ Ready — Download H5P</strong>.</p>
+        </div>
+      </div>
+
+      <div class="tl-step">
+        <div class="step-card">
+          <h3>Download H5P activities</h3>
+          <p>Each H5P activity (drag-the-words, flashcards, quizzes, etc.) is saved as a <code>.h5p</code> file. Files already downloaded are skipped.</p>
+        </div>
+      </div>
+
+      <div class="tl-step">
+        <div class="step-card">
+          <h3>Compare Moodle vs Brightspace</h3>
+          <p>Every Moodle item is matched against Brightspace — exact matches, fuzzy matches, and missing items are all identified. A full report is shown.</p>
+        </div>
+      </div>
+
+      <div class="tl-pause">
+        <div class="pause-card">
+          <h3>⏸ Pause — Select files to download</h3>
+          <p>A checklist shows all files missing from Brightspace. You choose which to include — some may be intentionally absent. Click <strong>Download Selected</strong> or <strong>Skip All</strong>.</p>
+        </div>
+      </div>
+
+      <div class="tl-step">
+        <div class="step-card">
+          <h3>Download &amp; upload missing files</h3>
+          <p>Selected files are downloaded from Moodle, renamed to their original course names, and uploaded to the correct Brightspace modules. Each upload is verified via the D2L API.</p>
+        </div>
+      </div>
+
+      <div class="tl-step">
+        <div class="step-card">
+          <h3>H5P Phase A — Upload to cloud</h3>
+          <p>All H5P files for this course are scanned against the H5P cloud in one pass. Only files that aren't there yet are uploaded.</p>
+        </div>
+      </div>
+
+      <div class="tl-pause">
+        <div class="pause-card">
+          <h3>⏸ Pause — Confirm H5P insertion</h3>
+          <p>Everything is in the cloud. Before Phase B embeds the activities into Brightspace pages, the app pauses so you can verify the uploads look correct.</p>
+        </div>
+      </div>
+
+      <div class="tl-step">
+        <div class="step-card">
+          <h3>H5P Phase B — Insert into Brightspace</h3>
+          <p>A Brightspace page is created in the correct module for each H5P activity. Activities already present are detected live and skipped automatically.</p>
+        </div>
+      </div>
+
+      <div class="tl-step">
+        <div class="step-card">
+          <h3>Migration summary + cleanup prompt</h3>
+          <p>A full summary shows time per phase, files transferred, and H5P embeds. You're asked whether to clear the downloads folder to free up space.</p>
+        </div>
+      </div>
     </div>
   </div>
 
-  <div class="steps">
-
-    <div class="step">
-      <div class="step-num">1</div>
-      <div class="step-body">
-        <h3>Log in to Brightspace</h3>
-        <p>The app opens a browser window. Sign in with your Okanagan College account and complete MFA. The script waits automatically until you reach the home page.</p>
+  <!-- ═══ PHASE 2: COLLECTOR ═══ -->
+  <div class="detail-panel" id="panel1">
+    <div class="panel-header">
+      <div class="panel-icon icon-collector">📦</div>
+      <div>
+        <h2>Phase 2 — Unit Collector</h2>
+        <p>Combines all topics in a Brightspace unit into one clean, collapsible summary page.</p>
       </div>
     </div>
 
-    <div class="pause">
-      <div class="pause-icon">⏸</div>
-      <div class="pause-body">
-        <h3>Pause — Navigate to your Moodle course</h3>
-        <p>A second browser tab opens Moodle. Navigate to the correct course page, then click <strong>✅ Ready — Scrape Now</strong> in the app. This is where you confirm the right course before anything is read.</p>
+    <div class="timeline">
+      <div class="tl-pause">
+        <div class="pause-card">
+          <h3>⏸ Before starting — confirm all content is correct</h3>
+          <p>Unit Collector <strong>overwrites</strong> the target page. Make sure all files, H5P activities, and links from Phase 1 are correct in Brightspace first. This is the last chance to catch anything.</p>
+        </div>
       </div>
-    </div>
 
-    <div class="step">
-      <div class="step-num">2</div>
-      <div class="step-body">
-        <h3>Scrape Moodle course structure</h3>
-        <p>The app reads every section, file, link, quiz, and H5P activity from your Moodle course and builds a complete inventory.</p>
+      <div class="tl-step">
+        <div class="step-card">
+          <h3>Enter the Brightspace unit URL</h3>
+          <p>Paste the URL of the unit (module) you want to collect. The app navigates to each topic inside it.</p>
+        </div>
       </div>
-    </div>
 
-    <div class="pause">
-      <div class="pause-icon">⏸</div>
-      <div class="pause-body">
-        <h3>Pause — Verify instructor role for H5P</h3>
-        <p>H5P downloads require Teacher access in Moodle. The app tries to switch roles automatically — if it can't, it stops here so you can confirm the browser looks right before clicking <strong>✅ Ready — Download H5P</strong>.</p>
+      <div class="tl-step">
+        <div class="step-card">
+          <h3>Collect &amp; combine all topics</h3>
+          <p>Every topic page in the unit is read and merged into a single HTML document with collapsible sections — one section per topic.</p>
+        </div>
       </div>
-    </div>
 
-    <div class="step">
-      <div class="step-num">3</div>
-      <div class="step-body">
-        <h3>Download H5P activities</h3>
-        <p>Each H5P activity (drag-the-words, flashcards, quizzes, etc.) is downloaded as a <code>.h5p</code> file. Already-downloaded files are skipped automatically.</p>
+      <div class="tl-step">
+        <div class="step-card">
+          <h3>Write to target page</h3>
+          <p>The combined page is written to a designated blank Brightspace page, giving students one place to access the entire unit.</p>
+        </div>
       </div>
-    </div>
-
-    <div class="step">
-      <div class="step-num">4</div>
-      <div class="step-body">
-        <h3>Compare Moodle vs Brightspace</h3>
-        <p>Every Moodle item is matched against the Brightspace course — exact matches, fuzzy matches, and missing items are all identified. A full report is shown in the log.</p>
-      </div>
-    </div>
-
-    <div class="pause">
-      <div class="pause-icon">⏸</div>
-      <div class="pause-body">
-        <h3>Pause — Select files to download</h3>
-        <p>A checklist appears showing all files that are missing from Brightspace. You choose which ones to include — some may be intentionally absent. Click <strong>Download Selected</strong> or <strong>Skip All</strong>.</p>
-      </div>
-    </div>
-
-    <div class="step">
-      <div class="step-num">5</div>
-      <div class="step-body">
-        <h3>Download &amp; upload missing files</h3>
-        <p>Selected files are downloaded from Moodle, renamed to match their original course names, then uploaded to the correct Brightspace modules. Each upload is verified via the D2L API before a ✓ is shown.</p>
-      </div>
-    </div>
-
-    <div class="step">
-      <div class="step-num">6</div>
-      <div class="step-body">
-        <h3>H5P Phase A — Upload to cloud</h3>
-        <p>All H5P files for this course are uploaded to the H5P cloud (h5p.com). Files already in the cloud are detected in one scan and skipped — only missing ones are uploaded.</p>
-      </div>
-    </div>
-
-    <div class="pause">
-      <div class="pause-icon">⏸</div>
-      <div class="pause-body">
-        <h3>Pause — Confirm H5P insertion</h3>
-        <p>Phase A is complete and everything is in the cloud. Before Phase B embeds the activities into Brightspace pages, the app pauses so you can verify the cloud uploads look correct.</p>
-      </div>
-    </div>
-
-    <div class="step">
-      <div class="step-num">7</div>
-      <div class="step-body">
-        <h3>H5P Phase B — Insert into Brightspace</h3>
-        <p>A new Brightspace page is created in the correct module for each H5P activity, and the activity is embedded from the cloud. Activities already present are detected live and skipped.</p>
-      </div>
-    </div>
-
-    <div class="step">
-      <div class="step-num">8</div>
-      <div class="step-body">
-        <h3>Migration summary</h3>
-        <p>A full summary is shown: time per phase, files transferred, H5P embeds succeeded/failed. You're prompted whether to clear the downloads folder to free up space.</p>
-      </div>
-    </div>
-
-  </div>
-
-  <!-- ═══ CONNECTOR ═══ -->
-  <div class="connector">
-    <div class="connector-badge">✅ Verify all content in Brightspace before continuing →</div>
-  </div>
-
-  <!-- ═══ PHASE 2 ═══ -->
-  <div class="section-header">
-    <div class="step-badge badge-collector">📦</div>
-    <div class="section-title">
-      <h2>Phase 2 — Unit Collector Tab</h2>
-      <p>Combines all topics in a unit into one clean, collapsible summary page.</p>
     </div>
   </div>
 
-  <div class="steps">
-
-    <div class="pause">
-      <div class="pause-icon">⏸</div>
-      <div class="pause-body">
-        <h3>Before starting — confirm content is correct</h3>
-        <p>Unit Collector overwrites the target page. Make sure all files, H5P activities, and links are correct in Brightspace first. This is the last chance to catch anything before the unit is assembled.</p>
+  <!-- ═══ PHASE 3: CHANGER ═══ -->
+  <div class="detail-panel" id="panel2">
+    <div class="panel-header">
+      <div class="panel-icon icon-changer">⚡</div>
+      <div>
+        <h2>Phase 3 — Page Changer</h2>
+        <p>Uses Gemini AI to restyle Brightspace pages to match the official OC brand — one page or a full section at once.</p>
       </div>
     </div>
 
-    <div class="step">
-      <div class="step-num">1</div>
-      <div class="step-body">
-        <h3>Enter the Brightspace unit URL</h3>
-        <p>Paste the URL of the unit (module) you want to collect. The app navigates to each topic in that unit and scrapes its content.</p>
+    <div class="timeline">
+      <div class="tl-step">
+        <div class="step-card">
+          <h3>Paste a Brightspace section or page URL</h3>
+          <p>For one page, paste the topic URL. For batch mode, paste the section URL — all topics in that section are styled automatically.</p>
+        </div>
       </div>
-    </div>
 
-    <div class="step">
-      <div class="step-num">2</div>
-      <div class="step-body">
-        <h3>Collect &amp; combine all topics</h3>
-        <p>Every topic page in the unit is read and merged into a single HTML document with collapsible sections — one section per topic.</p>
+      <div class="tl-step">
+        <div class="step-card">
+          <h3>Choose an OC brand theme</h3>
+          <p>Pick from 9 official Okanagan College colours: Lake, Sky, Sunset, Peach, Cherry, Cabernet, Lavender, Lilac, or Charcoal. Lake is the recommended default.</p>
+        </div>
       </div>
-    </div>
 
-    <div class="step">
-      <div class="step-num">3</div>
-      <div class="step-body">
-        <h3>Write to target page</h3>
-        <p>The combined page is written to a designated blank Brightspace page, giving students one place to read the entire unit.</p>
+      <div class="tl-step">
+        <div class="step-card">
+          <h3>Gemini AI restyling runs</h3>
+          <p>AI reads the existing page HTML and rewrites the layout to match the chosen OC theme — preserving all content while adding proper spacing, typography, and branded card styles.</p>
+        </div>
       </div>
-    </div>
 
-  </div>
-
-  <!-- ═══ CONNECTOR ═══ -->
-  <div class="connector">
-    <div class="connector-badge">Content assembled → ready for styling →</div>
-  </div>
-
-  <!-- ═══ PHASE 3 ═══ -->
-  <div class="section-header">
-    <div class="step-badge badge-changer">⚡</div>
-    <div class="section-title">
-      <h2>Phase 3 — Page Changer Tab</h2>
-      <p>Uses AI (Gemini) to restyle Brightspace pages to match the OC brand — in bulk.</p>
+      <div class="tl-step">
+        <div class="step-card">
+          <h3>Styled HTML is saved back to Brightspace</h3>
+          <p>The new HTML is injected into the Brightspace editor and saved. The original content is never deleted — only the visual presentation is updated.</p>
+        </div>
+      </div>
     </div>
   </div>
 
-  <div class="steps">
-
-    <div class="step">
-      <div class="step-num">1</div>
-      <div class="step-body">
-        <h3>Paste a Brightspace section or page URL</h3>
-        <p>For a single page, paste the topic URL. For batch processing, paste the section URL — the app finds and processes all topics in that section automatically.</p>
-      </div>
-    </div>
-
-    <div class="step">
-      <div class="step-num">2</div>
-      <div class="step-body">
-        <h3>Choose an OC brand theme</h3>
-        <p>Pick from 9 official Okanagan College brand colours: Lake (teal), Sky, Sunset, Peach, Cherry, Cabernet, Lavender, Lilac, or Charcoal. Lake is the recommended default.</p>
-      </div>
-    </div>
-
-    <div class="step">
-      <div class="step-num">3</div>
-      <div class="step-body">
-        <h3>AI restyling runs automatically</h3>
-        <p>Gemini AI reads the existing page HTML and rewrites the layout to match the selected OC theme — preserving all content while adding proper spacing, typography, and branded card styles.</p>
-      </div>
-    </div>
-
-    <div class="step">
-      <div class="step-num">4</div>
-      <div class="step-body">
-        <h3>Styled HTML is written back</h3>
-        <p>The new HTML is injected into the Brightspace page editor and saved. The original content is never deleted — only the presentation is updated.</p>
-      </div>
-    </div>
-
-  </div>
-
-  <!-- ═══ Tips ═══ -->
+  <!-- TIPS (always visible) -->
   <div class="tips">
-    <h3>📌 Things to keep in mind</h3>
+    <h3>📌 Good to know</h3>
     <ul>
-      <li>Always run in order — <strong>Checker first</strong>, then Unit Collector, then Page Changer.</li>
-      <li>The Checker can be re-run safely — it skips anything already in Brightspace or already downloaded.</li>
-      <li>H5P content types must be installed in Brightspace Admin → H5P → Content Type Hub <span>before Phase A will work.</span></li>
-      <li>Clear the <code>downloads/</code> folder when switching to a new course <span>— old files from previous courses can interfere.</span></li>
-      <li>Page Changer can be run on individual pages or entire sections — <span>start with one page to verify the style before doing a batch.</span></li>
-      <li>Session cookies are saved after login — <span>you won't be asked to log in again until the session expires or you delete <code>session.json</code>.</span></li>
+      <li>Run in order — <strong>Checker first</strong>, then Unit Collector, then Page Changer.</li>
+      <li>The Checker is safe to re-run — it skips anything already in Brightspace or already downloaded.</li>
+      <li>H5P content types must be installed in Brightspace Admin → H5P → Content Type Hub before Phase A will work.</li>
+      <li>Clear the downloads folder between courses — leftover files from a previous course can interfere.</li>
+      <li>Session cookies are saved after login — you won't be asked to log in again until the session expires.</li>
+      <li>Try Page Changer on one page first to verify the style before running it on a full section.</li>
     </ul>
   </div>
 
 </div>
 
-<!-- ── Footer ──────────────────────────────────────────────── -->
-<div class="footer">
-  <strong>Brightspace Pages Automator</strong> &nbsp;·&nbsp;
+<footer>
+  <strong>Brightspace Pages Automator v0.8</strong> &nbsp;·&nbsp;
   Okanagan College Educational Technology &nbsp;·&nbsp;
-  <a href="https://github.com/schakaloff/brightspace-pages-automator" style="color:rgba(255,255,255,0.5)">GitHub</a>
-</div>
+  <a href="https://github.com/schakaloff/brightspace-pages-automator">GitHub ↗</a>
+</footer>
 
+<script>
+function selectPhase(idx) {
+  // Update phase cards
+  document.querySelectorAll('.phase-card').forEach((c, i) => {
+    c.classList.toggle('active', i === idx);
+  });
+  // Update panels
+  document.querySelectorAll('.detail-panel').forEach((p, i) => {
+    p.classList.toggle('active', i === idx);
+  });
+}
+
+// Animate timeline nodes in on scroll
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      e.target.style.opacity = '1';
+      e.target.style.transform = 'translateY(0)';
+    }
+  });
+}, { threshold: 0.1 });
+
+document.querySelectorAll('.tl-step, .tl-pause').forEach(el => {
+  el.style.opacity = '0';
+  el.style.transform = 'translateY(16px)';
+  el.style.transition = 'opacity .4s ease, transform .4s ease';
+  observer.observe(el);
+});
+</script>
 </body>
 </html>
