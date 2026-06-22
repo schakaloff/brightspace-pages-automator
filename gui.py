@@ -469,6 +469,7 @@ class App(ctk.CTk):
         ctk.CTkFrame(body, height=1, fg_color=_DIVIDER).pack(fill="x", pady=20)
 
         guide_path = str(Path(__file__).parent / "WORKFLOW_GUIDE.html")
+        downloads_path = Path(__file__).parent / "downloads"
 
         ctk.CTkButton(
             body,
@@ -482,6 +483,40 @@ class App(ctk.CTk):
             text="Detailed step-by-step flowchart with pause points — shareable and printable.",
             font=ctk.CTkFont(size=11), text_color=_TEXT_DIM,
         ).pack(pady=(8, 0))
+
+        # Downloads folder
+        ctk.CTkFrame(body, height=1, fg_color=_DIVIDER).pack(fill="x", pady=20)
+
+        ctk.CTkLabel(
+            body, text="DOWNLOADS FOLDER",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(0, 6))
+
+        dl_row = ctk.CTkFrame(body, fg_color=_CARD, corner_radius=10)
+        dl_row.pack(fill="x")
+        dl_row.columnconfigure(0, weight=1)
+
+        self._dl_path_label = ctk.CTkLabel(
+            dl_row,
+            text=str(downloads_path),
+            font=ctk.CTkFont(family="Consolas", size=11),
+            text_color=_TEXT_DIM, anchor="w",
+        )
+        self._dl_path_label.grid(row=0, column=0, sticky="ew", padx=14, pady=12)
+
+        ctk.CTkButton(
+            dl_row, text="📂  Open",
+            width=80, height=32,
+            font=ctk.CTkFont(size=12),
+            command=lambda: os.startfile(str(downloads_path)) if downloads_path.exists()
+                            else os.startfile(str(downloads_path.parent)),
+        ).grid(row=0, column=1, padx=(0, 10))
+
+        ctk.CTkLabel(
+            body,
+            text="This is where downloaded files and H5P activities are cached between runs.",
+            font=ctk.CTkFont(size=11), text_color=_TEXT_DIM,
+        ).pack(anchor="w", pady=(8, 0))
 
     # ── Automator tab ─────────────────────────────────────────────────────────
 
