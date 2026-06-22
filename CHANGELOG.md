@@ -4,6 +4,23 @@ Add a new `## X.Y.Z` section here whenever you bump `VERSION` in `gui.py`.
 The matching section is pulled into the GitHub Release notes automatically,
 and shown to users in the in-app "Update available" dialog.
 
+## 0.8.0
+- Added full Moodle → Brightspace migration pipeline in the Checker tab:
+  scrapes Moodle course structure, compares against Brightspace via D2L API,
+  downloads missing files and uploads them to the correct Brightspace modules.
+- H5P activities are now migrated automatically: Phase A uploads .h5p files
+  to the H5P cloud (skipping any already uploaded), Phase B creates a
+  Brightspace page per activity and inserts it from the cloud list.
+- File cache matching uses token-based fuzzy logic so renamed files
+  (e.g. Chapter_001.pptx → Chapter 1 PowerPoint) are correctly detected.
+- Number conflict guard prevents fuzzy matches between items that differ only
+  by number (e.g. Chapter 6 vs Chapter 9).
+- Each uploaded file is verified via the D2L API before showing a checkmark.
+- Migration summary shown at the end: per-phase timing, files transferred,
+  H5P embeds, and a prompt to clear the downloads folder.
+- Tabs reordered to match the natural workflow: Checker → Page Changer →
+  Unit Collector → Style Preview.
+
 ## 0.7.0
 - Replaced custom colour themes with the 9 official Okanagan College brand
   colours: Lake, Sky, Sunset, Peach, Cherry, Cabernet, Lavender, Lilac, and

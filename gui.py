@@ -26,7 +26,7 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 # ── Version ──────────────────────────────────────────────────────────────────
-VERSION = "0.7.0"  # bump manually per release; CI tag adds the leading "v"
+VERSION = "0.8.0"  # bump manually per release; CI tag adds the leading "v"
 
 
 def _resource_path(*parts) -> Path:
