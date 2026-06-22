@@ -409,6 +409,79 @@ class App(ctk.CTk):
         self._build_checker_tab(tabview.add("✅ Checker"))
         self._build_collector_tab(tabview.add("📦 Unit Collector"))
         self._build_automator_tab(tabview.add("⚡ Page Changer"))
+        self._build_guide_tab(tabview.add("📖 Guide"))
+
+    # ── Guide tab ─────────────────────────────────────────────────────────────
+
+    def _build_guide_tab(self, parent):
+        import webbrowser, os
+
+        body = ctk.CTkFrame(parent, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=24, pady=24)
+
+        # Header
+        ctk.CTkLabel(
+            body, text="📖  How It Works",
+            font=ctk.CTkFont(size=22, weight="bold"),
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            body,
+            text="Follow these three phases in order for a complete Moodle → Brightspace migration.",
+            font=ctk.CTkFont(size=12), text_color=_TEXT_DIM,
+        ).pack(anchor="w", pady=(4, 20))
+
+        # Step cards
+        steps = [
+            ("1", "✅", "Checker", "Compare & Transfer",
+             "Scrapes Moodle, compares against Brightspace, downloads missing files,\nuploads them to the correct modules, and migrates all H5P activities."),
+            ("2", "📦", "Unit Collector", "Assemble",
+             "After all content is verified in Brightspace, combines every topic\nin a unit into one clean, collapsible summary page."),
+            ("3", "⚡", "Page Changer", "Restyle",
+             "Uses Gemini AI to restyle Brightspace pages to match the official\nOkanagan College brand — one page or an entire section at once."),
+        ]
+        for num, icon, tab, subtitle, desc in steps:
+            card = ctk.CTkFrame(body, fg_color=_CARD, corner_radius=12)
+            card.pack(fill="x", pady=(0, 10))
+
+            top = ctk.CTkFrame(card, fg_color="transparent")
+            top.pack(fill="x", padx=18, pady=(16, 4))
+
+            ctk.CTkLabel(
+                top,
+                text=f"  Step {num}  ",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                fg_color=_ACCENT, text_color="#ffffff",
+                corner_radius=6, width=60, height=22,
+            ).pack(side="left")
+            ctk.CTkLabel(
+                top,
+                text=f"  {icon}  {tab}  —  {subtitle}",
+                font=ctk.CTkFont(size=14, weight="bold"),
+            ).pack(side="left", padx=10)
+
+            ctk.CTkLabel(
+                card, text=desc,
+                font=ctk.CTkFont(size=12), text_color=_TEXT_DIM,
+                justify="left", anchor="w",
+            ).pack(anchor="w", padx=18, pady=(0, 16))
+
+        # Open full guide button
+        ctk.CTkFrame(body, height=1, fg_color=_DIVIDER).pack(fill="x", pady=20)
+
+        guide_path = str(Path(__file__).parent / "WORKFLOW_GUIDE.html")
+
+        ctk.CTkButton(
+            body,
+            text="🌐  Open Full Visual Guide in Browser",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            height=46,
+            command=lambda: webbrowser.open(f"file:///{guide_path.replace(os.sep, '/')}"),
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            body,
+            text="Detailed step-by-step flowchart with pause points — shareable and printable.",
+            font=ctk.CTkFont(size=11), text_color=_TEXT_DIM,
+        ).pack(pady=(8, 0))
 
     # ── Automator tab ─────────────────────────────────────────────────────────
 
