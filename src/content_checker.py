@@ -775,8 +775,13 @@ class ContentChecker:
 
         selected = list(self.file_checklist_result) if self.file_checklist_result else []
         if not selected:
-            self.log("  ↷ Skipped — no files selected.", "dim")
-            return
+            if getattr(self, "do_pdf_upload", True):
+                # Checkbox is on but nothing selected — upload all cached files anyway
+                self.log("  ↷ Nothing selected — uploading any already-cached files…", "dim")
+                selected = missing_files
+            else:
+                self.log("  ↷ Skipped — no files selected.", "dim")
+                return
 
         await self._download_and_upload_missing(context, bs_page, course_id, selected)
 
@@ -3218,8 +3223,10 @@ class ContentChecker:
             self._log_report(results)
             self._log_link_report(moodle_links)
 
-            if self.on_file_checklist:
+            if self.on_file_checklist and getattr(self, "do_pdf_upload", True):
                 await self._offer_missing_file_download(context, page, course_id, results, bs_flat)
+            elif not getattr(self, "do_pdf_upload", True):
+                self.log("⏭ PDF upload skipped (checkbox off)", "dim")
 
             if moodle_links and getattr(self, "do_relink", False):
                 await self._relink_moodle_files(context, page, course_id, moodle_links)
