@@ -2026,6 +2026,25 @@ class ContentChecker:
             self.log("  → Waiting for H5P editor to load after Use…", "dim")
             await tab.wait_for_timeout(6000)
 
+            # Check for validation error (missing H5P library on the cloud platform)
+            for frame in tab.frames:
+                try:
+                    err = await frame.evaluate("""() => {
+                        var el = document.querySelector('.h5p-error-report, .error-report, [class*="error"]');
+                        return el ? el.textContent.trim() : null;
+                    }""")
+                    if err and ("validat" in err.lower() or "missing" in err.lower() or "library" in err.lower()):
+                        self.log(f"  ✗ H5P validation error: {err[:120]}", "error")
+                        # Try to navigate back to content list
+                        try:
+                            await frame.go_back(timeout=5000)
+                        except Exception:
+                            pass
+                        await tab.wait_for_timeout(2000)
+                        return False
+                except Exception:
+                    pass
+
             dismissed = await self._auto_dismiss(tab, ["skip", "proceed without"])
             if dismissed:
                 self.log("  → Dismissed skip/grade dialog", "dim")
