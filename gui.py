@@ -411,9 +411,9 @@ class App(ctk.CTk):
             text_color=_TEXT_DIM,
         )
         tabview.pack(fill="both", expand=True, padx=10, pady=10)
+        self._build_checker_tab(tabview.add("✅ Checker"))
         self._build_automator_tab(tabview.add("⚡ Page Changer"))
         self._build_collector_tab(tabview.add("📦 Unit Collector"))
-        self._build_checker_tab(tabview.add("✅ Checker"))
         self._build_preview_tab(tabview.add("🔍 Style Preview"))
 
     # ── Automator tab ─────────────────────────────────────────────────────────

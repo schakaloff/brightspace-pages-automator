@@ -16,6 +16,7 @@ import html as html_module
 import os
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -58,6 +59,18 @@ def _flatten_toc(modules: list, parent: str = "") -> list:
 def _norm(text: str) -> str:
     """Lowercase + decode HTML entities so &amp; == & in comparisons."""
     return html_module.unescape(text).lower().strip()
+
+
+def _numbers_conflict(a: str, b: str) -> bool:
+    """Return True if a and b have the same number of numeric tokens but any differ in value.
+    Prevents 'Chapter 6 PowerPoint' fuzzy-matching 'Chapter 9 PowerPoint'."""
+    nums_a = re.findall(r'\d+', a)
+    nums_b = re.findall(r'\d+', b)
+    if not nums_a and not nums_b:
+        return False
+    if len(nums_a) != len(nums_b):
+        return False
+    return any(int(x) != int(y) for x, y in zip(nums_a, nums_b))
 
 
 # ── External tool detection ───────────────────────────────────────────────────
@@ -115,7 +128,7 @@ def _compare_items(moodle_items: list, bs_flat: list) -> list:
                 status, matched = "exact", bs_modules[name_l]
             else:
                 close = difflib.get_close_matches(name_l, bs_modules.keys(), n=1, cutoff=0.70)
-                if close:
+                if close and not _numbers_conflict(name_l, close[0]):
                     score = int(difflib.SequenceMatcher(None, name_l, close[0]).ratio() * 100)
                     status, matched = "fuzzy", (bs_modules[close[0]], score)
                 else:
@@ -150,7 +163,7 @@ def _compare_items(moodle_items: list, bs_flat: list) -> list:
             continue
 
         close = difflib.get_close_matches(name_l, bs_all.keys(), n=1, cutoff=0.75)
-        if close:
+        if close and not _numbers_conflict(name_l, close[0]):
             score = int(difflib.SequenceMatcher(None, name_l, close[0]).ratio() * 100)
             results.append({**item, "section": current_section,
                              "status": "fuzzy", "matched": bs_all[close[0]], "score": score})
@@ -780,14 +793,31 @@ class ContentChecker:
                 return
             # Checkbox on but Skip All clicked — scan cache and upload what's already there
             save_dir = Path("downloads") / "files" / course_id
+
+            def _cache_match(item_name: str, file_stem: str) -> bool:
+                """Token overlap match: handles 'Chapter 1 PowerPoint' vs 'Chapter_001.pptx'."""
+                def tokens(s):
+                    parts = re.findall(r'\d+|[a-z]+', s.lower())
+                    result = set()
+                    for p in parts:
+                        try:
+                            result.add(int(p))  # "001" == "1"
+                        except ValueError:
+                            result.add(p)
+                    return result - {'and', 'or', 'the', 'to', 'for', 'of', 'in', 'a'}
+
+                t_item = tokens(item_name)
+                t_file = tokens(file_stem)
+                if not t_item:
+                    return False
+                return len(t_item & t_file) / len(t_item) >= 0.5
+
             cached_from_disk = []
             if save_dir.exists():
                 cached_files = list(save_dir.iterdir())
                 for f in missing_files:
-                    name_norm = re.sub(r'[^\w]', '', f["name"]).lower()
                     for cf in cached_files:
-                        cf_norm = re.sub(r'[^\w]', '', cf.stem).lower()
-                        if name_norm in cf_norm or cf_norm in name_norm:
+                        if _cache_match(f["name"], cf.stem):
                             entry = dict(f)
                             entry["cached_path"] = str(cf)
                             cached_from_disk.append(entry)
@@ -832,6 +862,15 @@ class ContentChecker:
             if f.get("cached_path"):
                 local = Path(f["cached_path"])
                 if local.exists():
+                    # Rename to match the Moodle item name so Brightspace shows
+                    # the correct title (e.g. "Chapter 9 PowerPoint.pptx" not "Chapter_009.pptx")
+                    safe_name = re.sub(r'[<>:"/\\|?*]', '', f["name"]).strip()
+                    correct = local.parent / (safe_name + local.suffix)
+                    if correct != local:
+                        if not correct.exists():
+                            import shutil
+                            shutil.copy2(str(local), str(correct))
+                        local = correct
                     self.log(f"    ℹ Using cached: {local.name}", "dim")
                     downloaded.append((local, f))
                 else:
@@ -879,6 +918,15 @@ class ContentChecker:
                     await dl.save_as(str(local))
                     self.log(f"    ✓ Downloaded: {filename}", "success")
 
+                # Rename to Moodle item name so Brightspace topic title is correct
+                safe_name = re.sub(r'[<>:"/\\|?*]', '', f["name"]).strip()
+                correct = save_dir / (safe_name + local.suffix)
+                if correct != local and not correct.exists():
+                    import shutil
+                    shutil.copy2(str(local), str(correct))
+                if correct.exists():
+                    local = correct
+
                 downloaded.append((local, f))
             except Exception as e:
                 self.log(f"    ✗ {e}", "error")
@@ -913,24 +961,35 @@ class ContentChecker:
         ok_count = fail_count = 0
 
         for mod_id, items in by_module.items():
-            mod_title  = items[0][1].get("bs_module_title", "?")
-            file_paths = [local for local, _ in items]
-            names      = [fi["name"] for _, fi in items]
+            mod_title = items[0][1].get("bs_module_title", "?")
             self.log(f"  📁 {mod_title} ({len(items)} file(s))", "info")
-            ok = await self._upload_files_to_bs_module_ui(
-                context, bs_base, course_id, mod_id, mod_title, file_paths
-            )
-            if ok:
-                for n in names:
-                    self.log(f"    ✓ {n}", "success")
-                ok_count += len(items)
-            else:
-                for local, fi in items:
-                    self.log(f"    ⚠ {fi['name']} — saved locally: {local.name}", "warning")
-                fail_count += len(items)
+
+            for local, fi in items:
+                name = fi["name"]
+                ok = await self._upload_files_to_bs_module_ui(
+                    context, bs_base, course_id, mod_id, mod_title, [local]
+                )
+                if not ok:
+                    self.log(f"    ✗ {name} — upload UI failed", "error")
+                    self._summary["files_failed"].append((name, mod_title))
+                    fail_count += 1
+                    continue
+
+                confirmed = await self._verify_topic_in_module(
+                    bs_page, course_id, mod_id, name
+                )
+                if confirmed:
+                    self.log(f"    ✓ {name}", "success")
+                    self._summary["files_uploaded"].append((name, mod_title))
+                    ok_count += 1
+                else:
+                    self.log(f"    ⚠ {name} — not confirmed in module after upload", "warning")
+                    self._summary["files_failed"].append((name, mod_title))
+                    fail_count += 1
 
         for local, fi in no_module:
             self.log(f"  ⚠ {fi['name']} — no BS module match, saved to downloads/", "warning")
+            self._summary["files_failed"].append((fi["name"], "no module match"))
             fail_count += 1
 
         self.log(f"⬆ Done: {ok_count} uploaded, {fail_count} failed", "step")
@@ -953,6 +1012,33 @@ class ContentChecker:
     }
     """
 
+    async def _verify_topic_in_module(
+        self, bs_page, course_id: str, module_id, expected_name: str
+    ) -> bool:
+        """Return True if a topic matching expected_name exists in the module via D2L API."""
+        try:
+            topics = await bs_page.evaluate(
+                """async ([courseId, moduleId]) => {
+                    const resp = await fetch(
+                        `/d2l/api/le/1.0/${courseId}/content/modules/${moduleId}/structure/`,
+                        { credentials: 'include' }
+                    );
+                    if (!resp.ok) return null;
+                    return await resp.json();
+                }""",
+                [str(course_id), str(module_id)],
+            )
+            if not topics:
+                return False
+            name_norm = re.sub(r'[^\w]', '', expected_name).lower()
+            for topic in topics:
+                title_norm = re.sub(r'[^\w]', '', topic.get('Title', '')).lower()
+                if name_norm in title_norm or title_norm in name_norm:
+                    return True
+            return False
+        except Exception:
+            return False
+
     async def _upload_files_to_bs_module_ui(
         self,
         context: "BrowserContext",
@@ -963,119 +1049,78 @@ class ContentChecker:
         file_paths: list,
     ) -> bool:
         """
-        Upload one or more local files to a Brightspace module using browser UI.
-        Opens a fresh tab → navigates to course content → finds the module →
-        clicks New/Upload → sets files via the OS file chooser.
+        Upload files to a Brightspace module via the 'Add Existing' UI.
+        Navigates to course content → activates module → clicks Add Existing →
+        sets files in the drag-and-drop uploader → waits for networkidle.
         Returns True if the upload appeared to succeed.
         """
         tab = await context.new_page()
         try:
-            content_url = f"{bs_base}/d2l/le/content/{course_id}/Home"
-            await tab.goto(content_url, wait_until="domcontentloaded", timeout=30000)
+            # Navigate directly to the module — same URL pattern as H5P Phase B.
+            # No TOC click needed; lands right on the module page.
+            module_url = f"{bs_base}/d2l/le/lessons/{course_id}/units/{module_id}"
+            await tab.goto(module_url, wait_until="domcontentloaded", timeout=30000)
             await tab.wait_for_timeout(2000)
 
-            # ── Step 1: scroll to / activate the target module ──────────────
-            # D2L renders all modules on one page; clicking a module heading in
-            # the TOC brings it into focus and reveals its action buttons.
-            df = self._DEEP_FIND_JS
-            clicked_mod = await tab.evaluate(f"""(moduleId) => {{
-                {df}
-                var el = deepFind(document, function(e) {{
-                    var href = e.getAttribute && e.getAttribute('href') || '';
-                    return href.includes('/' + moduleId + '/') || href.endsWith('/' + moduleId);
-                }});
-                if (el) {{ el.click(); return true; }}
-                return false;
-            }}""", str(module_id))
+            # ── find the frame containing "Add Existing" ─────────────────────
+            # The content area is rendered in a child iframe — the main page only
+            # has the navbar. Scan all frames every 500ms for up to 10s.
+            add_frame = None
+            for _ in range(20):
+                for frame in tab.frames:
+                    try:
+                        count = await frame.locator(
+                            'd2l-button[aria-label="Add Existing"], d2l-button.add-existing-btn'
+                        ).count()
+                        if count > 0:
+                            add_frame = frame
+                            break
+                    except Exception:
+                        pass
+                if add_frame:
+                    break
+                await tab.wait_for_timeout(500)
 
-            if clicked_mod:
-                await tab.wait_for_timeout(1000)
-
-            # ── Step 2: click "New" / "Upload/Create" button ─────────────────
-            # OC Brightspace content page shows a "New" button per module; in
-            # some D2L versions it may say "Upload/Create" or "Add Activities".
-            new_clicked = await tab.evaluate(f"""() => {{
-                {df}
-                var btn = deepFind(document, function(e) {{
-                    var tag  = e.tagName  && e.tagName.toUpperCase();
-                    var txt  = (e.textContent || '').trim().toLowerCase();
-                    var aria = (e.getAttribute && e.getAttribute('aria-label') || '').toLowerCase();
-                    return (tag === 'BUTTON' || tag === 'D2L-BUTTON')
-                        && (txt === 'new' || txt.includes('upload') || txt.includes('add activities')
-                            || aria.includes('upload') || aria === 'new');
-                }});
-                if (btn) {{ btn.click(); return true; }}
-                return false;
-            }}""")
-
-            if not new_clicked:
-                self.log(f"    ✗ Could not find New/Upload button — share the module HTML to fix", "error")
+            if not add_frame:
+                self.log(f"    ✗ 'Add Existing' not found in any frame for '{module_title}'", "error")
+                self.log(f"      Frames loaded: {[f.url[:80] for f in tab.frames]}", "dim")
                 return False
 
-            await tab.wait_for_timeout(800)
-
-            # ── Step 3: click "Upload Files" in the dropdown/panel ────────────
-            upload_clicked = await tab.evaluate(f"""() => {{
-                {df}
-                var el = deepFind(document, function(e) {{
-                    var txt = (e.textContent || '').trim();
-                    return txt === 'Upload Files' || txt === 'Upload / Create'
-                        || txt === 'Upload/Create' || txt.toLowerCase().startsWith('upload file');
-                }});
-                if (el) {{ el.click(); return true; }}
-                return false;
-            }}""")
-
-            if not upload_clicked:
-                self.log(f"    ✗ Could not find 'Upload Files' option — share the dropdown HTML", "error")
-                return False
-
+            await add_frame.locator(
+                'd2l-button[aria-label="Add Existing"], d2l-button.add-existing-btn'
+            ).first.click(timeout=5000)
             await tab.wait_for_timeout(1000)
 
-            # ── Step 4: catch file chooser and set all files at once ──────────
-            try:
-                async with tab.expect_file_chooser(timeout=6000) as fc_info:
-                    # D2L file upload dialogs hide a real <input type="file"> somewhere.
-                    # Clicking it (even if display:none) triggers the file chooser event.
-                    await tab.evaluate(f"""() => {{
-                        {df}
-                        var inp = deepFind(document, function(e) {{
-                            return e.tagName === 'INPUT' && e.type === 'file';
-                        }});
-                        if (inp) {{ inp.click(); return; }}
-                        // Fallback: click a visible Browse / My Computer button
-                        var btn = deepFind(document, function(e) {{
-                            if (e.tagName !== 'BUTTON' && e.tagName !== 'A') return false;
-                            var txt = (e.textContent || e.getAttribute('aria-label') || '').toLowerCase();
-                            return txt.includes('browse') || txt.includes('my computer')
-                                || txt.includes('choose file') || txt.includes('add file');
-                        }});
-                        if (btn) btn.click();
-                    }}""")
+            # ── Step 3: file input also lives in a frame ──────────────────────
+            file_frame = None
+            for _ in range(16):
+                for frame in tab.frames:
+                    try:
+                        if await frame.locator('input[type="file"]').count() > 0:
+                            file_frame = frame
+                            break
+                    except Exception:
+                        pass
+                if file_frame:
+                    break
+                await tab.wait_for_timeout(500)
 
+            if not file_frame:
+                self.log(f"    ✗ File input not found in any frame after 8s", "error")
+                return False
+
+            try:
+                async with tab.expect_file_chooser(timeout=8000) as fc_info:
+                    await file_frame.locator('input[type="file"]').first.click()
                 fc = await fc_info.value
                 await fc.set_files([str(p) for p in file_paths])
             except Exception as fc_err:
                 self.log(f"    ✗ File chooser not triggered: {fc_err}", "error")
-                self.log(f"      Navigate to this module in Brightspace and share the upload dialog HTML", "dim")
                 return False
 
-            await tab.wait_for_timeout(1500)
-
-            # ── Step 5: confirm / click Add / Upload / Save ───────────────────
-            await tab.evaluate(f"""() => {{
-                {df}
-                var btn = deepFind(document, function(e) {{
-                    if (e.tagName !== 'BUTTON') return false;
-                    var txt = (e.textContent || '').trim().toLowerCase();
-                    return txt === 'add' || txt === 'upload' || txt === 'save'
-                        || txt === 'done' || txt === 'add files' || txt === 'add content';
-                }});
-                if (btn) btn.click();
-            }}""")
-
-            # Wait for D2L to process the upload (large files may take a few seconds)
-            await tab.wait_for_timeout(4000)
+            # ── Step 4: wait for D2L to upload and return to content page ────
+            await tab.wait_for_load_state("networkidle", timeout=60000)
+            await tab.wait_for_timeout(1000)
             return True
 
         except Exception as e:
@@ -1987,21 +2032,58 @@ class ContentChecker:
             self.log(f"  ✗ _h5p_open_interactives error: {e}", "error")
             return False
 
+    async def _find_h5p_list_frame(self, tab):
+        """Return the first live h5p.com frame that has the content list loaded."""
+        for _ in range(15):
+            for frame in tab.frames:
+                if "h5p.com" not in frame.url:
+                    continue
+                try:
+                    has_list = await frame.evaluate(
+                        "() => document.querySelectorAll('tr.content-item, a.create-content, a[href*=\"/content/create\"]').length > 0"
+                    )
+                    if has_list:
+                        return frame
+                except Exception:
+                    pass
+            await tab.wait_for_timeout(1000)
+        return None
+
     async def _h5p_upload_one(self, tab, h5p_frame, h5p_file, item_name) -> bool:
         """Upload one .h5p to H5P cloud via an already-open content list frame. Returns to list after."""
         try:
-            # Check if already exists in cloud content list — skip if found
+            # Check if already exists in cloud content list — skip if found.
+            # Re-find the live frame if the stored reference has a stale context.
             name_key = item_name[:25].lower()
-            already_exists = await h5p_frame.evaluate(f"""() => {{
-                var key = {name_key!r};
-                var rows = document.querySelectorAll('tr.content-item');
-                for (var i = 0; i < rows.length; i++) {{
-                    var el = rows[i].querySelector('a.fable-title, .content-title, td a');
-                    var title = el ? el.textContent.trim().toLowerCase() : '';
-                    if (title.includes(key)) return true;
-                }}
-                return false;
-            }}""")
+            try:
+                already_exists = await h5p_frame.evaluate(f"""() => {{
+                    var key = {name_key!r};
+                    var rows = document.querySelectorAll('tr.content-item');
+                    for (var i = 0; i < rows.length; i++) {{
+                        var el = rows[i].querySelector('a.fable-title, .content-title, td a');
+                        var title = el ? el.textContent.trim().toLowerCase() : '';
+                        if (title.includes(key)) return true;
+                    }}
+                    return false;
+                }}""")
+            except Exception as frame_err:
+                if "context was destroyed" in str(frame_err) or "Target closed" in str(frame_err):
+                    h5p_frame = await self._find_h5p_list_frame(tab)
+                    if not h5p_frame:
+                        self.log(f"  ✗ H5P content list frame lost — cannot upload {item_name}", "error")
+                        return False
+                    already_exists = await h5p_frame.evaluate(f"""() => {{
+                        var key = {name_key!r};
+                        var rows = document.querySelectorAll('tr.content-item');
+                        for (var i = 0; i < rows.length; i++) {{
+                            var el = rows[i].querySelector('a.fable-title, .content-title, td a');
+                            var title = el ? el.textContent.trim().toLowerCase() : '';
+                            if (title.includes(key)) return true;
+                        }}
+                        return false;
+                    }}""")
+                else:
+                    raise
             if already_exists:
                 self.log(f"  ✓ Already in H5P cloud: {item_name} — skipping upload", "dim")
                 return True
@@ -2066,7 +2148,11 @@ class ContentChecker:
                         return el ? el.textContent.trim() : null;
                     }""")
                     if err and ("validat" in err.lower() or "missing" in err.lower() or "library" in err.lower()):
-                        self.log(f"  ✗ H5P validation error: {err[:120]}", "error")
+                        # Parse the missing library name from the error if possible
+                        lib_match = re.search(r'missing main library\s+([\w\.\s]+\d+\.\d+)', err, re.IGNORECASE)
+                        missing_lib = lib_match.group(1).strip() if lib_match else "unknown library"
+                        self.log(f"  ✗ H5P upload failed — missing content type: {missing_lib}", "error")
+                        self.log(f"    Fix: Brightspace Admin → H5P → Content Type Hub → install '{missing_lib}' → re-run Phase A", "dim")
                         # Try to navigate back to content list
                         try:
                             await frame.go_back(timeout=5000)
@@ -2548,7 +2634,7 @@ class ContentChecker:
             await tab.wait_for_timeout(1000)
         return h5p_frame
 
-    async def _embed_h5p_in_brightspace(self, context, moodle_items, bs_flat, bs_base, course_id) -> None:
+    async def _embed_h5p_in_brightspace(self, context, page, moodle_items, bs_flat, bs_base, course_id) -> None:
         from urllib.parse import urlparse
 
         h5p_dir = Path(__file__).parent.parent / "downloads" / "h5p"
@@ -2601,13 +2687,22 @@ class ContentChecker:
         for a in assignments:
             self.log(f"   {a['name']}  →  {a['bs_module_title'] or '⚠ no match'}", "info")
 
+        # Only upload files that actually belong to this Moodle course.
+        # Files with no moodle_section are leftovers from other courses in the downloads folder.
+        this_course = [a for a in assignments if a["moodle_section"]]
+        other_course = [a for a in assignments if not a["moodle_section"]]
+        if other_course:
+            self.log(f"  ↷ Skipping {len(other_course)} file(s) not found in this Moodle course:", "dim")
+            for a in other_course:
+                self.log(f"      {a['name']}", "dim")
+
         phase_b_only = getattr(self, "h5p_phase_b_only", False)
 
         if not phase_b_only:
-            if not await self._confirm(f"Found {len(assignments)} H5P file(s). Start Phase A (upload all to cloud)?"):
+            if not await self._confirm(f"Found {len(this_course)} H5P file(s) for this course. Start Phase A (upload to cloud)?"):
                 return
 
-        # ── Phase A: Upload all files to H5P cloud in one session ────────────
+        # ── Phase A: Upload this course's files to H5P cloud ─────────────────
         if phase_b_only:
             self.log("⏭ Phase A skipped — going straight to Phase B", "info")
         else:
@@ -2629,12 +2724,43 @@ class ContentChecker:
                     self.log("  ✗ Could not open H5P content list for upload phase", "error")
                     return
 
-                for idx, item in enumerate(assignments, 1):
-                    self.log(f"  [{idx}/{len(assignments)}] Uploading: {item['name']}…", "info")
-                    ok = await self._h5p_upload_one(upload_tab, h5p_frame, item["file"], item["name"])
-                    if not ok:
-                        self.log(f"    ✗ Upload failed — will skip insert for this item", "warning")
-                        item["upload_failed"] = True
+                # Bulk-scan the entire content list once — no per-item navigation needed.
+                cloud_titles = []
+                try:
+                    cloud_titles = await h5p_frame.evaluate("""() => {
+                        var rows = document.querySelectorAll('tr.content-item');
+                        var titles = [];
+                        for (var i = 0; i < rows.length; i++) {
+                            var el = rows[i].querySelector('a.fable-title, .content-title, td a');
+                            if (el) titles.push(el.textContent.trim().toLowerCase());
+                        }
+                        return titles;
+                    }""")
+                except Exception:
+                    pass  # frame may not be ready yet; _h5p_upload_one will handle it
+
+                def _in_cloud(name):
+                    key = name[:25].lower()
+                    return any(key in t for t in cloud_titles)
+
+                to_upload = []
+                for item in this_course:
+                    if _in_cloud(item["name"]):
+                        self.log(f"  ✓ Already in H5P cloud: {item['name']} — skipping upload", "dim")
+                        item["upload_skipped"] = True
+                    else:
+                        to_upload.append(item)
+
+                if not to_upload:
+                    self.log("  ✓ All files already in cloud — nothing to upload", "success")
+                else:
+                    self.log(f"  → {len(to_upload)} file(s) need uploading", "info")
+                    for idx, item in enumerate(to_upload, 1):
+                        self.log(f"  [{idx}/{len(to_upload)}] Uploading: {item['name']}…", "info")
+                        ok = await self._h5p_upload_one(upload_tab, h5p_frame, item["file"], item["name"])
+                        if not ok:
+                            self.log(f"    ✗ Upload failed — will skip insert for this item", "warning")
+                            item["upload_failed"] = True
             finally:
                 try:
                     await upload_tab.close()
@@ -2663,19 +2789,13 @@ class ContentChecker:
             bs_module_id = item["bs_module_id"]
             self.log(f"  [{idx}/{N}] {name}  →  {bs_module_title}", "info")
 
-            # Check if a topic with this name already exists in the module
-            existing_topics = [
-                t["title"] for t in bs_flat
-                if t.get("kind") == "TOPIC" and t.get("module") == bs_module_title
-            ]
-            name_norm = _norm(name)
-            already_in_bs = any(_norm(t) == name_norm for t in existing_topics)
-            if not already_in_bs and existing_topics:
-                # also try fuzzy — if very close match exists, treat as duplicate
-                close = difflib.get_close_matches(name_norm, [_norm(t) for t in existing_topics], n=1, cutoff=0.85)
-                already_in_bs = bool(close)
+            # Check live via API — stale bs_flat misses topics added in earlier iterations
+            already_in_bs = await self._verify_topic_in_module(
+                page, course_id, bs_module_id, name
+            )
             if already_in_bs:
-                self.log(f"    ✓ Already exists in BS module — skipping", "dim")
+                self.log(f"    ✓ Already in Brightspace — skipping", "dim")
+                self._summary["h5p_inserted"].append((name, bs_module_title))
                 embedded_count += 1
                 continue
 
@@ -2686,22 +2806,34 @@ class ContentChecker:
                 )
                 if not h5p_frame:
                     self.log(f"    ✗ Could not open H5P content list — skipping", "error")
+                    self._summary["h5p_failed"].append((name, bs_module_title))
                     continue
 
                 ok = await self._h5p_insert_from_list(tab, h5p_frame, name)
                 if not ok:
                     self.log(f"    ✗ Insert failed — skipping", "error")
+                    self._summary["h5p_failed"].append((name, bs_module_title))
                     continue
 
                 ok = await self._h5p_finalize(tab, name, is_quiz=False)
                 if not ok:
                     self.log(f"    ⚠ Finalize had errors", "warning")
 
-                self.log(f"    ✓ Done: {name} → {bs_module_title}", "success")
+                # Verify via API that the topic actually landed
+                confirmed = await self._verify_topic_in_module(
+                    page, course_id, bs_module_id, name
+                )
+                if confirmed:
+                    self.log(f"    ✓ Done + verified: {name} → {bs_module_title}", "success")
+                    self._summary["h5p_inserted"].append((name, bs_module_title))
+                else:
+                    self.log(f"    ⚠ Inserted but not confirmed in module via API", "warning")
+                    self._summary["h5p_failed"].append((name, bs_module_title))
                 embedded_count += 1
 
             except Exception as e:
                 self.log(f"    ✗ Error on {name}: {e}", "error")
+                self._summary["h5p_failed"].append((name, bs_module_title))
             finally:
                 try:
                     await tab.close()
@@ -3152,6 +3284,95 @@ class ContentChecker:
                 extra    = f"  [entryId: {entry}]" if entry else "  ⚠ no entryId"
                 self.log(f"   🎥 {loc}  {r['name']}{extra}", "info")
 
+    # ── Final summary ─────────────────────────────────────────────────────────
+
+    def _log_final_summary(self, results: list) -> None:
+        s = self._summary
+        total_elapsed = time.time() - s["start_time"]
+
+        self.log("", "dim")
+        self.log("═" * 52, "dim")
+        self.log("📊 MIGRATION SUMMARY", "step")
+        self.log("═" * 52, "dim")
+
+        # ── Timing breakdown ──────────────────────────────────────────────────
+        self.log("", "dim")
+        self.log("⏱ Time per phase:", "info")
+        for phase, secs in s["timings"].items():
+            mins, sec = divmod(int(secs), 60)
+            label = f"{mins}m {sec:02d}s" if mins else f"{sec}s"
+            self.log(f"   {phase:<30} {label}", "dim")
+        mins, sec = divmod(int(total_elapsed), 60)
+        self.log(f"   {'TOTAL':<30} {mins}m {sec:02d}s", "info")
+
+        # ── Comparison results ────────────────────────────────────────────────
+        if results:
+            exact   = [r for r in results if r["status"] == "exact"]
+            fuzzy   = [r for r in results if r["status"] == "fuzzy"]
+            missing = [r for r in results if r["status"] == "missing"]
+            self.log("", "dim")
+            self.log("🔍 Comparison:", "info")
+            self.log(f"   ✅ {len(exact)} exact matches", "success")
+            if fuzzy:
+                self.log(f"   ⚠️  {len(fuzzy)} fuzzy matches (similar name, may need review):", "warning")
+                for r in fuzzy:
+                    matched_title = r["matched"][0] if isinstance(r["matched"], tuple) else r["matched"]
+                    score = r.get("score", "?")
+                    self.log(f"      • {r['name']}  →  \"{matched_title}\" ({score}%)", "dim")
+            if missing:
+                self.log(f"   ❌ {len(missing)} still missing after all steps:", "error")
+                for r in missing:
+                    self.log(f"      • [{r.get('section','?')}] {r['name']}", "dim")
+
+        # ── File uploads ──────────────────────────────────────────────────────
+        if s["files_uploaded"] or s["files_failed"]:
+            self.log("", "dim")
+            self.log("📄 File uploads:", "info")
+            for name, mod in s["files_uploaded"]:
+                self.log(f"   ✅ {name}  →  {mod}", "success")
+            for name, mod in s["files_failed"]:
+                self.log(f"   ❌ {name}  →  {mod}", "error")
+
+        # ── H5P embeds ────────────────────────────────────────────────────────
+        if s["h5p_inserted"] or s["h5p_failed"]:
+            self.log("", "dim")
+            self.log("🎮 H5P embeds:", "info")
+            for name, mod in s["h5p_inserted"]:
+                self.log(f"   ✅ {name}  →  {mod}", "success")
+            for name, mod in s["h5p_failed"]:
+                self.log(f"   ❌ {name}  →  {mod}", "error")
+
+        self.log("", "dim")
+        self.log("═" * 52, "dim")
+
+    async def _prompt_clear_downloads(self, course_id: str) -> None:
+        """Ask the user if they want to delete the downloads folder for this course."""
+        import shutil
+        downloads_dir = Path("downloads") / "files" / course_id
+        h5p_dir       = Path("downloads") / "h5p"
+
+        files_count = len(list(downloads_dir.iterdir())) if downloads_dir.exists() else 0
+        h5p_count   = len(list(h5p_dir.glob("*.h5p")))   if h5p_dir.exists()       else 0
+
+        if files_count == 0 and h5p_count == 0:
+            return
+
+        msg = (
+            f"Clear downloads to free up space?\n\n"
+            f"  • downloads/files/{course_id}/  ({files_count} file(s))\n"
+            f"  • downloads/h5p/                ({h5p_count} .h5p file(s))\n\n"
+            f"These are cached copies — re-running will re-download them from Moodle."
+        )
+        confirmed = await self._confirm(msg)
+        if confirmed:
+            if downloads_dir.exists():
+                shutil.rmtree(str(downloads_dir))
+            if h5p_dir.exists():
+                shutil.rmtree(str(h5p_dir))
+            self.log("🗑 Downloads cleared.", "success")
+        else:
+            self.log("↷ Downloads kept.", "dim")
+
     # ── Main flow ─────────────────────────────────────────────────────────────
 
     async def run(self) -> None:
@@ -3160,6 +3381,16 @@ class ContentChecker:
         bs_only     = bool(self.bs_url)     and not self.moodle_url
         moodle_only = bool(self.moodle_url) and not self.bs_url
         full        = bool(self.bs_url)     and bool(self.moodle_url)
+
+        # Initialise summary collector used by sub-functions throughout the run
+        self._summary = {
+            "start_time":     time.time(),
+            "timings":        {},
+            "files_uploaded": [],
+            "files_failed":   [],
+            "h5p_inserted":   [],
+            "h5p_failed":     [],
+        }
 
         p, browser, context, page = await launch_browser()
         try:
@@ -3184,7 +3415,9 @@ class ContentChecker:
                     return
 
                 self.log("─" * 52, "dim")
+                t0 = time.time()
                 bs_flat = await self._fetch_bs_toc(page, course_id)
+                self._summary["timings"]["Brightspace TOC fetch"] = time.time() - t0
                 if not bs_flat:
                     if self.on_complete:
                         self.on_complete()
@@ -3201,7 +3434,9 @@ class ContentChecker:
             # ── Moodle scrape ─────────────────────────────────────────────────
             if not bs_only:
                 self.log("─" * 52, "dim")
+                t0 = time.time()
                 moodle_items = await self._scrape_moodle(context)
+                self._summary["timings"]["Moodle scrape"] = time.time() - t0
                 if not moodle_items:
                     if self.on_complete:
                         self.on_complete()
@@ -3217,12 +3452,12 @@ class ContentChecker:
                         await asyncio.sleep(0.5)
                     return
 
-            # ── Compare ───────────────────────────────────────────────────────
+            # ── Compare + scans ───────────────────────────────────────────────
             self.log("─" * 52, "dim")
             self.log("Comparing Moodle items against Brightspace…", "info")
+            t0 = time.time()
             results = _compare_items(moodle_items, bs_flat)
 
-            # ── Search-bar scan for still-missing items ───────────────────────
             missing = [r for r in results if r["status"] == "missing"]
             if missing:
                 self.log("─" * 52, "dim")
@@ -3235,7 +3470,6 @@ class ContentChecker:
                             r["status"]  = "found_in_search"
                             r["matched"] = found_via_search[r["name"]]
 
-            # ── Page content scan (text search + Moodle link detector) ────────
             self.log("─" * 52, "dim")
             still_missing = [r for r in results if r["status"] == "missing"]
             found_in_content, moodle_links = await self._scan_page_content(
@@ -3246,23 +3480,34 @@ class ContentChecker:
                     if r["status"] == "missing" and r["name"] in found_in_content:
                         r["status"]  = "found_in_content"
                         r["matched"] = found_in_content[r["name"]]
+            self._summary["timings"]["Comparison + page scan"] = time.time() - t0
 
             self._log_report(results)
             self._log_link_report(moodle_links)
 
             if self.on_file_checklist and getattr(self, "do_pdf_upload", True):
+                t0 = time.time()
                 await self._offer_missing_file_download(context, page, course_id, results, bs_flat)
+                self._summary["timings"]["File download + upload"] = time.time() - t0
             elif not getattr(self, "do_pdf_upload", True):
                 self.log("⏭ PDF upload skipped (checkbox off)", "dim")
 
             if moodle_links and getattr(self, "do_relink", False):
+                t0 = time.time()
                 await self._relink_moodle_files(context, page, course_id, moodle_links)
+                self._summary["timings"]["Moodle link re-link"] = time.time() - t0
 
             if getattr(self, "do_h5p_embed", False) and moodle_items and bs_flat:
                 from urllib.parse import urlparse
-                parsed = urlparse(self.bs_url)
+                parsed  = urlparse(self.bs_url)
                 bs_base = f"{parsed.scheme}://{parsed.netloc}"
-                await self._embed_h5p_in_brightspace(context, moodle_items, bs_flat, bs_base, course_id)
+                t0 = time.time()
+                await self._embed_h5p_in_brightspace(context, page, moodle_items, bs_flat, bs_base, course_id)
+                self._summary["timings"]["H5P embed (Phase B)"] = time.time() - t0
+
+            # ── Final summary + cleanup prompt ────────────────────────────────
+            self._log_final_summary(results)
+            await self._prompt_clear_downloads(course_id)
 
             if self.on_complete:
                 self.on_complete()
