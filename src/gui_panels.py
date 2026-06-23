@@ -1,5 +1,8 @@
 # src/gui_panels.py
+import asyncio
 import os
+import queue
+import threading
 import webbrowser
 from pathlib import Path
 
@@ -194,11 +197,6 @@ class SettingsPanel(QWidget):
 
 
 # ── CheckerPanel ──────────────────────────────────────────────────────────────
-
-import asyncio
-import queue
-import threading
-
 
 class CheckerPanel(QWidget):
     step_success = Signal()
@@ -441,6 +439,14 @@ class CheckerPanel(QWidget):
                     self._ready_btn.show()
                 elif msg == "__CHK_H5P_WAITING__":
                     self._h5p_ready_btn.show(); self._h5p_skip_btn.show()
+                    try:
+                        self._h5p_ready_btn.clicked.disconnect()
+                    except RuntimeError:
+                        pass
+                    try:
+                        self._h5p_skip_btn.clicked.disconnect()
+                    except RuntimeError:
+                        pass
                     self._h5p_ready_btn.clicked.connect(self._h5p_ready)
                     self._h5p_skip_btn.clicked.connect(self._h5p_skip)
                 elif msg == "__CHK_FILE_CHECKLIST__":
