@@ -58,3 +58,17 @@ def test_form_label_returns_label(qtbot):
     assert isinstance(lbl, QLabel)
     assert lbl.text() == "MY LABEL"
     assert lbl.property("role") == "form-label"
+
+
+def test_checker_panel_builds(qtbot):
+    from PySide6.QtWidgets import QMainWindow
+    from unittest.mock import MagicMock
+    from gui_panels import CheckerPanel
+    mw = MagicMock()
+    mw.chromium_ready = False
+    mw.load_config.return_value = {}
+    mw.save_config.return_value = None
+    panel = CheckerPanel(mw)
+    qtbot.addWidget(panel)
+    assert panel._run_btn.text() == "Run Check"
+    assert panel._continue_btn.isHidden()
