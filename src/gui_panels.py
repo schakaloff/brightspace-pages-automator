@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit, QFrame, QScrollArea,
+    QPushButton, QLineEdit, QFrame, QScrollArea, QSpinBox,
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 
@@ -476,7 +476,69 @@ class CheckerPanel(QWidget):
             self._h5p_ready_event.set()
 
 
-# ── CollectorPanel (stub — implemented in Task 9) ─────────────────────────────
+# ── Theme data (shared by CollectorPanel and RestylePanel) ────────────────────
+
+PAGE_THEMES = {
+    "lake":     dict(primary="#005F63", mid="#2ECDDC", accent="#FF8204", circle="#005F63"),
+    "sky":      dict(primary="#2ECDDC", mid="#6EDFE8", accent="#005F63", circle="#2ECDDC"),
+    "sunset":   dict(primary="#FF8204", mid="#FFA340", accent="#005F63", circle="#FF8204"),
+    "peach":    dict(primary="#DE4F3D", mid="#E87A68", accent="#FF8204", circle="#DE4F3D"),
+    "cherry":   dict(primary="#E10040", mid="#FF3366", accent="#FF8204", circle="#E10040"),
+    "cabernet": dict(primary="#782434", mid="#A03C54", accent="#DE4F3D", circle="#782434"),
+    "lavender": dict(primary="#50037F", mid="#8B3FC0", accent="#2ECDDC", circle="#50037F"),
+    "lilac":    dict(primary="#9B5CB8", mid="#CA9CE4", accent="#2ECDDC", circle="#CA9CE4"),
+    "charcoal": dict(primary="#50534C", mid="#7A7D74", accent="#2ECDDC", circle="#50534C"),
+}
+
+
+def _build_theme_swatches(parent_layout: QVBoxLayout) -> tuple[dict, list]:
+    """Build circular colour-swatch buttons for each PAGE_THEMES entry.
+
+    Adds the swatch row to *parent_layout* and returns
+    ``(frames_dict keyed by theme name, [selected_name_ref])``
+    where ``selected_name_ref`` is a 1-element list containing the
+    currently selected theme name (mutable so callers always see the
+    latest selection).
+    """
+    selected: list[str] = ["lake"]
+    frames: dict[str, QPushButton] = {}
+
+    row_widget = QWidget()
+    row = QHBoxLayout(row_widget)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(6)
+
+    def _select(name: str) -> None:
+        old = selected[0]
+        if old in frames:
+            frames[old].setStyleSheet(
+                f"background:{PAGE_THEMES[old]['circle']};border-radius:13px;"
+                f"border:2px solid transparent;"
+            )
+        selected[0] = name
+        frames[name].setStyleSheet(
+            f"background:{PAGE_THEMES[name]['circle']};border-radius:13px;"
+            f"border:2px solid #ffffff;"
+        )
+
+    for name, theme in PAGE_THEMES.items():
+        swatch = QPushButton()
+        swatch.setFixedSize(26, 26)
+        swatch.setStyleSheet(
+            f"background:{theme['circle']};border-radius:13px;border:2px solid transparent;"
+        )
+        swatch.setCursor(Qt.CursorShape.PointingHandCursor)
+        swatch.clicked.connect(lambda _=False, n=name: _select(n))
+        frames[name] = swatch
+        row.addWidget(swatch)
+
+    row.addStretch()
+    parent_layout.addWidget(row_widget)
+    _select("lake")
+    return frames, selected
+
+
+# ── CollectorPanel ────────────────────────────────────────────────────────────
 
 class CollectorPanel(QWidget):
     step_success = Signal()
@@ -485,28 +547,272 @@ class CollectorPanel(QWidget):
     def __init__(self, main_window, parent=None):
         super().__init__(parent)
         self._mw = main_window
+        self._log_queue: queue.Queue = queue.Queue()
+        self._swatch_frames: dict = {}
+        self._selected_theme: list = ["lake"]
+        self._build()
+        self._poll_timer = QTimer(self)
+        self._poll_timer.timeout.connect(self._poll_log)
+        self._poll_timer.start(100)
+
+    def _build(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(32, 28, 32, 20)
+        layout.setSpacing(0)
+
         layout.addWidget(_section_header("Unit Collector"))
-        placeholder = QLabel("Unit Collector panel — coming in Task 9.")
-        placeholder.setProperty("role", "dim")
-        layout.addWidget(placeholder)
-        layout.addStretch()
+        sub = QLabel("Scrapes all topic pages from a unit and combines them into one collapsible HTML file.")
+        sub.setProperty("role", "dim"); sub.setWordWrap(True)
+        layout.addWidget(sub)
+        layout.addSpacing(20)
+
+        layout.addWidget(_form_label("PAGE THEME"))
+        layout.addSpacing(6)
+        self._swatch_frames, self._selected_theme = _build_theme_swatches(layout)
+        layout.addSpacing(14)
+
+        layout.addWidget(_form_label("BRIGHTSPACE UNIT URL"))
+        layout.addSpacing(4)
+        self._unit_entry = QLineEdit()
+        self._unit_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/le/content/…/lessons/…")
+        self._unit_entry.setFixedHeight(40)
+        layout.addWidget(self._unit_entry)
+        layout.addSpacing(12)
+
+        layout.addWidget(_form_label("TARGET PAGE URL  (empty Brightspace page you created)"))
+        layout.addSpacing(4)
+        self._target_entry = QLineEdit()
+        self._target_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/le/content/…/topics/…/View")
+        self._target_entry.setFixedHeight(40)
+        layout.addWidget(self._target_entry)
+        layout.addSpacing(12)
+
+        par_row = QHBoxLayout()
+        par_row.addWidget(_form_label("PARALLEL PAGES"))
+        self._parallel_spin = QSpinBox()
+        self._parallel_spin.setRange(1, 10)
+        self._parallel_spin.setValue(3)
+        self._parallel_spin.setFixedWidth(60)
+        par_row.addWidget(self._parallel_spin)
+        par_row.addStretch()
+        layout.addLayout(par_row)
+        layout.addSpacing(14)
+
+        self._run_btn = QPushButton("Collect & Assemble")
+        self._run_btn.setFixedHeight(42)
+        self._run_btn.setIcon(make_icon("run", "#ffffff", 14))
+        self._run_btn.clicked.connect(self._start_run)
+        layout.addWidget(self._run_btn)
+        layout.addSpacing(8)
+
+        layout.addWidget(_form_label("LOG"))
+        layout.addSpacing(4)
+        self._log = LogWidget()
+        layout.addWidget(self._log, 1)
+        layout.addSpacing(8)
+
+        self._continue_btn = QPushButton("Continue to Page Changer")
+        self._continue_btn.setProperty("variant", "next-step")
+        self._continue_btn.setFixedHeight(38)
+        self._continue_btn.setIcon(make_icon("next", "#dde0ee", 14))
+        self._continue_btn.hide()
+        self._continue_btn.clicked.connect(self.continue_next)
+        layout.addWidget(self._continue_btn)
+
+    def _start_run(self):
+        if not self._mw.chromium_ready:
+            self._log.append_log("Browser engine still installing — please wait.", "warning")
+            return
+        unit_url   = self._unit_entry.text().strip()
+        target_url = self._target_entry.text().strip()
+        if not unit_url:
+            self._log.append_log("Paste a Brightspace unit URL first.", "warning"); return
+        if not target_url:
+            self._log.append_log("Paste the target page URL first.", "warning"); return
+
+        theme_name   = self._selected_theme[0]
+        theme_colors = PAGE_THEMES[theme_name]
+        parallel     = self._parallel_spin.value()
+
+        style_ref_path = Path(__file__).parent.parent / "templates" / "style_reference.html"
+        try:
+            style_reference_html = style_ref_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            style_reference_html = ""
+
+        self._run_btn.setText("Running…"); self._run_btn.setEnabled(False)
+        self._continue_btn.hide()
+        self._log.clear_log()
+
+        q = self._log_queue
+
+        def worker():
+            done_sent = [False]
+            def on_done():
+                if not done_sent[0]:
+                    done_sent[0] = True
+                    q.put(("__DONE__", ""))
+            try:
+                from unit_collector import run as collector_run
+                asyncio.run(collector_run(
+                    unit_url=unit_url,
+                    target_url=target_url,
+                    theme_name=theme_name,
+                    theme_colors=theme_colors,
+                    gemini_api_key=self._mw.gemini_api_key,
+                    style_reference_html=style_reference_html,
+                    parallel_pages=parallel,
+                    log=lambda msg, tag="info": q.put((msg, tag)),
+                    on_complete=on_done,
+                ))
+            except Exception as e:
+                q.put((f"Error: {e}", "error"))
+            finally:
+                on_done()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _poll_log(self):
+        try:
+            while True:
+                msg, tag = self._log_queue.get_nowait()
+                if msg == "__DONE__":
+                    self._run_btn.setText("Collect & Assemble")
+                    self._run_btn.setEnabled(True)
+                elif msg == "__SUCCESS__":
+                    self._continue_btn.show()
+                    self.step_success.emit()
+                else:
+                    self._log.append_log(msg, tag)
+        except queue.Empty:
+            pass
 
 
-# ── RestylePanel (stub — implemented in Task 10) ──────────────────────────────
+# ── RestylePanel ──────────────────────────────────────────────────────────────
 
 class RestylePanel(QWidget):
     step_success = Signal()
-    continue_next = Signal()
 
     def __init__(self, main_window, parent=None):
         super().__init__(parent)
         self._mw = main_window
+        self._log_queue: queue.Queue = queue.Queue()
+        self._response_queue: queue.Queue = queue.Queue()
+        self._swatch_frames: dict = {}
+        self._selected_theme: list = ["lake"]
+        self._build()
+        self._poll_timer = QTimer(self)
+        self._poll_timer.timeout.connect(self._poll_log)
+        self._poll_timer.start(100)
+
+    def _build(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(32, 28, 32, 20)
-        layout.addWidget(_section_header("Restyle"))
-        placeholder = QLabel("Restyle panel — coming in Task 10.")
-        placeholder.setProperty("role", "dim")
-        layout.addWidget(placeholder)
-        layout.addStretch()
+        layout.setSpacing(0)
+
+        layout.addWidget(_section_header("Page Changer"))
+        sub = QLabel("Pick an OC brand colour theme, paste a Brightspace page or section URL, and let Gemini restyle it.")
+        sub.setProperty("role", "dim"); sub.setWordWrap(True)
+        layout.addWidget(sub)
+        layout.addSpacing(20)
+
+        layout.addWidget(_form_label("PAGE THEME"))
+        layout.addSpacing(6)
+        self._swatch_frames, self._selected_theme = _build_theme_swatches(layout)
+        layout.addSpacing(14)
+
+        layout.addWidget(_form_label("BRIGHTSPACE PAGE URL"))
+        layout.addSpacing(4)
+
+        url_row = QHBoxLayout(); url_row.setSpacing(8)
+        self._url_entry = QLineEdit()
+        self._url_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/home/…")
+        self._url_entry.setFixedHeight(42)
+        url_row.addWidget(self._url_entry, 1)
+
+        self._run_btn = QPushButton("Start")
+        self._run_btn.setFixedSize(110, 42)
+        self._run_btn.setIcon(make_icon("run", "#ffffff", 14))
+        self._run_btn.clicked.connect(self._start_run)
+        url_row.addWidget(self._run_btn)
+        layout.addLayout(url_row)
+        layout.addSpacing(12)
+
+        layout.addWidget(_form_label("LOG"))
+        layout.addSpacing(4)
+        self._log = LogWidget()
+        layout.addWidget(self._log, 1)
+
+        # Load saved URL
+        cfg = self._mw.load_config() if hasattr(self._mw, "load_config") else {}
+        if cfg.get("automator_url"):
+            self._url_entry.setText(cfg["automator_url"])
+
+    def _start_run(self):
+        if not self._mw.chromium_ready:
+            self._log.append_log("Browser engine still installing — please wait.", "warning"); return
+        url = self._url_entry.text().strip()
+        if not url:
+            self._log.append_log("Paste a Brightspace URL first.", "warning"); return
+
+        style_ref_path = Path(__file__).parent.parent / "templates" / "style_reference.html"
+        try:
+            style_reference_html = style_ref_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            style_reference_html = ""
+
+        self._run_btn.setText("Running…"); self._run_btn.setEnabled(False)
+        self._log.clear_log()
+
+        q  = self._log_queue
+        rq = self._response_queue
+
+        def on_pages_found(pages):
+            q.put(("__PAGES__", pages))
+            return rq.get(timeout=300)
+
+        def worker():
+            done_sent = [False]
+            def on_done():
+                if not done_sent[0]:
+                    done_sent[0] = True
+                    q.put(("__DONE__", ""))
+            try:
+                import sys as _sys
+                _sys.modules.pop("automator", None)
+                from automator import run as automator_run
+                asyncio.run(automator_run(
+                    url=url,
+                    log=lambda msg, tag="info": q.put((msg, tag)),
+                    on_complete=on_done,
+                    gemini_api_key=self._mw.gemini_api_key,
+                    style_reference_html=style_reference_html,
+                    theme_name=self._selected_theme[0],
+                    on_pages_found=on_pages_found,
+                ))
+            except Exception as e:
+                q.put((f"Error: {e}", "error"))
+            finally:
+                on_done()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _poll_log(self):
+        try:
+            while True:
+                msg, tag = self._log_queue.get_nowait()
+                if msg == "__DONE__":
+                    self._run_btn.setText("Start"); self._run_btn.setEnabled(True)
+                    if hasattr(self._mw, "save_config"):
+                        self._mw.save_config({"automator_url": self._url_entry.text().strip()})
+                elif msg == "__PAGES__":
+                    from gui_dialogs import PagesDialog
+                    dlg = PagesDialog(tag, self)
+                    if dlg.exec():
+                        self._response_queue.put(dlg.result_value())
+                    else:
+                        self._response_queue.put((0, len(tag)))
+                else:
+                    self._log.append_log(msg, tag)
+        except queue.Empty:
+            pass
