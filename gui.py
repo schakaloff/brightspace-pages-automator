@@ -492,6 +492,49 @@ class App(ctk.CTk):
         body = ctk.CTkScrollableFrame(parent, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=16, pady=16)
 
+        # ── Brightspace Credentials ───────────────────────────────────────────
+        ctk.CTkLabel(
+            body, text="BRIGHTSPACE CREDENTIALS",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(0, 6))
+
+        cred_card = ctk.CTkFrame(body, fg_color=_CARD, corner_radius=10)
+        cred_card.pack(fill="x", pady=(0, 20))
+        cred_card.columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(cred_card, text="Username", font=ctk.CTkFont(size=11),
+                     text_color=_TEXT_DIM).grid(row=0, column=0, sticky="w", padx=14, pady=(12, 2))
+        self._cred_user_entry = ctk.CTkEntry(
+            cred_card, placeholder_text="firstname.lastname@okanagancollege.ca",
+            height=36, font=ctk.CTkFont(size=13),
+        )
+        self._cred_user_entry.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 8))
+        self._bind_paste_menu(self._cred_user_entry)
+
+        ctk.CTkLabel(cred_card, text="Password", font=ctk.CTkFont(size=11),
+                     text_color=_TEXT_DIM).grid(row=2, column=0, sticky="w", padx=14, pady=(0, 2))
+        self._cred_pass_entry = ctk.CTkEntry(
+            cred_card, placeholder_text="••••••••",
+            height=36, font=ctk.CTkFont(size=13), show="•",
+        )
+        self._cred_pass_entry.grid(row=3, column=0, sticky="ew", padx=14, pady=(0, 8))
+        self._bind_paste_menu(self._cred_pass_entry)
+
+        self._cred_status = ctk.CTkLabel(
+            cred_card, text="", font=ctk.CTkFont(size=11), text_color=_TEXT_FAINT,
+        )
+        self._cred_status.grid(row=4, column=0, sticky="w", padx=14)
+
+        ctk.CTkButton(
+            cred_card, text="💾  Save Credentials", height=36,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._save_credentials,
+        ).grid(row=5, column=0, sticky="ew", padx=14, pady=(4, 12))
+
+        self._load_credentials()
+
+        ctk.CTkFrame(body, height=1, fg_color=_DIVIDER).pack(fill="x", pady=(0, 20))
+
         # Header
         ctk.CTkLabel(
             body, text="📖  How It Works",
@@ -1514,6 +1557,41 @@ class App(ctk.CTk):
         menu.add_command(label="Select All", command=lambda: entry._entry.selection_range(0, "end"))
         menu.add_command(label="Clear",      command=lambda: entry.delete(0, "end"))
         entry.bind("<Button-3>", lambda e: menu.tk_popup(e.x_root, e.y_root))
+
+    # ── Credential helpers ────────────────────────────────────────────────────
+
+    def _save_credentials(self):
+        import keyring
+        username = self._cred_user_entry.get().strip()
+        password = self._cred_pass_entry.get().strip()
+        if not username:
+            self._cred_status.configure(text="⚠  Enter a username first.", text_color=_TAG_COLORS["warning"])
+            return
+        self._save_config({"bs_username": username})
+        if password:
+            keyring.set_password("BrightspacePagesAutomator", username, password)
+        self._cred_status.configure(text="✓  Saved", text_color=_TAG_COLORS["success"])
+        self.after(3000, lambda: self._cred_status.configure(text=""))
+
+    def _load_credentials(self):
+        import keyring
+        cfg = self._load_config()
+        username = cfg.get("bs_username", "")
+        if username:
+            self._cred_user_entry.insert(0, username)
+            password = keyring.get_password("BrightspacePagesAutomator", username)
+            if password:
+                self._cred_pass_entry.insert(0, password)
+
+    @property
+    def bs_username(self) -> str:
+        return self._load_config().get("bs_username", "")
+
+    @property
+    def bs_password(self) -> str:
+        import keyring
+        u = self.bs_username
+        return keyring.get_password("BrightspacePagesAutomator", u) or "" if u else ""
 
     def _load_config(self) -> dict:
         try:
