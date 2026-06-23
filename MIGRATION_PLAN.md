@@ -81,12 +81,50 @@ Note: label names come from the first link inside the label body, not the sectio
 - Each upload returns a Brightspace file URL
 - Build map: `moodle_url → brightspace_url`
 
+## H5P → Brightspace placement
+
+Each H5P activity gets its own page created in Brightspace (not embedded inline).
+
+**Matched sections (auto):**
+- Use the Moodle section → Brightspace module map already built by the Content Checker comparison
+- Create a Brightspace page in the matched module, upload the .h5p file
+
+**Unmatched sections (manual fallback):**
+- If fuzzy match fails for a section, do NOT skip — flag it
+- At end of run: show a popup listing all unmatched H5P items + which section they came from
+- Also write to a persistent log file: `logs/YYYY-MM-DD_<course-name>_unmatched.txt`
+- Log persists until the next run for that course (next run overwrites it)
+- This way if user closes the app the info isn't lost
+
+---
+
 ## Stage 4 — Re-linking report
 - Use Moodle section → Brightspace module mapping from Content Checker comparison
 - For each file: show which Brightspace module it belongs in + new URL
 - For Kaltura: show entryId + which section it was in
 - For H5P: list separately with "needs manual upload by educator"
 - For external tools: already handled by existing external tools report
+
+---
+
+## Hybrid approach (backup plan for HTML generation)
+
+Instead of sending full course pages to Gemini, use a two-layer approach:
+
+**Layer 1 — Rules (free, instant):** Handle everything at the Moodle structure level
+- Sections, standalone FILE resources, quizzes, external tools, forums
+- These are always the same across all courses (`modtype_*` classes never change)
+
+**Layer 2 — Gemini (cheap fallback):** Handle only the label body HTML
+- Send one small label chunk at a time, not the whole page
+- Provide one example label from the same course as style reference
+- Gemini matches that style for the rest of the labels in that course
+- Massively fewer tokens vs current approach; less likely to 503
+
+**Why not fine-tune our own model:**
+- Needs 50-100 example pairs, GPU hardware, hours of training
+- Overkill — the problem is a template problem, not an intelligence problem
+- Rule-based + prompt is faster, cheaper, and just as consistent
 
 ---
 
@@ -125,11 +163,47 @@ Filip is building a tab that:
 
 ### 2026-06-16
 - Style Preview tab fully implemented and pushed to origin/nick
-  - `src/page_previewer.py`: PagePreviewer class — navigates to Brightspace
-    topic in view mode, extracts source HTML via Options → Edit → Source Code,
-    sends to Gemini for restyling, injects styled HTML into live page DOM,
-    blocks on user action (Apply / Regenerate with feedback / Skip),
-    Apply writes back via Source Code editor + Save and Close
-  - `gui.py`: Style Preview tab wired — theme swatches, URL entry,
-    action frame (Apply / Regenerate / Skip), _prev_* queue/polling pattern
 - **Next:** Stage 2 — download files from Moodle using authenticated session
+
+### 2026-06-17 — H5P download fully working + re-link architecture decided
+
+**H5P download (all working):**
+- Auto role-switch: clicks user menu → Switch role to... → Instructor before downloads
+- Checkbox fix: JS-based check (no collapsible expansion needed), covers id_export /
+  id_enabledownload / id_displayopt_export across both mod/hvp and mod/h5pactivity
+- Fresh page per H5P item (context isolation, no browser crash cascade)
+- Pause point: "Ready — Download H5P" button appears after scrape so user can verify
+  browser state before downloads start
+- All 13 H5P files downloaded successfully on real course test
+
+**Re-link architecture decided:**
+- Brightspace already has course imported from Moodle backup, but embedded file links
+  (PDFs, DOCX, etc.) often still point to mymoodle.okanagan.bc.ca — especially
+  files that were embedded as links inside label HTML (not standalone FILE activities)
+- Standalone FILE activities sometimes transfer correctly via the import tool
+- **Approach:**
+  1. Scan each Brightspace topic HTML for mymoodle.okanagan.bc.ca hrefs (already built)
+  2. For each Moodle URL found: check if a file with the same name already exists in
+     Brightspace file store → if yes, notify user and let them verify → if no, download
+     from Moodle and bulk-upload to the matching Brightspace section
+  3. Replace all Moodle URLs in topic HTML with new Brightspace URLs
+- `_relink_moodle_files` method is built but not yet tested against a real course
+- `moodle_links` scan already collects {topic, topic_id, text, href} per Moodle link found
+- D2L manage-files upload endpoint used: POST /d2l/api/lp/1.0/{courseId}/managefiles/file/
+- Topic HTML update: GET + string-replace + PUT /d2l/api/le/1.0/{courseId}/content/topics/{id}/file
+
+**H5P Brightspace upload (next after re-link):**
+- Each H5P gets its own new Page in the matched Brightspace section
+- Step 8: Create New button in section → d2l-button.create-new-btn (shadow DOM)
+- Step 9: Click Page option → TBD (need HTML from user walkthrough)
+- Unmatched sections → popup + log file at end of run
+- OC Brightspace H5P type unknown (built-in D2L vs LTI) — need user to show upload flow
+
+**Unit Collector (Filip) runs LAST:**
+- After all files are re-linked and H5P pages are created
+- Assembles topics into one combined collapsible page per section
+- File link replacement slots in after HTML assembly
+
+**Pending decisions:**
+- Does OC Brightspace have H5P as built-in tool or LTI? (affects upload automation)
+- Log file (logs/YYYY-MM-DD.txt) — build after re-link is confirmed working

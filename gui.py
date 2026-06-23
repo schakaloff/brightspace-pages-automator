@@ -1,5 +1,5 @@
 """
-Brightspace Page Automator
+Brightspace Pages Automator
 GUI architecture reused from brightspace-quiz-automator/gui.py:
   same color palette, same worker-thread + queue + after() pattern.
 """
@@ -14,6 +14,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 import customtkinter as ctk
+from icon_art import draw_app_icon
+from update_checker import check_for_update, download_asset
 
 try:
     from CTkMessagebox import CTkMessagebox
@@ -23,29 +25,38 @@ except ImportError:
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
+# ── Version ──────────────────────────────────────────────────────────────────
+VERSION = "0.8.0"  # bump manually per release; CI tag adds the leading "v"
+
+
+def _resource_path(*parts) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    return base.joinpath(*parts)
+
+
 # ── Config persistence ────────────────────────────────────────────────────────
 _CONFIG_PATH = Path(__file__).parent / "user_config.json"
 
 # ── Page themes ───────────────────────────────────────────────────────────────
 PAGE_THEMES = {
-    "blue":   dict(primary="#0E72ED", mid="#2D8CFF", accent="#00C6D7",
-                   bg_from="#eaf4ff", bg_to="#dffcff", shadow_rgb="14,114,237",   circle="#2D8CFF"),
-    "teal":   dict(primary="#0D9488", mid="#14B8A6", accent="#2DD4BF",
-                   bg_from="#eafaf8", bg_to="#f0fffc", shadow_rgb="13,148,136",   circle="#14B8A6"),
-    "green":  dict(primary="#16A34A", mid="#22C55E", accent="#4ADE80",
-                   bg_from="#eafff0", bg_to="#f0fff4", shadow_rgb="22,163,74",    circle="#22C55E"),
-    "lime":   dict(primary="#65A30D", mid="#84CC16", accent="#BEF264",
-                   bg_from="#f4ffea", bg_to="#f9ffe0", shadow_rgb="101,163,13",   circle="#84CC16"),
-    "amber":  dict(primary="#D97706", mid="#F59E0B", accent="#FCD34D",
-                   bg_from="#fffbea", bg_to="#fffef0", shadow_rgb="217,119,6",    circle="#F59E0B"),
-    "orange": dict(primary="#EA580C", mid="#F97316", accent="#FDBA74",
-                   bg_from="#fff3ea", bg_to="#fff9ef", shadow_rgb="234,88,12",    circle="#F97316"),
-    "red":    dict(primary="#B91C1C", mid="#EF4444", accent="#FCA5A5",
-                   bg_from="#ffeaea", bg_to="#fff0f0", shadow_rgb="185,28,28",    circle="#EF4444"),
-    "pink":   dict(primary="#BE185D", mid="#EC4899", accent="#F9A8D4",
-                   bg_from="#ffeaf5", bg_to="#fff0f8", shadow_rgb="190,24,93",    circle="#EC4899"),
-    "purple": dict(primary="#6D28D9", mid="#8B5CF6", accent="#C4B5FD",
-                   bg_from="#f3eaff", bg_to="#f8f0ff", shadow_rgb="109,40,217",   circle="#8B5CF6"),
+    "lake":     dict(primary="#005F63", mid="#2ECDDC", accent="#FF8204",
+                     bg_from="#f0fafa", bg_to="#f8feff", shadow_rgb="0,95,99",       circle="#005F63"),
+    "sky":      dict(primary="#2ECDDC", mid="#6EDFE8", accent="#005F63",
+                     bg_from="#f0fafa", bg_to="#f8feff", shadow_rgb="46,205,220",    circle="#2ECDDC"),
+    "sunset":   dict(primary="#FF8204", mid="#FFA340", accent="#005F63",
+                     bg_from="#fff8f0", bg_to="#fffcf8", shadow_rgb="255,130,4",     circle="#FF8204"),
+    "peach":    dict(primary="#DE4F3D", mid="#E87A68", accent="#FF8204",
+                     bg_from="#fff3f0", bg_to="#fff8f8", shadow_rgb="222,79,61",     circle="#DE4F3D"),
+    "cherry":   dict(primary="#E10040", mid="#FF3366", accent="#FF8204",
+                     bg_from="#fff0f4", bg_to="#fff8fa", shadow_rgb="225,0,64",      circle="#E10040"),
+    "cabernet": dict(primary="#782434", mid="#A03C54", accent="#DE4F3D",
+                     bg_from="#fff0f2", bg_to="#fff8fa", shadow_rgb="120,36,52",     circle="#782434"),
+    "lavender": dict(primary="#50037F", mid="#8B3FC0", accent="#2ECDDC",
+                     bg_from="#f8f0ff", bg_to="#fdf8ff", shadow_rgb="80,3,127",      circle="#50037F"),
+    "lilac":    dict(primary="#9B5CB8", mid="#CA9CE4", accent="#2ECDDC",
+                     bg_from="#f8f0ff", bg_to="#fdf8ff", shadow_rgb="155,92,184",    circle="#CA9CE4"),
+    "charcoal": dict(primary="#50534C", mid="#7A7D74", accent="#2ECDDC",
+                     bg_from="#f4f4f2", bg_to="#f9f9f8", shadow_rgb="80,83,76",      circle="#50534C"),
 }
 
 # ── Palette ───────────────────────────────────────────────────────────────────
@@ -85,7 +96,7 @@ def _make_log_box(parent) -> ctk.CTkTextbox:
     box = ctk.CTkTextbox(
         border,
         state="disabled",
-        font=ctk.CTkFont(family="Consolas", size=12),
+        font=ctk.CTkFont(family="Consolas", size=14),
         fg_color=_LOG_BG,
         corner_radius=6,
         text_color=_TAG_COLORS["info"],
@@ -104,7 +115,7 @@ def _make_log_box_grid(parent, row: int, col: int = 0) -> ctk.CTkTextbox:
     box = ctk.CTkTextbox(
         border,
         state="disabled",
-        font=ctk.CTkFont(family="Consolas", size=12),
+        font=ctk.CTkFont(family="Consolas", size=14),
         fg_color=_LOG_BG,
         corner_radius=6,
         text_color=_TAG_COLORS["info"],
@@ -114,6 +125,79 @@ def _make_log_box_grid(parent, row: int, col: int = 0) -> ctk.CTkTextbox:
     for tag, color in _TAG_COLORS.items():
         box._textbox.tag_configure(tag, foreground=color)
     return box
+
+
+def _make_searchable_log(parent, use_grid=False, grid_row=0, grid_col=0):
+    """Search bar + log textbox in one wrapper. Returns (wrapper, box)."""
+    wrapper = ctk.CTkFrame(parent, fg_color="transparent")
+    if use_grid:
+        wrapper.grid(row=grid_row, column=grid_col, sticky="nsew")
+    else:
+        wrapper.pack(fill="both", expand=True)
+    wrapper.rowconfigure(1, weight=1)
+    wrapper.columnconfigure(0, weight=1)
+
+    # Search row
+    search_row = ctk.CTkFrame(wrapper, fg_color="transparent")
+    search_row.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+    search_row.columnconfigure(0, weight=1)
+
+    search_var = ctk.StringVar()
+    ctk.CTkEntry(
+        search_row,
+        textvariable=search_var,
+        placeholder_text="🔍  Search log…",
+        height=28,
+        font=ctk.CTkFont(size=12),
+        fg_color="#101016",
+        border_color="#2a2a38",
+    ).grid(row=0, column=0, sticky="ew", padx=(0, 5))
+
+    clear_btn = ctk.CTkButton(
+        search_row, text="✕", width=28, height=28,
+        fg_color="transparent", hover_color=_DIVIDER, text_color=_TEXT_DIM,
+        font=ctk.CTkFont(size=12),
+        command=lambda: search_var.set(""),
+    )
+    clear_btn.grid(row=0, column=1)
+
+    # Log box
+    border = ctk.CTkFrame(wrapper, fg_color=_LOG_BORDER, corner_radius=8)
+    border.grid(row=1, column=0, sticky="nsew")
+    box = ctk.CTkTextbox(
+        border, state="disabled",
+        font=ctk.CTkFont(family="Consolas", size=14),
+        fg_color=_LOG_BG, corner_radius=6,
+        text_color=_TAG_COLORS["info"], border_width=0,
+        wrap="word",
+    )
+    box.pack(fill="both", expand=True, padx=2, pady=2)
+    for tag, color in _TAG_COLORS.items():
+        box._textbox.tag_configure(tag, foreground=color)
+    box._textbox.tag_configure("search_hl", background="#1a4a20", foreground="#90ee90")
+
+    def _do_search(*_):
+        tb = box._textbox
+        tb.tag_remove("search_hl", "1.0", "end")
+        term = search_var.get().strip()
+        if not term:
+            return
+        start = "1.0"
+        first_hit = None
+        while True:
+            pos = tb.search(term, start, nocase=True, stopindex="end")
+            if not pos:
+                break
+            end_pos = f"{pos}+{len(term)}c"
+            tb.tag_add("search_hl", pos, end_pos)
+            if first_hit is None:
+                first_hit = pos
+            start = end_pos
+        if first_hit:
+            tb.see(first_hit)
+
+    search_var.trace_add("write", _do_search)
+    return wrapper, box
 
 
 def _log_append(box: ctk.CTkTextbox, text: str, tag: str = "info") -> None:
@@ -127,50 +211,48 @@ def _log_append(box: ctk.CTkTextbox, text: str, tag: str = "info") -> None:
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Brightspace Page Automator")
+        self.title("Brightspace Pages Automator")
         self.geometry("900x800")
         self.minsize(700, 620)
         self.configure(fg_color=_BG)
         self._set_window_icon()
 
         self._log_queue              = queue.Queue()
-        self._sm_log_queue           = queue.Queue()
         self._col_log_queue          = queue.Queue()
         self._chk_log_queue          = queue.Queue()
-        self._prev_log_queue         = queue.Queue()
         self._response_queue         = queue.Queue()
-        self._sm_link_response_queue = queue.Queue()
-        self._prev_response_queue    = queue.Queue()
-        self._sm_link_entries        = {}
-        self._selected_theme         = "blue"
+        self._selected_theme         = "lake"
         self._swatch_frames          = {}
-        self._selected_col_theme     = "blue"
+        self._selected_col_theme     = "lake"
         self._col_swatch_frames      = {}
-        self._selected_prev_theme    = "blue"
-        self._prev_swatch_frames     = {}
-        self._sm_moodle_ready_event  = None
-        self._chk_moodle_ready_event = None
+        self._chk_moodle_ready_event      = None
+        self._chk_h5p_ready_event         = None
+        self._chk_file_checklist_event    = None
         self._build_ui()
         self.after(100, self._poll_log)
-        self.after(100, self._sm_poll_log)
         self.after(100, self._col_poll_log)
         self.after(100, self._chk_poll_log)
-        self.after(100, self._prev_poll_log)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        self._chromium_ready = False
+        self._chromium_dialog = None
+        self._chromium_dialog_log = None
+        self._chromium_queue = queue.Queue()
+        self.after(200, self._chromium_poll)
+        threading.Thread(target=self._chromium_check_worker, daemon=True).start()
+
+        self._update_dialog = None
+        self._update_queue = queue.Queue()
+        self.after(300, self._update_poll)
+        threading.Thread(target=self._update_check_worker, daemon=True).start()
 
     # ── Top-level UI ──────────────────────────────────────────────────────────
 
     def _set_window_icon(self):
         try:
-            from PIL import Image, ImageDraw
+            from PIL import Image
             import io, tkinter as tk
-            size = 64
-            img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(img)
-            draw.ellipse([0, 0, size - 1, size - 1], fill="#0d9488")
-            # lightning bolt polygon
-            bolt = [(38, 6), (22, 34), (32, 34), (26, 58), (44, 28), (34, 28)]
-            draw.polygon(bolt, fill="#ffffff")
+            img = draw_app_icon(64)
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             buf.seek(0)
@@ -179,6 +261,190 @@ class App(ctk.CTk):
             self._icon_photo = photo  # prevent GC
         except Exception:
             pass
+
+    # ── Chromium first-run setup ─────────────────────────────────────────────
+
+    def _chromium_check_worker(self):
+        from chromium_setup import is_chromium_installed, install_chromium
+        if is_chromium_installed():
+            self._chromium_queue.put(("__READY__", None))
+            return
+        self._chromium_queue.put(("__NEED_INSTALL__", None))
+        ok, err = install_chromium(
+            progress_cb=lambda line: self._chromium_queue.put(("__PROGRESS__", line))
+        )
+        self._chromium_queue.put(("__INSTALL_DONE__", (ok, err)))
+
+    def _show_chromium_dialog(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Setting up browser engine")
+        dialog.geometry("480x320")
+        dialog.resizable(False, False)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)  # can't be cancelled mid-download
+        dialog.configure(fg_color=_BG)
+
+        ctk.CTkLabel(
+            dialog, text="Downloading browser engine (one-time setup)…",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).pack(pady=(20, 8), padx=24, anchor="w")
+
+        log_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        log_frame.pack(fill="both", expand=True, padx=24, pady=(0, 20))
+        log_box = _make_log_box(log_frame)
+
+        self._chromium_dialog = dialog
+        self._chromium_dialog_log = log_box
+
+    def _chromium_poll(self):
+        try:
+            while True:
+                kind, payload = self._chromium_queue.get_nowait()
+                if kind == "__READY__":
+                    self._chromium_ready = True
+                elif kind == "__NEED_INSTALL__":
+                    self._show_chromium_dialog()
+                elif kind == "__PROGRESS__":
+                    if self._chromium_dialog_log:
+                        _log_append(self._chromium_dialog_log, payload, "info")
+                elif kind == "__INSTALL_DONE__":
+                    ok, err = payload
+                    if self._chromium_dialog:
+                        self._chromium_dialog.destroy()
+                        self._chromium_dialog = None
+                        self._chromium_dialog_log = None
+                    if ok:
+                        self._chromium_ready = True
+                    elif CTkMessagebox:
+                        CTkMessagebox(
+                            title="Chromium setup failed",
+                            message=f"Could not download the browser engine:\n{err}\n\n"
+                                    "Check your internet connection and restart the app to retry.",
+                            icon="cancel",
+                        )
+        except queue.Empty:
+            pass
+        self.after(150, self._chromium_poll)
+
+    # ── Self-update check ────────────────────────────────────────────────────
+
+    def _any_job_running(self) -> bool:
+        for btn in (self._run_btn, self._col_run_btn, self._chk_run_btn, self._chk_phase_b_btn):
+            if btn.cget("state") == "disabled":
+                return True
+        return False
+
+    def _persist_config(self) -> None:
+        self._save_config({
+            "automator_url":      self._url_entry.get().strip(),
+            "pc_gemini_api_key":  self._pc_key_entry.get().strip(),
+            "chk_bs_url":         self._chk_bs_entry.get().strip(),
+            "chk_moodle_url":     self._chk_moodle_entry.get().strip(),
+        })
+
+    def _update_check_worker(self):
+        release = check_for_update()
+        if not release:
+            return
+        if self._load_config().get("skipped_update_tag") == release["tag"]:
+            return
+        self._update_queue.put(release)
+
+    def _update_poll(self):
+        try:
+            release = self._update_queue.get_nowait()
+            self._show_update_dialog(release)
+        except queue.Empty:
+            pass
+        self.after(2000, self._update_poll)
+
+    def _show_update_dialog(self, release: dict):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Update available")
+        dialog.geometry("520x420")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        dialog.configure(fg_color=_BG)
+        self._update_dialog = dialog
+
+        ctk.CTkLabel(
+            dialog, text=f"New version available: {release['tag']}",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(pady=(20, 8), padx=24, anchor="w")
+
+        notes_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        notes_frame.pack(fill="both", expand=True, padx=24, pady=(0, 12))
+        notes_box = _make_log_box(notes_frame)
+        notes_box.configure(state="normal")
+        notes_box._textbox.insert("end", release["body"])
+        notes_box.configure(state="disabled")
+
+        status_label = ctk.CTkLabel(dialog, text="", font=ctk.CTkFont(size=11), text_color=_TEXT_FAINT)
+        status_label.pack(padx=24, anchor="w")
+
+        btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_row.pack(fill="x", padx=24, pady=(0, 20))
+        btn_row.columnconfigure((0, 1, 2), weight=1)
+
+        def do_skip():
+            self._save_config({"skipped_update_tag": release["tag"]})
+            dialog.destroy()
+
+        def do_later():
+            dialog.destroy()
+
+        def do_update():
+            if self._any_job_running():
+                status_label.configure(
+                    text="⚠  Finish your current job before updating.", text_color=_TAG_COLORS["warning"]
+                )
+                return
+            update_btn.configure(state="disabled", text="Updating…")
+            skip_btn.configure(state="disabled")
+            later_btn.configure(state="disabled")
+            threading.Thread(target=self._run_update, args=(release, status_label), daemon=True).start()
+
+        skip_btn = ctk.CTkButton(btn_row, text="Skip this version", fg_color="transparent",
+                                  border_width=1, command=do_skip)
+        skip_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        later_btn = ctk.CTkButton(btn_row, text="Remind me later", fg_color="transparent",
+                                   border_width=1, command=do_later)
+        later_btn.grid(row=0, column=1, sticky="ew", padx=6)
+        update_btn = ctk.CTkButton(btn_row, text="Update Now", command=do_update)
+        update_btn.grid(row=0, column=2, sticky="ew", padx=(6, 0))
+
+        if not release.get("asset_url") and sys.platform == "win32":
+            update_btn.configure(state="disabled")
+            status_label.configure(text="No installer found in this release.")
+
+    def _run_update(self, release: dict, status_label) -> None:
+        import tempfile, webbrowser
+
+        def set_status(text):
+            self.after(0, lambda: status_label.configure(text=text))
+
+        if sys.platform != "win32" or not release.get("asset_url"):
+            webbrowser.open(release.get("html_url") or "")
+            self.after(0, lambda: self._update_dialog and self._update_dialog.destroy())
+            return
+
+        try:
+            set_status("Downloading update…")
+            tmp_dir = Path(tempfile.gettempdir())
+            installer_path = tmp_dir / release["asset_name"]
+            download_asset(
+                release["asset_url"], installer_path,
+                progress_cb=lambda pct: set_status(f"Downloading update… {pct}%"),
+            )
+            set_status("Installing…")
+            self.after(0, self._persist_config)
+            import subprocess
+            subprocess.Popen(
+                [str(installer_path), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+                close_fds=True,
+            )
+            self.after(0, self.destroy)
+        except Exception as e:
+            set_status(f"⚠  Update failed: {e}")
 
     def _build_ui(self):
         # ── App header bar ────────────────────────────────────────────────────
@@ -196,7 +462,7 @@ class App(ctk.CTk):
         ).pack(side="left", pady=10)
 
         ctk.CTkLabel(
-            hbar, text="v0.5.0",
+            hbar, text=f"v{VERSION}",
             font=ctk.CTkFont(size=11), text_color=_TEXT_FAINT,
         ).pack(side="right", padx=18, pady=10)
 
@@ -213,11 +479,117 @@ class App(ctk.CTk):
             text_color=_TEXT_DIM,
         )
         tabview.pack(fill="both", expand=True, padx=10, pady=10)
-        self._build_automator_tab(tabview.add("⚡ Page Changer"))
-        self._build_collector_tab(tabview.add("📦 Unit Collector"))
-        self._build_style_migrator_tab(tabview.add("🎨 Style Migrator"))
         self._build_checker_tab(tabview.add("✅ Checker"))
-        self._build_preview_tab(tabview.add("🔍 Style Preview"))
+        self._build_collector_tab(tabview.add("📦 Unit Collector"))
+        self._build_automator_tab(tabview.add("⚡ Page Changer"))
+        self._build_settings_tab(tabview.add("⚙️ Settings"))
+
+    # ── Settings tab ──────────────────────────────────────────────────────────
+
+    def _build_settings_tab(self, parent):
+        import webbrowser, os
+
+        body = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=16, pady=16)
+
+        # Header
+        ctk.CTkLabel(
+            body, text="📖  How It Works",
+            font=ctk.CTkFont(size=22, weight="bold"),
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            body,
+            text="Follow these three phases in order for a complete Moodle → Brightspace migration.",
+            font=ctk.CTkFont(size=12), text_color=_TEXT_DIM,
+        ).pack(anchor="w", pady=(4, 20))
+
+        # Step cards
+        steps = [
+            ("1", "✅", "Checker", "Compare & Transfer",
+             "Scrapes Moodle, compares against Brightspace, downloads missing files,\nuploads them to the correct modules, and migrates all H5P activities."),
+            ("2", "📦", "Unit Collector", "Assemble",
+             "After all content is verified in Brightspace, combines every topic\nin a unit into one clean, collapsible summary page."),
+            ("3", "⚡", "Page Changer", "Restyle",
+             "Uses Gemini AI to restyle Brightspace pages to match the official\nOkanagan College brand — one page or an entire section at once."),
+        ]
+        for num, icon, tab, subtitle, desc in steps:
+            card = ctk.CTkFrame(body, fg_color=_CARD, corner_radius=12)
+            card.pack(fill="x", pady=(0, 10))
+
+            top = ctk.CTkFrame(card, fg_color="transparent")
+            top.pack(fill="x", padx=18, pady=(16, 4))
+
+            ctk.CTkLabel(
+                top,
+                text=f"  Step {num}  ",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                fg_color=_ACCENT, text_color="#ffffff",
+                corner_radius=6, width=60, height=22,
+            ).pack(side="left")
+            ctk.CTkLabel(
+                top,
+                text=f"  {icon}  {tab}  —  {subtitle}",
+                font=ctk.CTkFont(size=14, weight="bold"),
+            ).pack(side="left", padx=10)
+
+            ctk.CTkLabel(
+                card, text=desc,
+                font=ctk.CTkFont(size=12), text_color=_TEXT_DIM,
+                justify="left", anchor="w",
+            ).pack(anchor="w", padx=18, pady=(0, 16))
+
+        # Open full guide button
+        ctk.CTkFrame(body, height=1, fg_color=_DIVIDER).pack(fill="x", pady=20)
+
+        guide_path = str(Path(__file__).parent / "WORKFLOW_GUIDE.html")
+        downloads_path = Path(__file__).parent / "downloads"
+
+        ctk.CTkButton(
+            body,
+            text="🌐  Open Full Visual Guide in Browser",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            height=46,
+            command=lambda: webbrowser.open(f"file:///{guide_path.replace(os.sep, '/')}"),
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            body,
+            text="Detailed step-by-step flowchart with pause points — shareable and printable.",
+            font=ctk.CTkFont(size=11), text_color=_TEXT_DIM,
+        ).pack(pady=(8, 0))
+
+        # Downloads folder
+        ctk.CTkFrame(body, height=1, fg_color=_DIVIDER).pack(fill="x", pady=20)
+
+        ctk.CTkLabel(
+            body, text="DOWNLOADS FOLDER",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(0, 6))
+
+        dl_row = ctk.CTkFrame(body, fg_color=_CARD, corner_radius=10)
+        dl_row.pack(fill="x")
+        dl_row.columnconfigure(0, weight=1)
+
+        self._dl_path_label = ctk.CTkLabel(
+            dl_row,
+            text=str(downloads_path),
+            font=ctk.CTkFont(family="Consolas", size=11),
+            text_color=_TEXT_DIM, anchor="w",
+        )
+        self._dl_path_label.grid(row=0, column=0, sticky="ew", padx=14, pady=12)
+
+        ctk.CTkButton(
+            dl_row, text="📂  Open",
+            width=80, height=32,
+            font=ctk.CTkFont(size=12),
+            command=lambda: os.startfile(str(downloads_path)) if downloads_path.exists()
+                            else os.startfile(str(downloads_path.parent)),
+        ).grid(row=0, column=1, padx=(0, 10))
+
+        ctk.CTkLabel(
+            body,
+            text="This is where downloaded files and H5P activities are cached between runs.",
+            font=ctk.CTkFont(size=11), text_color=_TEXT_DIM,
+        ).pack(anchor="w", pady=(8, 0))
 
     # ── Automator tab ─────────────────────────────────────────────────────────
 
@@ -231,7 +603,7 @@ class App(ctk.CTk):
         ).pack(anchor="w")
         ctk.CTkLabel(
             hdr,
-            text="Paste a page URL — the automator will click the  ⋯  property icon",
+            text="Pick an OC brand colour theme, paste a Brightspace page or section URL, and let Gemini restyle it",
             font=ctk.CTkFont(size=12), text_color=_TEXT_DIM,
         ).pack(anchor="w", pady=(4, 0))
 
@@ -262,6 +634,24 @@ class App(ctk.CTk):
 
         body = ctk.CTkFrame(parent, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=14, pady=(14, 14))
+
+        ctk.CTkLabel(
+            body, text="GEMINI API KEY",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(0, 4))
+        self._pc_key_entry = ctk.CTkEntry(
+            body, placeholder_text="AIza…",
+            height=38, font=ctk.CTkFont(size=13), show="•",
+        )
+        try:
+            from api_config import GEMINI_API_KEY as _key
+            self._pc_key_entry.insert(0, _key)
+        except ImportError:
+            saved_key = self._load_config().get("pc_gemini_api_key", "")
+            if saved_key:
+                self._pc_key_entry.insert(0, saved_key)
+        self._pc_key_entry.pack(fill="x", pady=(0, 12))
+        self._bind_paste_menu(self._pc_key_entry)
 
         ctk.CTkLabel(
             body, text="BRIGHTSPACE PAGE URL",
@@ -305,18 +695,17 @@ class App(ctk.CTk):
         self._swatch_frames[name].configure(border_color="#ffffff")
 
     def _start_run(self):
+        if not self._chromium_ready:
+            _log_append(self._log_box, "⚠  Browser engine still installing… please wait.", "warning")
+            return
         url = self._url_entry.get().strip()
         if not url:
             _log_append(self._log_box, "⚠  Paste a Brightspace URL first.", "warning")
             return
 
-        try:
-            from api_config import GEMINI_API_KEY
-            gemini_api_key = GEMINI_API_KEY
-        except ImportError:
-            gemini_api_key = ""
+        gemini_api_key = self._pc_key_entry.get().strip()
 
-        style_ref_path = Path(__file__).parent / "templates" / "style_reference.html"
+        style_ref_path = _resource_path("templates", "style_reference.html")
         try:
             style_reference_html = style_ref_path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -559,6 +948,9 @@ class App(ctk.CTk):
         self._col_swatch_frames[name].configure(border_color="#ffffff")
 
     def _col_start_run(self):
+        if not self._chromium_ready:
+            _log_append(self._col_log_box, "⚠  Browser engine still installing… please wait.", "warning")
+            return
         unit_url   = self._col_url_entry.get().strip()
         target_url = self._col_target_entry.get().strip()
         api_key    = self._col_key_entry.get().strip()
@@ -576,7 +968,7 @@ class App(ctk.CTk):
 
         theme_colors = PAGE_THEMES[self._selected_col_theme]
 
-        style_ref_path = Path(__file__).parent / "templates" / "style_reference.html"
+        style_ref_path = _resource_path("templates", "style_reference.html")
         try:
             style_reference_html = style_ref_path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -637,308 +1029,6 @@ class App(ctk.CTk):
             pass
         self.after(100, self._col_poll_log)
 
-    # ── Style Migrator tab ────────────────────────────────────────────────────
-
-    def _build_style_migrator_tab(self, parent):
-        cfg = self._load_config()
-
-        hdr = ctk.CTkFrame(parent, fg_color="transparent")
-        hdr.pack(fill="x", padx=18, pady=(18, 0))
-        ctk.CTkLabel(
-            hdr, text="🎨 Style Migrator",
-            font=ctk.CTkFont(size=22, weight="bold"),
-        ).pack(anchor="w")
-        ctk.CTkLabel(
-            hdr,
-            text="Restyle a Brightspace page to match the layout and design of a Moodle page",
-            font=ctk.CTkFont(size=12), text_color=_TEXT_DIM,
-        ).pack(anchor="w", pady=(4, 0))
-
-        ctk.CTkFrame(parent, height=1, fg_color=_DIVIDER).pack(fill="x", padx=18, pady=(14, 0))
-
-        body = ctk.CTkFrame(parent, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=14, pady=(14, 14))
-
-        # Brightspace URL
-        ctk.CTkLabel(
-            body, text="BRIGHTSPACE TOPIC URL  (optional — leave blank to test Moodle scraper only)",
-            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
-        ).pack(anchor="w", pady=(0, 4))
-        self._sm_bs_entry = ctk.CTkEntry(
-            body,
-            placeholder_text="https://learn.okanagancollege.ca/d2l/le/content/… (optional)",
-            height=38, font=ctk.CTkFont(size=13),
-        )
-        if cfg.get("sm_bs_url"):
-            self._sm_bs_entry.insert(0, cfg["sm_bs_url"])
-        self._sm_bs_entry.pack(fill="x", pady=(0, 12))
-        self._bind_paste_menu(self._sm_bs_entry)
-
-        # Moodle URL
-        ctk.CTkLabel(
-            body, text="MOODLE PAGE URL",
-            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
-        ).pack(anchor="w", pady=(0, 4))
-        self._sm_moodle_entry = ctk.CTkEntry(
-            body,
-            placeholder_text="https://moodle.example.com/course/view.php?id=…",
-            height=38, font=ctk.CTkFont(size=13),
-        )
-        if cfg.get("sm_moodle_url"):
-            self._sm_moodle_entry.insert(0, cfg["sm_moodle_url"])
-        self._sm_moodle_entry.pack(fill="x", pady=(0, 12))
-        self._bind_paste_menu(self._sm_moodle_entry)
-
-        # Color + API key (side by side)
-        row2 = ctk.CTkFrame(body, fg_color="transparent")
-        row2.pack(fill="x", pady=(0, 12))
-        row2.columnconfigure(0, weight=1)
-        row2.columnconfigure(1, weight=3)
-
-        color_col = ctk.CTkFrame(row2, fg_color="transparent")
-        color_col.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-        ctk.CTkLabel(
-            color_col, text="PRIMARY COLOR",
-            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
-        ).pack(anchor="w", pady=(0, 4))
-        self._sm_color_entry = ctk.CTkEntry(
-            color_col, placeholder_text="#2D8CFF",
-            height=38, font=ctk.CTkFont(size=13),
-        )
-        self._sm_color_entry.insert(0, cfg.get("primary_color", "#2D8CFF"))
-        self._sm_color_entry.pack(fill="x")
-        self._bind_paste_menu(self._sm_color_entry)
-
-        key_col = ctk.CTkFrame(row2, fg_color="transparent")
-        key_col.grid(row=0, column=1, sticky="ew")
-        ctk.CTkLabel(
-            key_col, text="GEMINI API KEY",
-            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
-        ).pack(anchor="w", pady=(0, 4))
-        self._sm_key_entry = ctk.CTkEntry(
-            key_col, placeholder_text="AIza…",
-            height=38, font=ctk.CTkFont(size=13), show="•",
-        )
-        saved_key = cfg.get("gemini_api_key", "")
-        if not saved_key:
-            try:
-                from api_config import GEMINI_API_KEY
-                saved_key = GEMINI_API_KEY
-            except ImportError:
-                pass
-        if saved_key:
-            self._sm_key_entry.insert(0, saved_key)
-        self._sm_key_entry.pack(fill="x")
-        self._bind_paste_menu(self._sm_key_entry)
-
-        # Run button
-        self._sm_run_btn = ctk.CTkButton(
-            body, text="▶  Run Migration",
-            height=42, font=ctk.CTkFont(size=14, weight="bold"),
-            command=self._sm_start_run,
-        )
-        self._sm_run_btn.pack(fill="x", pady=(0, 8))
-
-        # Container always in the layout; the Ready button is packed inside it on demand
-        self._sm_ready_container = ctk.CTkFrame(body, fg_color="transparent")
-        self._sm_ready_container.pack(fill="x")
-        self._sm_ready_btn = ctk.CTkButton(
-            self._sm_ready_container, text="✅  Ready — Scrape Now",
-            height=38, font=ctk.CTkFont(size=13, weight="bold"),
-            fg_color="#16A34A", hover_color="#15803D",
-            command=self._sm_moodle_ready,
-        )
-        # not packed yet — shown via __MOODLE_WAITING__ queue signal
-
-        # Log (inline so we can grab the border frame reference for resize)
-        ctk.CTkLabel(
-            body, text="LOG",
-            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
-        ).pack(anchor="w", pady=(0, 4))
-        self._sm_log_border = ctk.CTkFrame(body, fg_color=_LOG_BORDER, corner_radius=8)
-        self._sm_log_border.pack(fill="both", expand=True)
-        self._sm_log_box = ctk.CTkTextbox(
-            self._sm_log_border,
-            state="disabled",
-            font=ctk.CTkFont(family="Consolas", size=12),
-            fg_color=_LOG_BG,
-            corner_radius=6,
-            text_color=_TAG_COLORS["info"],
-            border_width=0,
-        )
-        self._sm_log_box.pack(fill="both", expand=True, padx=2, pady=2)
-        for tag, color in _TAG_COLORS.items():
-            self._sm_log_box._textbox.tag_configure(tag, foreground=color)
-
-        # Link-fixer panel (built now, packed later when links are found)
-        self._sm_link_panel = self._build_link_panel(body)
-
-    def _sm_start_run(self):
-        bs_url     = self._sm_bs_entry.get().strip()
-        moodle_url = self._sm_moodle_entry.get().strip()
-        color      = self._sm_color_entry.get().strip() or "#2D8CFF"
-        api_key    = self._sm_key_entry.get().strip()
-
-        if not moodle_url:
-            _log_append(self._sm_log_box, "⚠  Paste a Moodle URL first.", "warning")
-            return
-
-        self._save_config({"gemini_api_key": api_key, "primary_color": color})
-
-        import threading as _threading
-        ready_event = _threading.Event()
-        self._sm_moodle_ready_event = ready_event
-        self._sm_ready_btn.pack_forget()
-
-        self._sm_run_btn.configure(state="disabled", text="Running…")
-        self._sm_log_box.configure(state="normal")
-        self._sm_log_box.delete("1.0", "end")
-        self._sm_log_box.configure(state="disabled")
-
-        q = self._sm_log_queue
-
-        def worker():
-            class _Capture:
-                def write(self, t):
-                    if t.strip():
-                        q.put((t.rstrip(), "dim"))
-                def flush(self): pass
-
-            old, sys.stdout = sys.stdout, _Capture()
-            done_sent = [False]
-
-            def on_complete():
-                if not done_sent[0]:
-                    done_sent[0] = True
-                    q.put(("__DONE__", ""))
-
-            def on_moodle_waiting():
-                q.put(("__MOODLE_WAITING__", ""))
-
-            def on_links_found(links):
-                q.put(("__LINKS__", links))
-                return self._sm_link_response_queue.get(timeout=300)
-
-            try:
-                from style_migrator import StyleMigrator
-                asyncio.run(StyleMigrator(
-                    brightspace_url=bs_url,
-                    moodle_url=moodle_url,
-                    primary_color=color,
-                    gemini_api_key=api_key,
-                    log=lambda msg, tag="info": q.put((msg, tag)),
-                    on_complete=on_complete,
-                    moodle_ready_event=ready_event,
-                    on_moodle_waiting=on_moodle_waiting,
-                    on_links_found=on_links_found,
-                ).run())
-            except Exception as e:
-                q.put((f"✗  {e}", "error"))
-            finally:
-                sys.stdout = old
-                on_complete()
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _sm_poll_log(self):
-        try:
-            while True:
-                msg, tag = self._sm_log_queue.get_nowait()
-                if msg == "__DONE__":
-                    self._sm_run_btn.configure(state="normal", text="▶  Run Migration")
-                    self._sm_ready_btn.pack_forget()
-                    self._hide_link_fixer()
-                elif msg == "__MOODLE_WAITING__":
-                    self._sm_ready_btn.pack(fill="x", pady=(0, 8))
-                elif msg == "__LINKS__":
-                    self._show_link_fixer(tag)  # tag holds the links list
-                else:
-                    _log_append(self._sm_log_box, msg, tag)
-        except queue.Empty:
-            pass
-        self.after(100, self._sm_poll_log)
-
-    def _build_link_panel(self, parent) -> ctk.CTkFrame:
-        panel = ctk.CTkFrame(parent, fg_color="transparent")
-        # Not packed here — shown on demand via _show_link_fixer
-
-        ctk.CTkFrame(panel, height=1, fg_color=_DIVIDER).pack(fill="x", pady=(6, 0))
-
-        hdr = ctk.CTkFrame(panel, fg_color="transparent")
-        hdr.pack(fill="x", pady=(6, 4))
-        self._sm_links_title = ctk.CTkLabel(
-            hdr, text="BROKEN MOODLE LINKS",
-            font=ctk.CTkFont(size=10, weight="bold"), text_color="#f0a500",
-        )
-        self._sm_links_title.pack(side="left")
-
-        self._sm_links_scroll = ctk.CTkScrollableFrame(
-            panel, height=130, fg_color=_CARD, corner_radius=8,
-        )
-        self._sm_links_scroll.pack(fill="x", pady=(0, 8))
-        self._sm_links_scroll.columnconfigure(0, weight=2)
-        self._sm_links_scroll.columnconfigure(1, weight=3)
-
-        self._sm_links_apply_btn = ctk.CTkButton(
-            panel, text="Apply & Save",
-            height=38, font=ctk.CTkFont(size=13, weight="bold"),
-            fg_color="#b45309", hover_color="#92400e",
-            command=self._apply_links,
-        )
-        self._sm_links_apply_btn.pack(fill="x")
-
-        return panel
-
-    def _show_link_fixer(self, links: list):
-        # Clear previous rows
-        for w in self._sm_links_scroll.winfo_children():
-            w.destroy()
-        self._sm_link_entries = {}
-
-        self._sm_links_title.configure(
-            text=f"BROKEN MOODLE LINKS  —  {len(links)} found"
-        )
-
-        for i, url in enumerate(links):
-            label_text = url if len(url) <= 58 else url[:55] + "…"
-            ctk.CTkLabel(
-                self._sm_links_scroll,
-                text=label_text,
-                font=ctk.CTkFont(family="Consolas", size=10),
-                text_color=_TEXT_DIM,
-                anchor="w",
-            ).grid(row=i, column=0, sticky="ew", padx=(6, 8), pady=3)
-
-            entry = ctk.CTkEntry(
-                self._sm_links_scroll,
-                placeholder_text="https://learn.okanagancollege.ca/…",
-                height=30, font=ctk.CTkFont(size=11),
-            )
-            entry.grid(row=i, column=1, sticky="ew", padx=(0, 6), pady=3)
-            self._bind_paste_menu(entry)
-            self._sm_link_entries[url] = entry
-
-        # Shrink log, reveal panel
-        self._sm_log_box.configure(height=120)
-        self._sm_link_panel.pack(fill="x", pady=(0, 4))
-
-    def _hide_link_fixer(self):
-        self._sm_link_panel.pack_forget()
-        self._sm_log_box.configure(height=5000)
-
-    def _apply_links(self):
-        mapping = {
-            old: entry.get().strip()
-            for old, entry in self._sm_link_entries.items()
-        }
-        self._sm_link_response_queue.put(mapping)
-        self._hide_link_fixer()
-
-    def _sm_moodle_ready(self):
-        self._sm_ready_btn.pack_forget()
-        if self._sm_moodle_ready_event:
-            self._sm_moodle_ready_event.set()
-
     # ── Checker tab ───────────────────────────────────────────────────────────
 
     def _build_checker_tab(self, parent):
@@ -960,8 +1050,7 @@ class App(ctk.CTk):
 
         body = ctk.CTkFrame(parent, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=14, pady=(14, 14))
-        # Row 7 (log box) gets all extra vertical space
-        body.grid_rowconfigure(7, weight=1)
+        # Row 10 (log box) gets all extra vertical space
         body.grid_columnconfigure(0, weight=1)
 
         # Brightspace URL
@@ -994,34 +1083,82 @@ class App(ctk.CTk):
         self._chk_moodle_entry.grid(row=3, column=0, sticky="ew", pady=(0, 12))
         self._bind_paste_menu(self._chk_moodle_entry)
 
-        # Run button
+        # Re-link checkbox
+        self._chk_relink_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            body, text="Re-link Moodle files in Brightspace after check",
+            variable=self._chk_relink_var,
+            font=ctk.CTkFont(size=12),
+        ).grid(row=4, column=0, sticky="w", pady=(0, 4))
+
+        # PDF upload checkbox
+        self._chk_pdf_upload_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            body, text="Upload missing PDFs / files to Brightspace",
+            variable=self._chk_pdf_upload_var,
+            font=ctk.CTkFont(size=12),
+        ).grid(row=5, column=0, sticky="w", pady=(0, 4))
+
+        # H5P embed checkbox
+        self._chk_h5p_embed_var = ctk.BooleanVar(value=False)
+        self._chk_h5p_embed_cb = ctk.CTkCheckBox(
+            body, text="Upload H5P to Brightspace",
+            variable=self._chk_h5p_embed_var,
+            font=ctk.CTkFont(size=12),
+        )
+        self._chk_h5p_embed_cb.grid(row=6, column=0, sticky="w", pady=(0, 8))
+
+        # Run buttons row
+        btn_row = ctk.CTkFrame(body, fg_color="transparent")
+        btn_row.grid(row=7, column=0, sticky="ew", pady=(0, 8))
+        btn_row.columnconfigure(0, weight=3)
+        btn_row.columnconfigure(1, weight=1)
+
         self._chk_run_btn = ctk.CTkButton(
-            body, text="▶  Run Check",
+            btn_row, text="▶  Run Check",
             height=42, font=ctk.CTkFont(size=14, weight="bold"),
             command=self._chk_start_run,
         )
-        self._chk_run_btn.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+        self._chk_run_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+        self._chk_phase_b_btn = ctk.CTkButton(
+            btn_row, text="⏩ Phase B",
+            height=42, font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#7C3AED", hover_color="#6D28D9",
+            command=self._chk_start_phase_b,
+        )
+        self._chk_phase_b_btn.grid(row=0, column=1, sticky="ew")
 
         # Ready button container
         self._chk_ready_container = ctk.CTkFrame(body, fg_color="transparent")
-        self._chk_ready_container.grid(row=5, column=0, sticky="ew")
+        self._chk_ready_container.grid(row=8, column=0, sticky="ew")
         self._chk_ready_btn = ctk.CTkButton(
             self._chk_ready_container, text="✅  Ready — Scrape Now",
             height=38, font=ctk.CTkFont(size=13, weight="bold"),
             fg_color="#16A34A", hover_color="#15803D",
             command=self._chk_moodle_ready,
         )
+        self._chk_h5p_skip_btn = ctk.CTkButton(
+            self._chk_ready_container, text="⏭  Skip H5P",
+            height=38, width=130,
+            fg_color="#6B7280", hover_color="#4B5563",
+            command=self._chk_h5p_skip,
+        )
 
         # Log
         ctk.CTkLabel(
             body, text="LOG",
             font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
-        ).grid(row=6, column=0, sticky="w", pady=(8, 4))
-        self._chk_log_box = _make_log_box_grid(body, row=7)
+        ).grid(row=9, column=0, sticky="w", pady=(8, 4))
+        self._chk_log_box = _make_log_box_grid(body, row=10)
+        body.grid_rowconfigure(10, weight=1)
 
     def _chk_start_run(self):
-        bs_url     = self._chk_bs_entry.get().strip()
-        moodle_url = self._chk_moodle_entry.get().strip()
+        bs_url        = self._chk_bs_entry.get().strip()
+        moodle_url    = self._chk_moodle_entry.get().strip()
+        do_relink     = self._chk_relink_var.get()
+        do_pdf_upload = self._chk_pdf_upload_var.get()
+        do_h5p_embed  = self._chk_h5p_embed_var.get()
 
         if not bs_url and not moodle_url:
             _log_append(self._chk_log_box, "⚠  Paste at least one URL.", "warning")
@@ -1030,8 +1167,15 @@ class App(ctk.CTk):
         self._save_config({"chk_bs_url": bs_url, "chk_moodle_url": moodle_url})
 
         import threading as _threading
-        ready_event = _threading.Event()
-        self._chk_moodle_ready_event = ready_event
+        ready_event           = _threading.Event()
+        h5p_ready_event       = _threading.Event()
+        file_checklist_event  = _threading.Event()
+        file_checklist_result = []
+        h5p_skip_flag         = [False]
+        self._chk_moodle_ready_event   = ready_event
+        self._chk_h5p_ready_event      = h5p_ready_event
+        self._chk_file_checklist_event = file_checklist_event
+        self._chk_h5p_skip_flag        = h5p_skip_flag
         self._chk_ready_btn.pack_forget()
 
         self._chk_run_btn.configure(state="disabled", text="Running…")
@@ -1040,6 +1184,19 @@ class App(ctk.CTk):
         self._chk_log_box.configure(state="disabled")
 
         q = self._chk_log_queue
+        root_ref = self
+
+        import tkinter.messagebox as _mbox
+
+        def confirm_fn(msg):
+            result = [None]
+            ev = _threading.Event()
+            def _ask():
+                result[0] = _mbox.askyesno("Continue?", msg, parent=root_ref)
+                ev.set()
+            root_ref.after(0, _ask)
+            ev.wait()
+            return bool(result[0])
 
         def worker():
             class _Capture:
@@ -1058,16 +1215,123 @@ class App(ctk.CTk):
             def on_moodle_waiting():
                 q.put(("__CHK_MOODLE_WAITING__", ""))
 
+            def on_h5p_waiting():
+                q.put(("__CHK_H5P_WAITING__", h5p_skip_flag))
+
+            def on_file_checklist(data_json):
+                q.put(("__CHK_FILE_CHECKLIST__", (data_json, file_checklist_result, file_checklist_event)))
+
             try:
                 from content_checker import ContentChecker
-                asyncio.run(ContentChecker(
+                checker = ContentChecker(
                     bs_url=bs_url,
                     moodle_url=moodle_url,
                     log=lambda msg, tag="info": q.put((msg, tag)),
                     on_complete=on_complete,
                     moodle_ready_event=ready_event,
                     on_moodle_waiting=on_moodle_waiting,
-                ).run())
+                    h5p_ready_event=h5p_ready_event,
+                    on_h5p_waiting=on_h5p_waiting,
+                    file_checklist_event=file_checklist_event,
+                    on_file_checklist=on_file_checklist,
+                    confirm_fn=confirm_fn,
+                )
+                checker.do_relink = do_relink
+                checker.do_pdf_upload = do_pdf_upload
+                checker.do_h5p_embed = do_h5p_embed
+                checker.file_checklist_result = file_checklist_result
+                checker.h5p_skip_flag = h5p_skip_flag
+                asyncio.run(checker.run())
+            except Exception as e:
+                q.put((f"✗  {e}", "error"))
+            finally:
+                sys.stdout = old
+                on_complete()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _chk_start_phase_b(self):
+        bs_url     = self._chk_bs_entry.get().strip()
+        moodle_url = self._chk_moodle_entry.get().strip()
+        if not bs_url:
+            _log_append(self._chk_log_box, "⚠  Paste a Brightspace URL first.", "warning")
+            return
+
+        self._save_config({"chk_bs_url": bs_url, "chk_moodle_url": moodle_url})
+
+        import threading as _threading
+        ready_event           = _threading.Event()
+        h5p_ready_event       = _threading.Event()
+        file_checklist_event  = _threading.Event()
+        file_checklist_result = []
+        h5p_skip_flag         = [False]
+        self._chk_moodle_ready_event   = ready_event
+        self._chk_h5p_ready_event      = h5p_ready_event
+        self._chk_file_checklist_event = file_checklist_event
+        self._chk_h5p_skip_flag        = h5p_skip_flag
+        self._chk_ready_btn.pack_forget()
+
+        self._chk_run_btn.configure(state="disabled")
+        self._chk_phase_b_btn.configure(state="disabled", text="Running…")
+        self._chk_log_box.configure(state="normal")
+        self._chk_log_box.delete("1.0", "end")
+        self._chk_log_box.configure(state="disabled")
+
+        q = self._chk_log_queue
+        root_ref = self
+
+        import tkinter.messagebox as _mbox
+
+        def confirm_fn(msg):
+            result = [None]
+            ev = _threading.Event()
+            def _ask():
+                result[0] = _mbox.askyesno("Continue?", msg, parent=root_ref)
+                ev.set()
+            root_ref.after(0, _ask)
+            ev.wait()
+            return bool(result[0])
+
+        def worker():
+            class _Capture:
+                def write(self, t):
+                    if t.strip(): q.put((t.rstrip(), "dim"))
+                def flush(self): pass
+            old, sys.stdout = sys.stdout, _Capture()
+            done_sent = [False]
+
+            def on_complete():
+                if not done_sent[0]:
+                    done_sent[0] = True
+                    q.put(("__DONE__", ""))
+
+            try:
+                from content_checker import ContentChecker
+                def on_h5p_waiting():
+                    q.put(("__CHK_H5P_WAITING__", h5p_skip_flag))
+
+                def on_file_checklist(data_json):
+                    q.put(("__CHK_FILE_CHECKLIST__", (data_json, file_checklist_result, file_checklist_event)))
+
+                checker = ContentChecker(
+                    bs_url=bs_url,
+                    moodle_url=moodle_url,
+                    log=lambda msg, tag="info": q.put((msg, tag)),
+                    on_complete=on_complete,
+                    moodle_ready_event=ready_event,
+                    on_moodle_waiting=lambda: q.put(("__CHK_MOODLE_WAITING__", "")),
+                    h5p_ready_event=h5p_ready_event,
+                    on_h5p_waiting=on_h5p_waiting,
+                    file_checklist_event=file_checklist_event,
+                    on_file_checklist=on_file_checklist,
+                    confirm_fn=confirm_fn,
+                )
+                checker.do_relink = False
+                checker.do_h5p_embed = True
+                checker.h5p_phase_b_only = True
+                checker.file_checklist_result = file_checklist_result
+                checker.h5p_skip_flag = h5p_skip_flag
+                asyncio.run(checker.run())
             except Exception as e:
                 q.put((f"✗  {e}", "error"))
             finally:
@@ -1082,9 +1346,24 @@ class App(ctk.CTk):
                 msg, tag = self._chk_log_queue.get_nowait()
                 if msg == "__DONE__":
                     self._chk_run_btn.configure(state="normal", text="▶  Run Check")
+                    self._chk_phase_b_btn.configure(state="normal", text="⏩ Phase B")
                     self._chk_ready_btn.pack_forget()
                 elif msg == "__CHK_MOODLE_WAITING__":
+                    self._chk_ready_btn.configure(
+                        text="✅  Ready — Scrape Now",
+                        command=self._chk_moodle_ready,
+                    )
                     self._chk_ready_btn.pack(fill="x", pady=(0, 8))
+                elif msg == "__CHK_H5P_WAITING__":
+                    self._chk_ready_btn.configure(
+                        text="✅  Ready — Download H5P",
+                        command=self._chk_h5p_ready,
+                    )
+                    self._chk_ready_btn.pack(side="left", fill="x", expand=True, padx=(0, 6), pady=(0, 8))
+                    self._chk_h5p_skip_btn.pack(side="left", pady=(0, 8))
+                elif msg == "__CHK_FILE_CHECKLIST__":
+                    data_json, result_list, event = tag
+                    self._show_file_checklist(data_json, result_list, event)
                 else:
                     _log_append(self._chk_log_box, msg, tag)
         except queue.Empty:
@@ -1096,244 +1375,128 @@ class App(ctk.CTk):
         if self._chk_moodle_ready_event:
             self._chk_moodle_ready_event.set()
 
-    # ── Style Preview tab ─────────────────────────────────────────────────────
+    def _chk_h5p_ready(self):
+        self._chk_ready_btn.pack_forget()
+        self._chk_h5p_skip_btn.pack_forget()
+        if self._chk_h5p_ready_event:
+            self._chk_h5p_ready_event.set()
 
-    def _build_preview_tab(self, parent):
-        hdr = ctk.CTkFrame(parent, fg_color="transparent")
-        hdr.pack(fill="x", padx=18, pady=(18, 0))
+    def _chk_h5p_skip(self):
+        self._chk_ready_btn.pack_forget()
+        self._chk_h5p_skip_btn.pack_forget()
+        if hasattr(self, "_chk_h5p_skip_flag") and self._chk_h5p_skip_flag:
+            self._chk_h5p_skip_flag[0] = True
+        if self._chk_h5p_ready_event:
+            self._chk_h5p_ready_event.set()
+
+    def _show_file_checklist(self, data_json: str, result_list: list, event):
+        import json as _json
+        files = _json.loads(data_json)
+        if not files:
+            event.set()
+            return
+
+        win = ctk.CTkToplevel(self)
+        win.title("Missing Files — Select to Download")
+        win.geometry("580x540")
+        win.resizable(False, True)
+        win.grab_set()
 
         ctk.CTkLabel(
-            hdr, text="🔍 Style Preview",
-            font=ctk.CTkFont(size=22, weight="bold"),
-        ).pack(anchor="w")
+            win,
+            text=f"📋  {len(files)} file(s) missing from Brightspace",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).pack(padx=20, pady=(18, 4))
         ctk.CTkLabel(
-            hdr,
-            text="Preview AI-styled HTML injected into the live Brightspace page before committing",
-            font=ctk.CTkFont(size=12), text_color=_TEXT_DIM,
-        ).pack(anchor="w", pady=(4, 0))
-
+            win,
+            text="Files will be downloaded from Moodle and uploaded to the matching section.",
+            text_color="gray70",
+            wraplength=520,
+        ).pack(padx=20, pady=(0, 6))
         ctk.CTkLabel(
-            hdr, text="PAGE THEME",
-            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
-        ).pack(anchor="w", pady=(14, 6))
+            win,
+            text="Uncheck any you already have or don't need.",
+            text_color="gray60",
+        ).pack(padx=20, pady=(0, 10))
 
-        swatches_row = ctk.CTkFrame(hdr, fg_color="transparent")
-        swatches_row.pack(anchor="w")
+        scroll = ctk.CTkScrollableFrame(win, height=280)
+        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
-        for name, theme in PAGE_THEMES.items():
-            ring = ctk.CTkFrame(
-                swatches_row, width=34, height=34, corner_radius=17,
-                fg_color="transparent", border_width=2,
-                border_color="#ffffff" if name == self._selected_prev_theme else _BG,
+        checkboxes: list = []
+        cur_section = None
+        for f in files:
+            sec = f.get("section") or "Other"
+            if sec != cur_section:
+                cur_section = sec
+                ctk.CTkLabel(
+                    scroll,
+                    text=f"── {sec} ──",
+                    text_color="gray55",
+                    font=ctk.CTkFont(size=11),
+                ).pack(anchor="w", padx=8, pady=(10, 2))
+            var = ctk.BooleanVar(value=True)
+            ctk.CTkCheckBox(scroll, text=f["name"], variable=var).pack(
+                anchor="w", padx=24, pady=2
             )
-            ring.pack(side="left", padx=4)
-            ring.pack_propagate(False)
-            ctk.CTkButton(
-                ring, width=26, height=26, corner_radius=13,
-                fg_color=theme["circle"], hover_color=theme["mid"], text="",
-                command=lambda n=name: self._prev_select_theme(n),
-            ).place(relx=0.5, rely=0.5, anchor="center")
-            self._prev_swatch_frames[name] = ring
+            checkboxes.append((var, f))
 
-        ctk.CTkFrame(parent, height=1, fg_color=_DIVIDER).pack(fill="x", padx=18, pady=(14, 0))
+        # Select / deselect row
+        tog = ctk.CTkFrame(win, fg_color="transparent")
+        tog.pack(fill="x", padx=16, pady=(0, 4))
 
-        body = ctk.CTkFrame(parent, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=14, pady=(14, 14))
+        count_lbl = ctk.CTkLabel(win, text="")
+        count_lbl.pack(pady=(0, 4))
 
-        ctk.CTkLabel(
-            body, text="BRIGHTSPACE PAGE URL",
-            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
-        ).pack(anchor="w", pady=(0, 4))
+        # Defined before buttons so _update can reference dl_btn via closure after creation
+        _dl_btn_ref = [None]
 
-        url_row = ctk.CTkFrame(body, fg_color="transparent")
-        url_row.pack(fill="x", pady=(0, 16))
-        url_row.columnconfigure(0, weight=1)
+        def _update(*_):
+            n = sum(1 for v, _ in checkboxes if v.get())
+            if _dl_btn_ref[0]:
+                _dl_btn_ref[0].configure(
+                    text=f"⬇  Download {n} Selected" if n else "⬇  Download 0 Selected"
+                )
+            count_lbl.configure(text=f"{n} of {len(files)} selected")
 
-        self._prev_url_entry = ctk.CTkEntry(
-            url_row,
-            placeholder_text="https://learn.okanagancollege.ca/d2l/le/content/…/topics/…/View",
-            height=42, font=ctk.CTkFont(size=13),
+        for v, _ in checkboxes:
+            v.trace_add("write", _update)
+
+        def _select_all():
+            for v, _ in checkboxes:
+                v.set(True)
+
+        def _deselect_all():
+            for v, _ in checkboxes:
+                v.set(False)
+
+        ctk.CTkButton(tog, text="Select All",   width=110, command=_select_all).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(tog, text="Deselect All", width=110, command=_deselect_all).pack(side="left")
+
+        def _download():
+            selected = [f for v, f in checkboxes if v.get()]
+            result_list.clear()
+            result_list.extend(selected)
+            win.destroy()
+            event.set()
+
+        def _skip():
+            result_list.clear()
+            win.destroy()
+            event.set()
+
+        btn_row = ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=(0, 16))
+
+        dl_btn = ctk.CTkButton(
+            btn_row, text="", fg_color="#2a7d4f", hover_color="#226b41", command=_download
         )
-        self._prev_url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-        self._bind_paste_menu(self._prev_url_entry)
+        _dl_btn_ref[0] = dl_btn
+        dl_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkButton(btn_row, text="Skip All", width=100, command=_skip).pack(side="left")
 
-        self._prev_run_btn = ctk.CTkButton(
-            url_row, text="▶  Preview", width=110, height=42,
-            font=ctk.CTkFont(size=14, weight="bold"),
-            command=self._prev_start_run,
-        )
-        self._prev_run_btn.grid(row=0, column=1)
+        _update()
 
-        # Action frame — hidden until preview is ready
-        self._prev_action_frame = ctk.CTkFrame(body, fg_color=_CARD, corner_radius=10)
-        # not packed yet
-
-        ctk.CTkLabel(
-            self._prev_action_frame,
-            text="FEEDBACK  (optional — describe what to change before regenerating)",
-            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
-        ).pack(anchor="w", padx=12, pady=(10, 4))
-
-        self._prev_feedback_entry = ctk.CTkEntry(
-            self._prev_action_frame,
-            placeholder_text="e.g. make the headings larger, use a darker background…",
-            height=38, font=ctk.CTkFont(size=13),
-        )
-        self._prev_feedback_entry.pack(fill="x", padx=12, pady=(0, 10))
-        self._bind_paste_menu(self._prev_feedback_entry)
-
-        btn_row = ctk.CTkFrame(self._prev_action_frame, fg_color="transparent")
-        btn_row.pack(fill="x", padx=12, pady=(0, 12))
-        btn_row.columnconfigure(0, weight=1)
-        btn_row.columnconfigure(1, weight=1)
-        btn_row.columnconfigure(2, weight=1)
-
-        ctk.CTkButton(
-            btn_row, text="✅  Apply",
-            height=40, font=ctk.CTkFont(size=13, weight="bold"),
-            fg_color="#16A34A", hover_color="#15803D",
-            command=self._prev_on_apply,
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-
-        ctk.CTkButton(
-            btn_row, text="🔄  Regenerate",
-            height=40, font=ctk.CTkFont(size=13, weight="bold"),
-            fg_color="#D97706", hover_color="#B45309",
-            command=self._prev_on_regenerate,
-        ).grid(row=0, column=1, sticky="ew", padx=3)
-
-        ctk.CTkButton(
-            btn_row, text="⏭  Skip",
-            height=40, font=ctk.CTkFont(size=13, weight="bold"),
-            fg_color="transparent", border_width=1, border_color=_DIVIDER,
-            hover_color=_DIVIDER,
-            command=self._prev_on_skip,
-        ).grid(row=0, column=2, sticky="ew", padx=(6, 0))
-
-        ctk.CTkLabel(
-            body, text="LOG",
-            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
-        ).pack(anchor="w", pady=(0, 4))
-        self._prev_log_label = ctk.CTkLabel(
-            body, text="LOG",
-            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
-        )
-        # The real label was already packed above; store a hidden reference
-        # so _prev_poll_log can use before= to insert the action frame before it.
-        # We actually need the border frame, so create the log carefully:
-        self._prev_log_border = ctk.CTkFrame(body, fg_color=_LOG_BORDER, corner_radius=8)
-        self._prev_log_border.pack(fill="both", expand=True)
-        self._prev_log_box = ctk.CTkTextbox(
-            self._prev_log_border,
-            state="disabled",
-            font=ctk.CTkFont(family="Consolas", size=12),
-            fg_color=_LOG_BG,
-            corner_radius=6,
-            text_color=_TAG_COLORS["info"],
-            border_width=0,
-        )
-        self._prev_log_box.pack(fill="both", expand=True, padx=2, pady=2)
-        for tag, color in _TAG_COLORS.items():
-            self._prev_log_box._textbox.tag_configure(tag, foreground=color)
-
-    def _prev_select_theme(self, name: str):
-        if name == self._selected_prev_theme:
-            return
-        self._prev_swatch_frames[self._selected_prev_theme].configure(border_color=_BG)
-        self._selected_prev_theme = name
-        self._prev_swatch_frames[name].configure(border_color="#ffffff")
-
-    def _prev_start_run(self):
-        url = self._prev_url_entry.get().strip()
-        if not url:
-            _log_append(self._prev_log_box, "⚠  Paste a Brightspace page URL first.", "warning")
-            return
-
-        try:
-            from api_config import GEMINI_API_KEY
-            gemini_api_key = GEMINI_API_KEY
-        except ImportError:
-            gemini_api_key = ""
-
-        self._prev_action_frame.pack_forget()
-        self._prev_run_btn.configure(state="disabled", text="Running…")
-        self._prev_log_box.configure(state="normal")
-        self._prev_log_box.delete("1.0", "end")
-        self._prev_log_box.configure(state="disabled")
-
-        q  = self._prev_log_queue
-        rq = self._prev_response_queue
-
-        def on_user_action():
-            """Called from worker thread — puts sentinel in queue, blocks for GUI response."""
-            q.put(("__PREVIEW_READY__", ""))
-            return rq.get(timeout=600)  # (action, feedback)
-
-        def worker():
-            class _Capture:
-                def write(self, t):
-                    if t.strip():
-                        q.put((t.rstrip(), "dim"))
-                def flush(self): pass
-
-            old, sys.stdout = sys.stdout, _Capture()
-            done_sent = [False]
-
-            def on_complete():
-                if not done_sent[0]:
-                    done_sent[0] = True
-                    q.put(("__DONE__", ""))
-
-            try:
-                import sys as _sys
-                _sys.modules.pop('page_previewer', None)
-                from page_previewer import run as previewer_run
-                asyncio.run(previewer_run(
-                    url=url,
-                    theme_name=self._selected_prev_theme,
-                    gemini_api_key=gemini_api_key,
-                    log=lambda msg, tag="info": q.put((msg, tag)),
-                    on_complete=on_complete,
-                    on_user_action=on_user_action,
-                ))
-            except Exception as e:
-                q.put((f"✗  {e}", "error"))
-            finally:
-                sys.stdout = old
-                on_complete()
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _prev_poll_log(self):
-        try:
-            while True:
-                msg, tag = self._prev_log_queue.get_nowait()
-                if msg == "__DONE__":
-                    self._prev_run_btn.configure(state="normal", text="▶  Preview")
-                    self._prev_action_frame.pack_forget()
-                elif msg == "__PREVIEW_READY__":
-                    self._prev_action_frame.pack(
-                        fill="x", pady=(0, 10), before=self._prev_log_border,
-                    )
-                else:
-                    _log_append(self._prev_log_box, msg, tag)
-        except queue.Empty:
-            pass
-        self.after(100, self._prev_poll_log)
-
-    def _prev_on_apply(self):
-        self._prev_action_frame.pack_forget()
-        self._prev_response_queue.put(("apply", ""))
-
-    def _prev_on_regenerate(self):
-        feedback = self._prev_feedback_entry.get().strip()
-        self._prev_feedback_entry.delete(0, "end")
-        self._prev_action_frame.pack_forget()
-        self._prev_response_queue.put(("regenerate", feedback))
-
-    def _prev_on_skip(self):
-        self._prev_action_frame.pack_forget()
-        self._prev_response_queue.put(("skip", ""))
+    # ── Style Preview tab ─────────────────────────────────────────────────────
 
     # ── Shared helpers ────────────────────────────────────────────────────────
 
@@ -1368,19 +1531,11 @@ class App(ctk.CTk):
             print(f"[config] save failed: {e}", flush=True)
 
     def _on_close(self) -> None:
-        self._save_config({
-            "automator_url":  self._url_entry.get().strip(),
-            "sm_bs_url":      self._sm_bs_entry.get().strip(),
-            "sm_moodle_url":  self._sm_moodle_entry.get().strip(),
-            "primary_color":  self._sm_color_entry.get().strip(),
-            "gemini_api_key": self._sm_key_entry.get().strip(),
-            "chk_bs_url":     self._chk_bs_entry.get().strip(),
-            "chk_moodle_url": self._chk_moodle_entry.get().strip(),
-        })
+        self._persist_config()
         self.destroy()
 
 
 if __name__ == "__main__":
-    if sys.platform == "win32":
+    if sys.platform == "win32" and sys.stdout is not None:
         sys.stdout.reconfigure(encoding="utf-8")
     App().mainloop()

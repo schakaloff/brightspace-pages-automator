@@ -1,9 +1,20 @@
+import re
+import sys
 import time
 from google import genai
 from google.genai import errors as genai_errors
 from pathlib import Path
 from typing import Optional
 from bs4 import BeautifulSoup
+
+_COLOR_PROP_RE = re.compile(r'(?:^|(?<=;))\s*(?:color|background-color)\s*:[^;]*', re.IGNORECASE)
+
+
+def _strip_color_from_style(style: str) -> str:
+    cleaned = _COLOR_PROP_RE.sub('', style)
+    # normalise leftover semicolons
+    parts = [p.strip() for p in cleaned.split(';') if p.strip()]
+    return '; '.join(parts)
 
 
 def _clean_html(html: str) -> str:
@@ -23,6 +34,18 @@ def _clean_html(html: str) -> str:
         for a in attrs_to_remove:
             del tag.attrs[a]
 
+        # strip inline color/background-color so the theme controls all colours
+        if tag.get('style'):
+            cleaned = _strip_color_from_style(tag['style'])
+            if cleaned:
+                tag['style'] = cleaned
+            else:
+                del tag.attrs['style']
+
+        # strip legacy <font color="..."> attribute
+        if tag.name == 'font' and tag.get('color'):
+            del tag.attrs['color']
+
     # collapse empty tags that carry no content (spans, divs with no text/children)
     for tag in soup.find_all(["span", "div"]):
         if not tag.get_text(strip=True) and not tag.find(["img", "iframe", "video", "table"]):
@@ -33,8 +56,12 @@ def _clean_html(html: str) -> str:
     result = body.decode_contents() if body else str(soup)
     return result.strip()
 
-_PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
-_MODEL = "gemini-3.5-flash"
+_PROMPTS_DIR = (
+    Path(sys._MEIPASS) / "prompts"
+    if getattr(sys, "frozen", False)
+    else Path(__file__).parent.parent / "prompts"
+)
+_MODEL = "gemini-2.5-flash"
 _MAX_RETRIES = 3
 _RETRY_DELAY = 8  # seconds between retries on 503
 
@@ -43,7 +70,7 @@ def _load_prompt(theme_name: str) -> str:
     path = _PROMPTS_DIR / f"{theme_name}.txt"
     if path.exists():
         return path.read_text(encoding="utf-8")
-    fallback = _PROMPTS_DIR / "blue.txt"
+    fallback = _PROMPTS_DIR / "lake.txt"
     return fallback.read_text(encoding="utf-8") if fallback.exists() else ""
 
 

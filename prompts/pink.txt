@@ -1,7 +1,0 @@
-Restyle the SOURCE HTML using the STYLE REFERENCE layout. Apply the PINK theme: primary #BE185D, mid #EC4899, accent #F9A8D4, background linear-gradient(135deg,#ffeaf5,#fff0f8), shadow rgba(190,24,93,0.2). Keep all text and links. Compact spacing — minimal gaps between sections and cards. No left-side borders on cards. Return only the final HTML, no explanation.
-
-SOURCE:
-{source_html}
-
-REFERENCE:
-{style_reference_html}

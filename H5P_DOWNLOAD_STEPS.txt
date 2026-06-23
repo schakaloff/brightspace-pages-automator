@@ -1,0 +1,188 @@
+H5P Migration Process (recorded from teacher walkthrough)
+=========================================================
+
+================================================================
+PHASE 1 — MOODLE SIDE: Download .h5p files  [IMPLEMENTED]
+================================================================
+Must be done one-by-one per H5P activity. Requires teacher/admin access.
+Code: src/content_checker.py → _enable_h5p_downloads()
+Output: downloads/h5p/<activity-name>.h5p
+
+STEP 1 — Navigate to the H5P activity URL (from the course item list)
+
+STEP 2 — Click "Settings" in the activity navigation menu
+  Selector: a[href*="modedit.php?update="]
+
+STEP 3 — On the settings page, find "Allow download" checkbox
+  IDs to try: #id_export, #id_enabledownload, #id_displayopt_export
+  If section is collapsed: click toggle #collapseElement-0 first
+  If not checked → check it; if already checked → leave it
+
+STEP 4 — Click "Save and display" (NOT "Save and return to course")
+  Selector: #id_submitbutton
+  → Redirects back to the H5P activity page with action bar now visible
+
+STEP 5 — Click the "Reuse" button in the H5P action bar
+  The button is INSIDE an H5P iframe — must access frame context
+  Selector (inside iframe): li.h5p-export button
+  → Opens a dialog: "Reuse Content"
+
+STEP 6 — In the dialog, click "Download as an .h5p file"
+  Selector (inside iframe): .h5p-download-button
+  → Triggers file download of the .h5p package
+
+---
+
+================================================================
+PHASE 2 — BRIGHTSPACE SIDE: Upload + embed each H5P  [NOT YET IMPLEMENTED]
+================================================================
+Done one H5P at a time. The loop is:
+  for each downloaded .h5p file:
+    create BS content → upload to H5P cloud → read type → insert → fill title → save
+
+  [PAUSE] "Found X H5P files. Ready to start uploading to Brightspace. Continue?"
+
+--- STEP B: Navigate to the matching Brightspace module ---
+
+Navigate to: /d2l/le/content/{course_id}/Home
+Click the module link (use existing deepFind logic — same as file upload).
+
+  [PAUSE] "Opened module: <module name>. Continue?"
+
+--- STEP C: Click "Create New" button ---
+
+Outer element: d2l-button.create-new-btn  (aria-label="Create New")
+JS click on inner button:
+  document.querySelector('d2l-button.create-new-btn').shadowRoot.querySelector('button').click()
+→ Navigates to "What would you like to create?" tile page
+
+  [PAUSE] "Step C done — Create New opened. Continue?"
+
+--- STEP D: Choose content type tile ---
+
+NOTE: Type is not yet known at this point — we default to PAGE and correct after
+reading span.item-content-type in Step H. If the type turns out to be Quiz, the
+guardrail UI (after Step G7) lets the user reassign before embedding proceeds.
+
+For PAGE (default):  a.add-material-tile[href*="loadActivity/file/"]
+For QUIZ:            div#quiz-mat-tile
+Click the tile — navigates to the editor for that content type.
+
+  [PAUSE] "Step D done — <Page / Quiz> editor opened. Continue?"
+
+--- STEP E: Activate the editor toolbar ---
+
+For PAGE: click into the main HTML editor area (same d2l-htmleditor as Page Changer tab)
+For QUIZ: must click into the Description box FIRST to activate the inline toolbar
+  Selector chain: d2l-activity-text-editor[htmleditortype="inline"]
+                  → d2l-htmleditor[type="inline"]
+  Use JS to click the inner editable div.
+
+In both cases the toolbar renders with data-state="chomping" — same overflow handling as
+the Page Changer tab: click the three-dots overflow button first, wait 700ms, then proceed.
+
+--- STEP F: Open Interactives ---
+
+The button is labeled "Interactives" in the toolbar (same button for both Page and Quiz).
+  Selector: d2l-htmleditor-menu-item[cmd="h5p"]
+→ "Interactives" fullscreen dialog opens (d2l-dialog-fullscreen#d2l-h5p-dialog)
+  The dialog body contains an LTI iframe loading ocedtech.h5p.com
+
+  [PAUSE] "Step F done — Interactives dialog open. Continue?"
+
+--- STEP G: Upload the .h5p file to H5P cloud ---
+
+G1. Click "Import Existing Interactive" button in the dialog
+    Button text: "Import Existing Interactive"
+
+G2. Click "Add Content" link
+    Selector (inside iframe): a.create-content  or  a[class*="create-content"]
+    Wait for the iframe to reload (the H5P hub loads inside the iframe)
+
+G3. Click "Upload" tab
+    Selector (inside iframe): a#h5p-hub-upload
+
+G4. Click "Upload a file" button → file chooser
+    Selector (inside iframe): button.h5p-hub-upload-button
+    OR set the hidden input directly:  input[type="file"][accept=".h5p"]
+    Set the .h5p file for this H5P activity.
+
+G5. Wait for upload to complete (file processes on H5P cloud).
+    [unknown wait time — TBD from testing]
+
+G6. Click "Save" button (saves to H5P cloud, stays on view page)
+    Selector (inside iframe): label.save-action  or  input[name="submitter"][value="Save"]
+    Note: do NOT click "Save and Insert" — that's a different flow.
+
+G7. Click "See content list" (folder icon — goes back to the H5P content list)
+    Selector (inside iframe): a.btn-white.btn-folder
+    (tooltip "See content list", folder icon image)
+
+  [PAUSE] "Step G done — uploaded <filename>. Type detected: <type>. Continue to insert?"
+
+--- STEP H: Insert the uploaded H5P from the content list ---
+
+The content list shows all uploaded H5P files as table rows (tr.content-item).
+Each row has:
+  - Title: a.fable-title  (text = H5P name)
+  - Type:  span.item-content-type  (e.g. "Flashcards", "Quiz Set")
+  - Insert button: button with text "Insert" inside td.moves-to-bulk-menu
+
+H1. Find the row matching this H5P (by title text matching activity name).
+    Also read span.item-content-type → determines Page vs Quiz (Step A rule).
+H2. Click its "Insert" button
+    Selector: td.moves-to-bulk-menu button:has-text("Insert")
+    (submits the ltiselect form with the content_id set)
+
+H3. The Interactives dialog updates — click the "Insert" button in the dialog footer
+    d2l-button[data-dialog-action="insert"]  (text: "Insert")
+    JS shadow DOM click on inner button.
+
+--- STEP I: Handle "Add Grade Item" dialog ---
+
+After Insert, D2L shows an "Add Grade Item" dialog (h2 text: "Add Grade Item").
+Click "Skip" to dismiss it without creating a grade item.
+  Use deepFind to find button with text "Skip" — ID is dynamic (d2l-uid-*).
+
+  [PAUSE] "Step H done — inserted <filename> into <module>. Continue to save?"
+
+--- STEP I.5: Fill in the title ---
+
+Before clicking Save and Close, set the title to the Moodle activity name.
+Default is "Untitled" for both Page and Quiz — clear it and type the name.
+
+  For PAGE: input.d2l-input[maxlength="150"]
+  For QUIZ: input.d2l-input[maxlength="256"]  (required field — aria-required="true")
+  IDs like d2l-uid-88 / d2l-uid-6 are dynamic — use class + maxlength to distinguish.
+
+--- STEP J: Save and Close ---
+
+Same button for both PAGE and QUIZ:
+  d2l-button.d2l-desktop  (text: "Save and Close", primary)
+  JS shadow DOM click on inner button:
+    document.querySelector('d2l-button.d2l-desktop').shadowRoot.querySelector('button').click()
+
+  [PAUSE] "Step J done — saved '<filename>' as <Page/Quiz> in '<module>'. Continue to next H5P?"
+
+→ Returns to the module content page. Loop continues with next .h5p file.
+
+---
+
+================================================================
+OPEN ITEMS
+================================================================
+  - Confirm wait time needed after G5 (upload processing) before G6 is clickable
+  - Guardrail UI design: interactive panel showing detected H5P→section→type mappings
+    with drag-and-drop to correct before Phase 3 embedding begins
+  - Unmatched sections (no BS module found for Moodle section) → log warning, skip
+
+================================================================
+NOTES
+================================================================
+  - H5P content lives in the H5P cloud (ocedtech.h5p.com), NOT in Brightspace's file store
+  - Only one .h5p file can be uploaded per Add Content cycle
+  - The LTI iframe (ocedtech.h5p.com) is cross-origin — use Playwright frame_locator()
+    to interact with elements inside it, not page.evaluate()
+  - H5P type is read from span.item-content-type in the cloud content list AFTER
+    uploading. This is simpler than parsing the ZIP — no need to extract h5p.json.
+  - Type classification rule: "Quiz" in type text → BS Quiz; anything else → BS Page

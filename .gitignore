@@ -43,5 +43,8 @@ Thumbs.db
 # Browser/Playwright
 *.chromium/
 
+# Portable Python (auto-downloaded by run.bat on machines without Python)
+python-embed/
+
 # User config (saved URLs, API key)
 user_config.json

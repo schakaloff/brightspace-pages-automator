@@ -3,12 +3,39 @@
 ## What This Project Does
 
 Automates editing HTML content inside Brightspace (D2L) LMS pages using Playwright and Gemini AI.
-It has two tabs that will eventually work together:
+It has three active tabs:
 
-- **Automator tab** (friend's work) — navigates to a Brightspace page, clicks Options → Edit, opens the Source Code editor, runs Gemini AI to restyle the HTML using a reference style, and writes it back.
-- **Style Migrator tab** (your work) — same navigation flow, but pulls content from a Moodle page as the style reference instead of a manually pasted template. Sends both HTMLs to Gemini to produce a Moodle-styled Brightspace page.
+- **Page Changer tab** — navigates to a Brightspace section or single topic page, clicks Options → Edit, opens the Source Code editor, runs Gemini AI to restyle the HTML using a theme-based prompt, and writes it back. Supports batch processing across all topics in a section.
+- **Unit Collector tab** — scrapes all topic pages from a Brightspace unit and combines them into one collapsible HTML file, then writes it to a target blank page.
+- **Checker tab** — compares Brightspace course structure (via D2L API) against a Moodle course's item list, reporting exact/fuzzy/missing matches.
 
-**Future goal:** Combine both tabs so the Automator uses the Moodle-scraping pipeline from the Style Migrator to auto-generate style references, producing one unified AI prompt.
+---
+
+## Removed: Style Migrator Tab
+
+The **Style Migrator** tab was removed from the GUI in v0.6.0 to streamline the interface.
+The underlying code is **fully preserved** in `src/style_migrator.py` and is not deleted.
+
+### What it did
+- Took a Brightspace topic URL + a Moodle page URL.
+- Opened Brightspace → Options → Edit → Source Code, extracted the HTML.
+- Opened the Moodle URL in a new tab, waited for the user to confirm login, then scraped the main content.
+- Sent both HTMLs to Gemini 2.0 Flash to produce a Moodle-styled Brightspace page.
+- Detected broken Moodle links in the output and showed a link-fixer panel so the user could paste replacement Brightspace URLs before saving.
+- Wrote the styled HTML back and clicked Save and Close.
+
+### How to re-add it
+Wire `StyleMigrator` from `src/style_migrator.py` back into `gui.py` following the same
+worker-thread + queue pattern as the other tabs. Key pieces needed in `gui.py`:
+- `self._sm_log_queue = queue.Queue()`
+- `self._sm_link_response_queue = queue.Queue()`
+- `self._sm_link_entries = {}`
+- `self._sm_moodle_ready_event = None`
+- `self.after(100, self._sm_poll_log)` in `__init__`
+- Add `self._sm_run_btn` to `_any_job_running()`
+- Add `sm_bs_url`, `sm_moodle_url`, `primary_color`, `gemini_api_key` back to `_persist_config()`
+- Restore `_build_style_migrator_tab`, `_sm_start_run`, `_sm_poll_log`, `_build_link_panel`,
+  `_show_link_fixer`, `_hide_link_fixer`, `_apply_links`, `_sm_moodle_ready` methods
 
 ---
 
@@ -16,12 +43,14 @@ It has two tabs that will eventually work together:
 
 ```
 run.bat                  Entry point — activates venv, runs gui.py directly
-gui.py                   CustomTkinter GUI with two tabs; spawns worker threads
+gui.py                   CustomTkinter GUI with three tabs; spawns worker threads
 src/
-  automator.py           Automator tab logic (PageAutomator class)
-  style_migrator.py      Style Migrator tab logic (StyleMigrator class)
+  automator.py           Page Changer tab logic (PageAutomator class)
+  unit_collector.py      Unit Collector tab logic (UnitCollector class)
+  content_checker.py     Checker tab logic (ContentChecker class)
+  style_migrator.py      PRESERVED — Style Migrator logic (StyleMigrator class, not in GUI)
   page_previewer.py      Style Preview tab logic (PagePreviewer class)
-  ai_styler.py           Shared Gemini helper used by automator tab
+  ai_styler.py           Shared Gemini helper used by Page Changer tab
   browser.py             Shared Playwright launch + login wait loop
   config.py              Shared constants (session file path etc.)
   api_config.py          API config helpers
@@ -29,7 +58,7 @@ src/
 ```
 
 ### Shared browser session
-Both tabs call `browser.launch_browser()` + `wait_for_login()` from `browser.py`. Session cookies are saved to a shared file so login only happens once per machine restart.
+All tabs call `browser.launch_browser()` + `wait_for_login()` from `browser.py`. Session cookies are saved to a shared file so login only happens once per machine restart.
 
 ### Module reload fix
 `gui.py` does `sys.modules.pop('automator', None)` before every import so live edits to `automator.py` take effect without restarting the app.
@@ -57,7 +86,7 @@ All D2L components (`d2l-htmleditor-button`, `d2l-button-icon`, etc.) use shadow
 
 ---
 
-## Navigation Flow (both tabs)
+## Navigation Flow (Page Changer & Style Migrator)
 
 ```
 1. goto(url)
@@ -70,9 +99,9 @@ All D2L components (`d2l-htmleditor-button`, `d2l-button-icon`, etc.) use shadow
 8. JS: click three-dots overflow button (if present)
 9. _find_locator_any_frame('d2l-htmleditor-button[cmd="d2l-source-code"]')
 10. JS shadow DOM click on inner <button>  → Source Code dialog opens
-11. Extract HTML from textarea (shadow DOM aware JS)
+11. Extract HTML from CodeMirror editor (shadow DOM aware JS)
 12. [tab-specific AI call]
-13. Write new HTML back to textarea via JS native setter + dispatch events
+13. Write new HTML back via JS (CM6 view dispatch or execCommand fallback)
 14. Click OK/Update in dialog
 15. Click Save and Close on edit page
 ```
@@ -81,12 +110,36 @@ All D2L components (`d2l-htmleditor-button`, `d2l-button-icon`, etc.) use shadow
 
 ## Tab Differences
 
-| Step | Automator tab | Style Migrator tab |
+| Step | Page Changer tab | Style Migrator (preserved, not in GUI) |
 |---|---|---|
-| Style source | Manually pasted HTML template in GUI | Scraped from a Moodle URL in a new browser tab |
-| AI prompt | `ai_styler.py` PROMPT_TEMPLATE | `_MIGRATOR_PROMPT` in style_migrator.py |
-| Gemini model | gemini-2.0-flash | gemini-2.0-flash |
-| After AI | Writes back + leaves browser open | Writes back + clicks Save and Close |
+| Style source | Theme prompt file (`prompts/<theme>.txt`) + `templates/style_reference.html` | Scraped from a Moodle URL in a new browser tab |
+| AI prompt | `ai_styler.py` per-theme prompt | `_MIGRATOR_PROMPT` in style_migrator.py |
+| Gemini model | gemini-2.5-flash | gemini-2.0-flash |
+| Batch support | Yes — section URL scrapes all topics, user picks start + count | No — single page only |
+| After AI | Writes back + leaves browser open | Writes back + link fixer + clicks Save and Close |
+
+---
+
+## Migration Context — How Brightspace Gets Content
+
+Okanagan College migrates courses from Moodle to Brightspace using Brightspace's built-in
+**Moodle backup import tool** (upload the `.mbz` backup, Brightspace imports it).
+
+This import is imperfect:
+- Most content (files, pages, quizzes) transfers across, but layout and styling is lost
+- **LTI tools almost always fail** — Cengage, Kaltura, Top Hat, Pearson, etc. don't transfer
+- H5P activities don't transfer (Brightspace H5P is a separate manual upload)
+- Some file links inside label/page HTML still point back to `mymoodle.okanagan.bc.ca`
+
+So Brightspace already has a version of the course — it's not empty. The job of this tool is:
+1. **Find what's missing or broken** (Checker tab comparison)
+2. **Re-host files** that are linked from Brightspace topics but still point to Moodle
+3. **Flag LTIs/H5P** that need manual instructor attention
+4. **Style the pages** to match OC's Brightspace theme (Page Changer / Style Migrator tabs)
+
+When scanning for "what needs downloading," the source of truth is **Brightspace's HTML** —
+scan each topic for `mymoodle.okanagan.bc.ca` hrefs, download only those files, re-upload
+to Brightspace, and replace the URLs. Do NOT blindly download everything from Moodle.
 
 ---
 
@@ -96,31 +149,70 @@ All D2L components (`d2l-htmleditor-button`, `d2l-button-icon`, etc.) use shadow
 |---|---|---|
 | `main` | shared | stable releases |
 | `dev` | shared | integration branch |
-| `feature/source-code-button-fix` | you | shadow DOM click fix, style migrator fixes |
-| friend's branch | friend | automator tab improvements |
-
-**Workflow:** both feature branches → PR into `dev` → test → PR into `main`.
 
 ---
 
-## What's Been Fixed (your branch)
+## What's Been Fixed
 
 - `src/automator.py` — overflow expand + JS shadow DOM click for Source Code button
-- `src/style_migrator.py` — same fixes; also where the actual bug was (user was on this tab)
+- `src/style_migrator.py` — same fixes; CodeMirror 6 extraction via `.cm-content` traversal
 - `gui.py` — `sys.modules.pop('automator', None)` before each worker import so code changes take effect without app restart
 - Options button retries increased to 15 × 1s + 3s initial wait for slow page loads
-- `.env` — Gemini API key updated
+- Style Migrator tab removed from GUI in v0.6.0 (code preserved in `src/style_migrator.py`)
 
 ---
 
-## What Still Needs Work
+## Migration Pipeline Status (as of 2026-06-17 session 2)
 
-- [ ] Confirm Source Code dialog actually opens end-to-end (still testing)
-- [ ] Verify HTML extraction from the dialog textarea works after the JS click
-- [ ] Verify AI-restyled HTML writes back correctly and Save and Close succeeds
-- [ ] **Combine the two tabs** — Automator should accept a Moodle URL as an optional style source and use the Style Migrator scraping pipeline instead of a manual paste
-- [ ] Clean up diagnostic/debug logging added during the click debugging (the `print("automator.py v4 loaded")` line etc.)
-- [ ] Add `__pycache__/` to `.gitignore` so compiled bytecode is never committed
+### ✅ Done
+- Moodle scrape: sections, items, accordions (Bootstrap .card structure detected + displayed)
+- H5P download: role-switch → settings → JS checkbox → Save → Reuse → download
+  - Covers mod/hvp and mod/h5pactivity; fresh page per item; pause point before downloads
+  - Skip-if-cached: checks `downloads/h5p/<name>.h5p` exists before opening any browser tab
+  - H5P pause now shows TWO buttons: "✅ Ready — Download H5P" and "⏭ Skip H5P"
+  - Downloaded files go to `downloads/h5p/<name>.h5p`
+- Brightspace TOC fetch + comparison log (exact / fuzzy / missing / found_in_search / found_in_content)
+- Moodle link scan: every Brightspace topic HTML fetched via API, Moodle hrefs collected
+  with topic_id so they can be patched back
+- Re-link method built (`_relink_moodle_files`): download → upload → HTML patch → PUT back
+  - Checkbox is now ON by default
+  - NOT YET TESTED against a real course with actual Moodle links in BS HTML
+- Missing file checklist + bulk download pipeline:
+  - After comparison, modal shows all missing FILEs grouped by section with checkboxes
+  - "Select All" / "Deselect All" + live count label + "Download N Selected" / "Skip All"
+  - Two-phase download: navigate view.php → detect intermediate page → resolve pluginfile URL
+  - `?forcedownload=1` appended so Moodle serves attachment not inline viewer
+  - "Download is starting" error caught inside expect_download block (download still captured)
+  - Skip-if-cached: reuses local file if already in `downloads/files/<course_id>/`
+  - Files organized per-course: `downloads/files/<bs_course_id>/`
+  - Upload: POST `/d2l/api/le/1.0/{courseId}/managefiles/file/` (changed from lp → le)
+  - Topic creation: POST `/d2l/api/le/1.0/{courseId}/content/modules/{moduleId}/structure/`
+  - **Upload API not yet confirmed working** — last run got 404 on lp (now fixed to le)
+- Credentials: `MOODLE_PASSWORD` = manual Moodle login, `MICROSOFT_SSO_PASSWORD` = MS SSO
+  (both in `src/api_config.py`, gitignored)
+
+### 🔜 Next (in order)
+1. **Confirm file upload API works** — run again, check if `le` endpoint returns 200
+   - If still fails: fall back to browser UI automation (navigate to module → Upload Files)
+   - Need HTML of D2L "Upload Files" button if browser fallback needed
+2. **Test re-link**: run Checker with real BS course URL (imported from Moodle) + "Re-link
+   files" ticked — should find mymoodle.okanagan.bc.ca hrefs in topic HTML
+3. **H5P Brightspace upload**: need user to walk through Create New → Page → H5P upload
+   flow in browser and share HTML — then automate Steps 8+ from H5P_DOWNLOAD_STEPS.txt
+4. **Unit Collector (Filip)** runs last — after all links and files are correct
+
+### Key decisions made
+- Files embedded as links in Moodle labels usually don't transfer via the backup import
+- Re-link approach: scan BS HTML for mymoodle URLs → download → upload → replace URLs in HTML
+- Missing FILE activities: checklist modal → user selects → bulk download → upload → create topic
+- H5P gets its own new Brightspace Page per activity in the matched section
+- Browser UI fallback for upload if D2L REST API keeps failing
+- Unit Collector assembles AFTER re-link and H5P pages are in place
+
+## What Still Needs Work (original items)
+
+- [ ] Verify Unit Collector batch flow works end-to-end
+- [ ] Clean up diagnostic/debug logging in `automator.py` if any remains
 
 ---
 
@@ -132,8 +224,9 @@ All D2L components (`d2l-htmleditor-button`, `d2l-button-icon`, etc.) use shadow
 
 - First run installs the venv, dependencies, and Playwright Chromium automatically.
 - Login happens once; session is saved and reused.
-- Use **Style Migrator** tab for Moodle→Brightspace restyling.
-- Use **Automator** tab for applying a custom HTML template style.
+- Use **Page Changer** tab for AI-restyling one or more Brightspace pages.
+- Use **Unit Collector** tab to combine a full unit into one collapsible page.
+- Use **Checker** tab to verify Moodle → Brightspace migration completeness.
 
 ## Environment
 

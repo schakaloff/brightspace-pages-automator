@@ -7,7 +7,8 @@
       "Bash(python3 -m py_compile src/automator.py gui.py)",
       "Skill(run)",
       "Bash(pip show *)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "Bash(python3 *)"
     ]
   }
 }

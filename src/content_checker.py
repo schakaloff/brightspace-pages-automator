@@ -13,8 +13,11 @@ Testable modes:
 import asyncio
 import difflib
 import html as html_module
+import os
 import re
 import threading
+import time
+from pathlib import Path
 from typing import Callable, List, Optional
 
 from playwright.async_api import BrowserContext, Page
@@ -56,6 +59,18 @@ def _flatten_toc(modules: list, parent: str = "") -> list:
 def _norm(text: str) -> str:
     """Lowercase + decode HTML entities so &amp; == & in comparisons."""
     return html_module.unescape(text).lower().strip()
+
+
+def _numbers_conflict(a: str, b: str) -> bool:
+    """Return True if a and b have the same number of numeric tokens but any differ in value.
+    Prevents 'Chapter 6 PowerPoint' fuzzy-matching 'Chapter 9 PowerPoint'."""
+    nums_a = re.findall(r'\d+', a)
+    nums_b = re.findall(r'\d+', b)
+    if not nums_a and not nums_b:
+        return False
+    if len(nums_a) != len(nums_b):
+        return False
+    return any(int(x) != int(y) for x, y in zip(nums_a, nums_b))
 
 
 # ── External tool detection ───────────────────────────────────────────────────
@@ -113,7 +128,7 @@ def _compare_items(moodle_items: list, bs_flat: list) -> list:
                 status, matched = "exact", bs_modules[name_l]
             else:
                 close = difflib.get_close_matches(name_l, bs_modules.keys(), n=1, cutoff=0.70)
-                if close:
+                if close and not _numbers_conflict(name_l, close[0]):
                     score = int(difflib.SequenceMatcher(None, name_l, close[0]).ratio() * 100)
                     status, matched = "fuzzy", (bs_modules[close[0]], score)
                 else:
@@ -122,6 +137,9 @@ def _compare_items(moodle_items: list, bs_flat: list) -> list:
             continue
 
         if item["type"] in SKIP:
+            # Accordion labels carry structure we want to display — pass them through
+            if item["type"] == "LABEL" and item.get("accordion_cards") is not None:
+                results.append({**item, "section": current_section, "status": "label_accordion", "matched": None})
             continue
 
         # External tools are flagged separately — don't try to match them in BS
@@ -145,7 +163,7 @@ def _compare_items(moodle_items: list, bs_flat: list) -> list:
             continue
 
         close = difflib.get_close_matches(name_l, bs_all.keys(), n=1, cutoff=0.75)
-        if close:
+        if close and not _numbers_conflict(name_l, close[0]):
             score = int(difflib.SequenceMatcher(None, name_l, close[0]).ratio() * 100)
             results.append({**item, "section": current_section,
                              "status": "fuzzy", "matched": bs_all[close[0]], "score": score})
@@ -254,13 +272,129 @@ class ContentChecker:
         on_complete:         Callable           = None,
         moodle_ready_event:  threading.Event    = None,
         on_moodle_waiting:   Callable           = None,
+        h5p_ready_event:      threading.Event    = None,
+        on_h5p_waiting:       Callable           = None,
+        file_checklist_event: threading.Event    = None,
+        on_file_checklist:    Callable           = None,
+        confirm_fn:           Optional[Callable] = None,
     ):
-        self.bs_url             = bs_url.strip()
-        self.moodle_url         = moodle_url.strip()
-        self.log                = log
-        self.on_complete        = on_complete
-        self.moodle_ready_event = moodle_ready_event
-        self.on_moodle_waiting  = on_moodle_waiting
+        self.bs_url                 = bs_url.strip()
+        self.moodle_url             = moodle_url.strip()
+        self.log                    = log
+        self.on_complete            = on_complete
+        self.moodle_ready_event     = moodle_ready_event
+        self.on_moodle_waiting      = on_moodle_waiting
+        self.h5p_ready_event        = h5p_ready_event
+        self.on_h5p_waiting         = on_h5p_waiting
+        self.file_checklist_event   = file_checklist_event
+        self.on_file_checklist      = on_file_checklist
+        self.file_checklist_result  = []
+        self.confirm_fn             = confirm_fn
+        self.do_h5p_embed           = False
+
+    async def _confirm(self, msg: str) -> bool:
+        if not self.confirm_fn:
+            return True
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.confirm_fn, msg)
+
+    async def _eval_in_any_frame(self, tab, js: str) -> bool:
+        """Run js in each frame until one returns truthy. Returns True if any frame matched."""
+        for frame in tab.frames:
+            try:
+                result = await frame.evaluate(js)
+                if result:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    async def _diagnose(self, tab, keywords: list) -> None:
+        """
+        Scan all frames + shadow DOM for interactive elements matching keywords.
+        Only logs buttons/links/menu-items with a meaningful aria/cmd/text attribute.
+        Capped at 10 results so the log stays readable.
+        """
+        kw_js = "[" + ", ".join(f'"{k.lower()}"' for k in keywords) + "]"
+        scan_js = f"""() => {{
+            var keywords = {kw_js};
+            var INTERACTIVE = {{'BUTTON':1,'A':1,'INPUT':1,'D2L-BUTTON':1,
+                'D2L-HTMLEDITOR-MENU-ITEM':1,'D2L-HTMLEDITOR-BUTTON':1,
+                'D2L-HTMLEDITOR-BUTTON-MENU':1,'D2L-BUTTON-ICON':1}};
+            function matches(e) {{
+                var tag  = (e.tagName || '').toUpperCase();
+                if (!INTERACTIVE[tag]) return false;
+                var aria = (e.getAttribute && e.getAttribute('aria-label') || '').toLowerCase();
+                var cmd  = (e.getAttribute && e.getAttribute('cmd') || '').toLowerCase();
+                var txt  = (e.textContent || '').trim().toLowerCase().slice(0, 60);
+                if (!aria && !cmd && !txt) return false;
+                var str  = aria + ' ' + cmd + ' ' + txt;
+                return keywords.some(function(k) {{ return str.includes(k); }});
+            }}
+            function walk(root, hits, depth) {{
+                if (!root || depth <= 0 || hits.length >= 10) return;
+                var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+                for (var i = 0; i < all.length && hits.length < 10; i++) {{
+                    var e = all[i];
+                    if (matches(e)) {{
+                        hits.push({{
+                            tag:  e.tagName,
+                            aria: e.getAttribute && e.getAttribute('aria-label') || '',
+                            cmd:  e.getAttribute && e.getAttribute('cmd') || '',
+                            txt:  (e.textContent || '').trim().slice(0, 50)
+                        }});
+                    }}
+                    if (e.shadowRoot) walk(e.shadowRoot, hits, depth - 1);
+                }}
+            }}
+            var hits = [];
+            walk(document, hits, 10);
+            return hits;
+        }}"""
+
+        self.log(f"  🔍 Diagnose (keywords: {keywords}):", "dim")
+        for fi, frame in enumerate(tab.frames):
+            try:
+                hits = await frame.evaluate(scan_js)
+                label = "main" if fi == 0 else f"frame[{fi}]"
+                if hits:
+                    for h in hits:
+                        aria = f" aria='{h['aria']}'" if h['aria'] else ""
+                        cmd  = f" cmd='{h['cmd']}'" if h['cmd'] else ""
+                        txt  = f" txt='{h['txt']}'" if h['txt'] else ""
+                        self.log(f"    [{label}] <{h['tag']}>{aria}{cmd}{txt}", "dim")
+            except Exception:
+                pass
+
+    async def _auto_dismiss(self, tab, texts: list) -> bool:
+        """
+        Automatically click any dialog button whose text matches one of `texts`.
+        Checks all frames and shadow DOM. Returns True if something was clicked.
+        Used to silently dismiss known popups (e.g. 'Proceed Without Grade Item').
+        """
+        df = self._DEEP_FIND_JS
+        texts_lower = [t.lower() for t in texts]
+        for frame in tab.frames:
+            try:
+                clicked = await frame.evaluate(f"""() => {{
+                    {df}
+                    var texts = {texts_lower!r};
+                    var btn = deepFind(document, function(e) {{
+                        var tag = (e.tagName || '').toUpperCase();
+                        if (tag !== 'D2L-BUTTON' && tag !== 'BUTTON') return false;
+                        var txt = (e.textContent || '').trim().toLowerCase();
+                        return texts.some(function(t) {{ return txt.includes(t); }});
+                    }});
+                    if (!btn) return false;
+                    var inner = btn.shadowRoot && btn.shadowRoot.querySelector('button');
+                    if (inner) {{ inner.click(); return true; }}
+                    btn.click(); return true;
+                }}""")
+                if clicked:
+                    return True
+            except Exception:
+                pass
+        return False
 
     # ── Brightspace TOC ───────────────────────────────────────────────────────
 
@@ -505,10 +639,10 @@ class ContentChecker:
                             `/d2l/api/le/1.0/${courseId}/content/topics/${topicId}/file`,
                             { credentials: 'include' }
                         );
-                        if (!r.ok) return { title, skip: true };
+                        if (!r.ok) return { title, topicId, skip: true };
 
                         const ct = (r.headers.get('content-type') || '').toLowerCase();
-                        if (!ct.includes('text/html')) return { title, skip: true };
+                        if (!ct.includes('text/html')) return { title, topicId, skip: true };
 
                         const html  = await r.text();
                         const div   = document.createElement('div');
@@ -521,9 +655,9 @@ class ContentChecker:
                             if (href) links.push({ text: a.textContent.trim().slice(0, 120), href });
                         });
 
-                        return { title, text, links };
+                        return { title, topicId, text, links };
                     } catch (e) {
-                        return { title, skip: true };
+                        return { title, topicId, skip: true };
                     }
                 }));
             }""", [course_id, pairs])
@@ -543,16 +677,628 @@ class ContentChecker:
                         found_in_content[original] = topic_title
 
                 # Link scan — flag Moodle-domain hrefs
+                topic_id = res.get("topicId")
                 for link in links:
                     href = link.get("href", "")
                     if MOODLE_HOST in href:
                         moodle_links.append({
-                            "topic": topic_title,
-                            "text":  link["text"],
-                            "href":  href,
+                            "topic":    topic_title,
+                            "topic_id": topic_id,
+                            "text":     link["text"],
+                            "href":     href,
                         })
 
         return found_in_content, moodle_links
+
+    async def _upload_file_to_brightspace(
+        self, bs_page: "Page", course_id: str, local_path: "Path"
+    ) -> Optional[str]:
+        """
+        Upload a local file to the Brightspace course file store via the
+        manage-files API.  Returns the URL string to embed in HTML, or None on failure.
+        Files over 8 MB are skipped (base64 transport limit through CDP).
+        """
+        import base64, mimetypes
+
+        data = local_path.read_bytes()
+        if len(data) > 8 * 1024 * 1024:
+            self.log(f"    ⚠ Skipped (file too large: {len(data)//1024} KB)", "warning")
+            return None
+
+        b64      = base64.b64encode(data).decode()
+        mime     = mimetypes.guess_type(local_path.name)[0] or "application/octet-stream"
+        filename = local_path.name
+
+        result = await bs_page.evaluate("""async ([courseId, b64, filename, mimeType]) => {
+            try {
+                const binary = atob(b64);
+                const bytes  = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                const blob = new Blob([bytes], { type: mimeType });
+
+                const form = new FormData();
+                form.append('file', blob, filename);
+
+                const resp = await fetch(
+                    `/d2l/api/le/1.0/${courseId}/managefiles/file/`,
+                    { method: 'POST', body: form, credentials: 'include' }
+                );
+
+                const bodyText = await resp.text().catch(() => '');
+                return { status: resp.status, ok: resp.ok, body: bodyText.slice(0, 500) };
+            } catch (e) {
+                return { status: 0, ok: false, body: String(e) };
+            }
+        }""", [course_id, b64, filename, mime])
+
+        if not result or not result.get("ok"):
+            status = result.get("status", "?") if result else "?"
+            body   = result.get("body", "")   if result else ""
+            self.log(f"    ✗ Upload failed ({status}): {body}", "error")
+            return None
+
+        return f"/content/enforced/{course_id}/{filename}"
+
+    # ── Missing file download + upload ────────────────────────────────────────
+
+    async def _offer_missing_file_download(
+        self,
+        context: "BrowserContext",
+        bs_page: "Page",
+        course_id: str,
+        results: list,
+        bs_flat: list,
+    ) -> None:
+        import json as _json
+
+        bs_module_by_title = {i["title"]: i for i in (bs_flat or []) if i["kind"] == "MODULE"}
+        section_to_bs: dict = {}
+        for r in results:
+            if r.get("type") == "SECTION" and r.get("matched"):
+                matched  = r["matched"]
+                bs_title = matched[0] if isinstance(matched, tuple) else matched
+                bs_mod   = bs_module_by_title.get(bs_title, {})
+                section_to_bs[r["name"]] = {"id": bs_mod.get("id"), "title": bs_title}
+
+        missing_files = [
+            {
+                "name":            r["name"],
+                "section":         r.get("section", ""),
+                "href":            r["href"],
+                "bs_module_id":    section_to_bs.get(r.get("section", ""), {}).get("id"),
+                "bs_module_title": section_to_bs.get(r.get("section", ""), {}).get(
+                    "title", r.get("section", "")
+                ),
+            }
+            for r in results
+            if r.get("status") == "missing"
+            and r.get("type") == "FILE"
+            and r.get("href")
+        ]
+
+        if not missing_files:
+            return
+
+        self.log(f"📥 {len(missing_files)} missing FILE(s) — waiting for your selection…", "step")
+        self.on_file_checklist(_json.dumps(missing_files))
+
+        if self.file_checklist_event:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self.file_checklist_event.wait)
+
+        selected = list(self.file_checklist_result) if self.file_checklist_result else []
+        if not selected:
+            if not getattr(self, "do_pdf_upload", True):
+                self.log("  ↷ Skipped — PDF upload disabled.", "dim")
+                return
+            # Checkbox on but Skip All clicked — scan cache and upload what's already there
+            save_dir = Path("downloads") / "files" / course_id
+
+            def _cache_match(item_name: str, file_stem: str) -> bool:
+                """Token overlap match: handles 'Chapter 1 PowerPoint' vs 'Chapter_001.pptx'."""
+                def tokens(s):
+                    parts = re.findall(r'\d+|[a-z]+', s.lower())
+                    result = set()
+                    for p in parts:
+                        try:
+                            result.add(int(p))  # "001" == "1"
+                        except ValueError:
+                            result.add(p)
+                    return result - {'and', 'or', 'the', 'to', 'for', 'of', 'in', 'a'}
+
+                t_item = tokens(item_name)
+                t_file = tokens(file_stem)
+                if not t_item:
+                    return False
+                return len(t_item & t_file) / len(t_item) >= 0.5
+
+            cached_from_disk = []
+            if save_dir.exists():
+                cached_files = list(save_dir.iterdir())
+                for f in missing_files:
+                    for cf in cached_files:
+                        if _cache_match(f["name"], cf.stem):
+                            entry = dict(f)
+                            entry["cached_path"] = str(cf)
+                            cached_from_disk.append(entry)
+                            break
+            if cached_from_disk:
+                self.log(f"  → {len(cached_from_disk)} cached file(s) found — uploading to Brightspace…", "dim")
+                await self._download_and_upload_missing(context, bs_page, course_id, cached_from_disk)
+            else:
+                self.log("  ↷ No cached files found in downloads folder.", "dim")
+            return
+
+        await self._download_and_upload_missing(context, bs_page, course_id, selected)
+
+    async def _download_and_upload_missing(
+        self,
+        context: "BrowserContext",
+        bs_page: "Page",
+        course_id: str,
+        files: list,
+    ) -> None:
+        from collections import defaultdict
+        from urllib.parse import urlparse
+
+        # Per-course subfolder so re-runs and multiple courses stay separate
+        save_dir = Path("downloads") / "files" / course_id
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        self.log("─" * 52, "dim")
+        self.log(f"📥 Downloading {len(files)} file(s) from Moodle…", "step")
+        self.log(f"   Saving to: downloads/files/{course_id}/", "dim")
+
+        # ── Phase 1: download all files ────────────────────────────────────────
+        # Download tabs are completely separate from the Brightspace page so a
+        # crashed/closed Moodle tab can never affect the BS upload later.
+        downloaded: list = []   # list of (local_path, file_info_dict)
+        for idx, f in enumerate(files, 1):
+            name  = f["name"]
+            href  = f["href"]
+            self.log(f"  [{idx}/{len(files)}] {name}", "info")
+
+            # Fast-path: file already identified from local cache — skip Moodle entirely
+            if f.get("cached_path"):
+                local = Path(f["cached_path"])
+                if local.exists():
+                    # Rename to match the Moodle item name so Brightspace shows
+                    # the correct title (e.g. "Chapter 9 PowerPoint.pptx" not "Chapter_009.pptx")
+                    safe_name = re.sub(r'[<>:"/\\|?*]', '', f["name"]).strip()
+                    correct = local.parent / (safe_name + local.suffix)
+                    if correct != local:
+                        if not correct.exists():
+                            import shutil
+                            shutil.copy2(str(local), str(correct))
+                        local = correct
+                    self.log(f"    ℹ Using cached: {local.name}", "dim")
+                    downloaded.append((local, f))
+                else:
+                    self.log(f"    ✗ Cached path missing: {local}", "error")
+                continue
+
+            tab = await context.new_page()
+            try:
+                try:
+                    await tab.goto(href, wait_until="domcontentloaded", timeout=20000)
+                except Exception:
+                    pass
+                await tab.wait_for_timeout(300)
+
+                dl_href = href
+                wk = tab.locator('.resourceworkaround a[href*="pluginfile.php"]')
+                if await wk.count() > 0:
+                    dl_href = await wk.first.get_attribute("href")
+                    self.log(f"    → Intermediate page — following download link", "dim")
+                elif "pluginfile.php" in tab.url:
+                    dl_href = tab.url
+                else:
+                    any_pf = tab.locator('a[href*="pluginfile.php"]')
+                    if await any_pf.count() > 0:
+                        dl_href = await any_pf.first.get_attribute("href")
+                        self.log(f"    → Found pluginfile link on page", "dim")
+
+                if "pluginfile.php" in dl_href and "forcedownload" not in dl_href:
+                    dl_href += ("&" if "?" in dl_href else "?") + "forcedownload=1"
+
+                async with tab.expect_download(timeout=30000) as dl_info:
+                    try:
+                        await tab.goto(dl_href, wait_until="domcontentloaded", timeout=20000)
+                    except Exception as _nav_err:
+                        if "Download is starting" not in str(_nav_err):
+                            raise
+
+                dl       = await dl_info.value
+                filename = dl.suggested_filename
+                local    = save_dir / filename
+
+                if local.exists():
+                    self.log(f"    ℹ Already cached: {filename} — reusing", "dim")
+                else:
+                    await dl.save_as(str(local))
+                    self.log(f"    ✓ Downloaded: {filename}", "success")
+
+                # Rename to Moodle item name so Brightspace topic title is correct
+                safe_name = re.sub(r'[<>:"/\\|?*]', '', f["name"]).strip()
+                correct = save_dir / (safe_name + local.suffix)
+                if correct != local and not correct.exists():
+                    import shutil
+                    shutil.copy2(str(local), str(correct))
+                if correct.exists():
+                    local = correct
+
+                downloaded.append((local, f))
+            except Exception as e:
+                self.log(f"    ✗ {e}", "error")
+            finally:
+                try:
+                    await tab.close()
+                except Exception:
+                    pass
+
+        if not downloaded:
+            self.log("  ↷ Nothing downloaded.", "dim")
+            return
+
+        # ── Phase 2: upload to Brightspace via browser UI ──────────────────────
+        self.log(f"", "dim")
+        self.log(f"⬆ Uploading {len(downloaded)} file(s) to Brightspace…", "step")
+
+        # Extract BS domain (e.g. https://learn.okanagancollege.ca)
+        parsed   = urlparse(self.bs_url)
+        bs_base  = f"{parsed.scheme}://{parsed.netloc}"
+
+        # Group files by module so we open one BS tab per module
+        by_module: dict = defaultdict(list)
+        no_module: list = []
+        for local, fi in downloaded:
+            mod_id = fi.get("bs_module_id")
+            if mod_id:
+                by_module[mod_id].append((local, fi))
+            else:
+                no_module.append((local, fi))
+
+        ok_count = fail_count = 0
+
+        for mod_id, items in by_module.items():
+            mod_title = items[0][1].get("bs_module_title", "?")
+            self.log(f"  📁 {mod_title} ({len(items)} file(s))", "info")
+
+            for local, fi in items:
+                name = fi["name"]
+                ok = await self._upload_files_to_bs_module_ui(
+                    context, bs_base, course_id, mod_id, mod_title, [local]
+                )
+                if not ok:
+                    self.log(f"    ✗ {name} — upload UI failed", "error")
+                    self._summary["files_failed"].append((name, mod_title))
+                    fail_count += 1
+                    continue
+
+                confirmed = await self._verify_topic_in_module(
+                    bs_page, course_id, mod_id, name
+                )
+                if confirmed:
+                    self.log(f"    ✓ {name}", "success")
+                    self._summary["files_uploaded"].append((name, mod_title))
+                    ok_count += 1
+                else:
+                    self.log(f"    ⚠ {name} — not confirmed in module after upload", "warning")
+                    self._summary["files_failed"].append((name, mod_title))
+                    fail_count += 1
+
+        for local, fi in no_module:
+            self.log(f"  ⚠ {fi['name']} — no BS module match, saved to downloads/", "warning")
+            self._summary["files_failed"].append((fi["name"], "no module match"))
+            fail_count += 1
+
+        self.log(f"⬆ Done: {ok_count} uploaded, {fail_count} failed", "step")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    _DEEP_FIND_JS = """
+    function deepFind(root, fn, depth) {
+        depth = depth === undefined ? 15 : depth;
+        if (!root || depth <= 0) return null;
+        var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (var i = 0; i < all.length; i++) {
+            var el = all[i];
+            if (fn(el)) return el;
+            if (el.shadowRoot) {
+                var found = deepFind(el.shadowRoot, fn, depth - 1);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+    """
+
+    async def _verify_topic_in_module(
+        self, bs_page, course_id: str, module_id, expected_name: str
+    ) -> bool:
+        """Return True if a topic matching expected_name exists in the module via D2L API."""
+        try:
+            topics = await bs_page.evaluate(
+                """async ([courseId, moduleId]) => {
+                    const resp = await fetch(
+                        `/d2l/api/le/1.0/${courseId}/content/modules/${moduleId}/structure/`,
+                        { credentials: 'include' }
+                    );
+                    if (!resp.ok) return null;
+                    return await resp.json();
+                }""",
+                [str(course_id), str(module_id)],
+            )
+            if not topics:
+                return False
+            name_norm = re.sub(r'[^\w]', '', expected_name).lower()
+            for topic in topics:
+                title_norm = re.sub(r'[^\w]', '', topic.get('Title', '')).lower()
+                if name_norm in title_norm or title_norm in name_norm:
+                    return True
+            return False
+        except Exception:
+            return False
+
+    async def _upload_files_to_bs_module_ui(
+        self,
+        context: "BrowserContext",
+        bs_base: str,
+        course_id: str,
+        module_id,
+        module_title: str,
+        file_paths: list,
+    ) -> bool:
+        """
+        Upload files to a Brightspace module via the 'Add Existing' UI.
+        Navigates to course content → activates module → clicks Add Existing →
+        sets files in the drag-and-drop uploader → waits for networkidle.
+        Returns True if the upload appeared to succeed.
+        """
+        tab = await context.new_page()
+        try:
+            # Navigate directly to the module — same URL pattern as H5P Phase B.
+            # No TOC click needed; lands right on the module page.
+            module_url = f"{bs_base}/d2l/le/lessons/{course_id}/units/{module_id}"
+            await tab.goto(module_url, wait_until="domcontentloaded", timeout=30000)
+            await tab.wait_for_timeout(2000)
+
+            # ── find the frame containing "Add Existing" ─────────────────────
+            # The content area is rendered in a child iframe — the main page only
+            # has the navbar. Scan all frames every 500ms for up to 10s.
+            add_frame = None
+            for _ in range(20):
+                for frame in tab.frames:
+                    try:
+                        count = await frame.locator(
+                            'd2l-button[aria-label="Add Existing"], d2l-button.add-existing-btn'
+                        ).count()
+                        if count > 0:
+                            add_frame = frame
+                            break
+                    except Exception:
+                        pass
+                if add_frame:
+                    break
+                await tab.wait_for_timeout(500)
+
+            if not add_frame:
+                self.log(f"    ✗ 'Add Existing' not found in any frame for '{module_title}'", "error")
+                self.log(f"      Frames loaded: {[f.url[:80] for f in tab.frames]}", "dim")
+                return False
+
+            await add_frame.locator(
+                'd2l-button[aria-label="Add Existing"], d2l-button.add-existing-btn'
+            ).first.click(timeout=5000)
+            await tab.wait_for_timeout(1000)
+
+            # ── Step 3: file input also lives in a frame ──────────────────────
+            file_frame = None
+            for _ in range(16):
+                for frame in tab.frames:
+                    try:
+                        if await frame.locator('input[type="file"]').count() > 0:
+                            file_frame = frame
+                            break
+                    except Exception:
+                        pass
+                if file_frame:
+                    break
+                await tab.wait_for_timeout(500)
+
+            if not file_frame:
+                self.log(f"    ✗ File input not found in any frame after 8s", "error")
+                return False
+
+            try:
+                async with tab.expect_file_chooser(timeout=8000) as fc_info:
+                    await file_frame.locator('input[type="file"]').first.click()
+                fc = await fc_info.value
+                await fc.set_files([str(p) for p in file_paths])
+            except Exception as fc_err:
+                self.log(f"    ✗ File chooser not triggered: {fc_err}", "error")
+                return False
+
+            # ── Step 4: wait for D2L to upload and return to content page ────
+            await tab.wait_for_load_state("networkidle", timeout=60000)
+            await tab.wait_for_timeout(1000)
+            return True
+
+        except Exception as e:
+            self.log(f"    ✗ Browser UI upload error: {e}", "error")
+            return False
+        finally:
+            try:
+                await tab.close()
+            except Exception:
+                pass
+
+    async def _create_bs_file_topic(
+        self, bs_page: "Page", course_id: str, module_id, title: str, file_url: str
+    ) -> bool:
+        result = await bs_page.evaluate(
+            """async ([courseId, moduleId, title, fileUrl]) => {
+                try {
+                    const resp = await fetch(
+                        `/d2l/api/le/1.0/${courseId}/content/modules/${moduleId}/structure/`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'include',
+                            body: JSON.stringify({
+                                Title: title,
+                                ShortTitle: '',
+                                Type: 1,
+                                TopicType: 1,
+                                Url: fileUrl,
+                                IsHidden: false,
+                                IsLocked: false
+                            })
+                        }
+                    );
+                    const body = await resp.text().catch(() => '');
+                    return { ok: resp.ok, status: resp.status, body: body.slice(0, 500) };
+                } catch (e) {
+                    return { ok: false, status: 0, body: String(e) };
+                }
+            }""",
+            [course_id, str(module_id), title, file_url],
+        )
+        if result and result.get("ok"):
+            return True
+        self.log(
+            f"    ✗ Topic API ({result.get('status','?')}): {result.get('body','')}", "error"
+        )
+        return False
+
+    async def _relink_moodle_files(
+        self, context: "BrowserContext", bs_page: "Page",
+        course_id: str, moodle_links: list
+    ) -> None:
+        """
+        For every Moodle URL found in Brightspace topic HTML:
+          1. Download the file from Moodle (fresh authenticated tab)
+          2. Upload it to the Brightspace course file store
+          3. Fetch each affected topic's HTML, replace old URL → new URL, PUT back
+        """
+        if not moodle_links:
+            return
+
+        self.log("", "dim")
+        self.log("─" * 52, "dim")
+        self.log("🔗 Re-linking Moodle files in Brightspace…", "step")
+
+        # Group by href so each unique file is downloaded only once
+        by_href: dict = {}
+        for entry in moodle_links:
+            by_href.setdefault(entry["href"], []).append(entry)
+
+        unique_topics = {e["topic_id"] for e in moodle_links if e.get("topic_id")}
+        self.log(
+            f"  {len(by_href)} unique file(s) across {len(unique_topics)} topic(s)",
+            "info",
+        )
+
+        save_dir = Path(__file__).parent.parent / "downloads" / "relink"
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        # ── 1. Download from Moodle + upload to Brightspace ──────────────────
+        url_map: dict = {}   # moodle_href → brightspace_url
+        moodle_tab = await context.new_page()
+        try:
+            for idx, (href, entries) in enumerate(by_href.items(), 1):
+                label = entries[0]["text"] or href.split("/")[-1].split("?")[0][:60]
+                self.log(f"  [{idx}/{len(by_href)}] {label}", "info")
+                try:
+                    async with moodle_tab.expect_download(timeout=20000) as dl_info:
+                        await moodle_tab.goto(href, wait_until="domcontentloaded", timeout=20000)
+                    dl       = await dl_info.value
+                    filename = dl.suggested_filename or re.sub(r"[^\w\s\-.]", "", label).strip()[:80]
+                    local    = save_dir / filename
+                    await dl.save_as(str(local))
+                    self.log(f"    ↓ {filename}", "dim")
+
+                    bs_url = await self._upload_file_to_brightspace(bs_page, course_id, local)
+                    if bs_url:
+                        url_map[href] = bs_url
+                        self.log(f"    ↑ {bs_url}", "dim")
+                except Exception as e:
+                    self.log(f"    ✗ {e}", "error")
+        finally:
+            await moodle_tab.close()
+
+        if not url_map:
+            self.log("  ⚠ No files uploaded — re-link skipped", "warning")
+            return
+
+        # ── 2. Patch each affected topic's HTML and PUT it back ──────────────
+        # Build per-topic map: topic_id → {title, href→bs_url replacements}
+        topics: dict = {}
+        for entry in moodle_links:
+            tid = entry.get("topic_id")
+            if not tid or entry["href"] not in url_map:
+                continue
+            if tid not in topics:
+                topics[tid] = {"title": entry["topic"], "replacements": {}}
+            topics[tid]["replacements"][entry["href"]] = url_map[entry["href"]]
+
+        self.log("", "dim")
+        self.log(f"  Patching {len(topics)} topic(s)…", "info")
+        ok_count = 0
+        for topic_id, info in topics.items():
+            self.log(f"  📄 {info['title']}", "step")
+            replacements = info["replacements"]
+            try:
+                result = await bs_page.evaluate(
+                    """async ([courseId, topicId, replacements]) => {
+                    // GET current HTML
+                    const getR = await fetch(
+                        `/d2l/api/le/1.0/${courseId}/content/topics/${topicId}/file`,
+                        { credentials: 'include' }
+                    );
+                    if (!getR.ok) return { error: `GET ${getR.status}` };
+
+                    let html = await getR.text();
+                    let replaced = 0;
+                    for (const [oldUrl, newUrl] of Object.entries(replacements)) {
+                        const escaped = oldUrl.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+                        const before  = html;
+                        html = html.replace(new RegExp(escaped, 'g'), newUrl);
+                        if (html !== before) replaced++;
+                    }
+                    if (replaced === 0) return { skipped: true };
+
+                    // PUT updated HTML back
+                    const blob = new Blob([html], { type: 'text/html' });
+                    const form = new FormData();
+                    form.append('file', blob, 'index.html');
+                    const putR = await fetch(
+                        `/d2l/api/le/1.0/${courseId}/content/topics/${topicId}/file`,
+                        { method: 'PUT', body: form, credentials: 'include' }
+                    );
+                    const putBody = await putR.text().catch(() => '');
+                    return putR.ok
+                        ? { ok: true, replaced }
+                        : { error: `PUT ${putR.status}: ${putBody.slice(0, 200)}` };
+                }""",
+                    [course_id, topic_id, replacements],
+                )
+
+                if result and result.get("ok"):
+                    self.log(f"    ✅ {result['replaced']} link(s) re-hosted", "success")
+                    ok_count += 1
+                elif result and result.get("skipped"):
+                    self.log("    ○ no matching links in HTML", "dim")
+                else:
+                    self.log(f"    ✗ {(result or {}).get('error', 'unknown')}", "error")
+            except Exception as e:
+                self.log(f"    ✗ {e}", "error")
+
+        self.log("", "dim")
+        self.log(
+            f"✅ Re-link done — {len(url_map)}/{len(by_href)} uploaded, "
+            f"{ok_count}/{len(topics)} topics patched",
+            "success",
+        )
 
     def _log_link_report(self, moodle_links: list) -> None:
         """Log the Moodle-link-in-BS report section."""
@@ -606,7 +1352,14 @@ class ContentChecker:
 
             if "login" in tab.url.lower() or "course" not in tab.url.lower():
                 try:
-                    from api_config import MOODLE_USERNAME as moodle_user, MOODLE_PASSWORD as moodle_pass
+                    from api_config import (
+                        MOODLE_USERNAME as moodle_user,
+                        MOODLE_PASSWORD as moodle_pass,
+                    )
+                    try:
+                        from api_config import MICROSOFT_SSO_PASSWORD as sso_pass
+                    except ImportError:
+                        sso_pass = moodle_pass
                 except ImportError:
                     moodle_user, moodle_pass = "", ""
 
@@ -667,7 +1420,7 @@ class ContentChecker:
                         try:
                             pwd_input = tab.locator('#i0118')
                             await pwd_input.wait_for(state="visible", timeout=8000)
-                            await pwd_input.fill(moodle_pass)
+                            await pwd_input.fill(sso_pass)
                             await tab.locator('#idSIButton9').click()
                             await tab.wait_for_load_state("domcontentloaded", timeout=15000)
                             await tab.wait_for_timeout(2000)
@@ -766,8 +1519,78 @@ class ContentChecker:
             # Deep scan: (1) scan label bodies on the course page itself,
             # (2) then navigate to each PAGE topic for its body HTML
             inline_embedded = await self._scan_moodle_labels_inline(tab, items)
-            embedded = await self._scan_moodle_page_bodies(tab, items)
-            items = items + inline_embedded + embedded
+            embedded        = await self._scan_moodle_page_bodies(tab, items)
+
+            # Accordion LABEL items must be inserted after their SECTION item so
+            # _compare_items sees them in section order (appending at end misattributes
+            # them all to the last section).
+            accordions   = [i for i in inline_embedded if i.get("accordion_cards") is not None]
+            flat_embedded = [i for i in inline_embedded if i.get("accordion_cards") is None]
+
+            acc_by_section: dict = {}
+            for a in accordions:
+                acc_by_section.setdefault(a.get("section", ""), []).append(a)
+
+            # Count accordion items per section so we can skip the matching
+            # plain LABEL items the main scraper already created for them.
+            acc_counts: dict = {sec: len(lst) for sec, lst in acc_by_section.items()}
+            skipped_labels: dict = {}
+
+            ordered: list = []
+            _cur_sec = ""
+            for item in items:
+                if item["type"] == "SECTION":
+                    _cur_sec = item["name"]
+                    ordered.append(item)
+                    ordered.extend(acc_by_section.get(item["name"], []))
+                elif (item["type"] == "LABEL"
+                      and item.get("accordion_cards") is None
+                      and skipped_labels.get(_cur_sec, 0) < acc_counts.get(_cur_sec, 0)):
+                    # Superseded by accordion item in same section — drop it
+                    skipped_labels[_cur_sec] = skipped_labels.get(_cur_sec, 0) + 1
+                else:
+                    ordered.append(item)
+
+            items = ordered + flat_embedded + embedded
+
+            # If there are H5P items, pause so the user can check the browser
+            # (e.g. switch out of preview mode) before downloads start.
+            h5p_pending = [
+                i for i in items
+                if i.get("type") == "EXTERNAL"
+                and ("hvp" in i.get("hint", "") or "h5p" in i.get("hint", ""))
+                and i.get("href")
+            ]
+            if h5p_pending:
+                self.log("", "dim")
+                self.log("─" * 52, "dim")
+                self.log(f"🎮 {len(h5p_pending)} H5P file(s) to download.", "step")
+                # Auto-switch to Instructor role so edit controls appear
+                await self._switch_to_instructor_role(tab)
+
+            if h5p_pending and self.on_h5p_waiting:
+                self.log(
+                    "  Verify the browser looks right, then click"
+                    " ✅ Ready — Download H5P in the app.",
+                    "info",
+                )
+                self.on_h5p_waiting()
+                if self.h5p_ready_event:
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, self.h5p_ready_event.wait)
+
+            # H5P: enable download on each activity so files can be fetched
+            h5p_skipped = (
+                getattr(self, "h5p_skip_flag", None)
+                and self.h5p_skip_flag[0]
+            )
+            if h5p_skipped:
+                self.log("  ⏭ H5P download skipped.", "dim")
+            else:
+                await self._enable_h5p_downloads(context, items)
+
+            # Stage 2: download all embedded files from Moodle
+            await self._download_moodle_files(tab, items)
 
             await tab.close()
             n_items = sum(1 for i in items if i["type"] != "SECTION")
@@ -783,19 +1606,1266 @@ class ContentChecker:
                 pass
             return None
 
+    async def _download_moodle_files(self, tab, items: list) -> None:
+        """
+        Download all pluginfile.php FILE items (embedded + top-level resources)
+        using the already-authenticated Playwright session.
+        Saves to downloads/files/<section>/<filename>.
+        """
+        file_items = [
+            i for i in items
+            if i.get("type") == "FILE"
+            and i.get("href")
+            and "pluginfile.php" in i.get("href", "")
+        ]
+
+        if not file_items:
+            return
+
+        self.log("", "dim")
+        self.log("─" * 52, "dim")
+        self.log(f"📥 Downloading {len(file_items)} files from Moodle…", "step")
+
+        save_root = Path(__file__).parent.parent / "downloads" / "files"
+        save_root.mkdir(parents=True, exist_ok=True)
+
+        success = 0
+        for idx, item in enumerate(file_items, 1):
+            name    = item.get("name", "file")
+            href    = item["href"]
+            section = re.sub(r'[^\w\s\-]', '', item.get("section", "unsorted")).strip()[:60] or "unsorted"
+
+            self.log(f"  [{idx}/{len(file_items)}] {name}", "info")
+            try:
+                section_dir = save_root / section
+                section_dir.mkdir(parents=True, exist_ok=True)
+
+                async with tab.expect_download(timeout=20000) as dl_info:
+                    await tab.goto(href, wait_until="domcontentloaded", timeout=20000)
+
+                download  = await dl_info.value
+                suggested = download.suggested_filename or re.sub(r'[^\w\s\-.]', '', name).strip()[:80]
+                save_path = section_dir / suggested
+
+                # avoid overwriting if duplicate filename in same section
+                if save_path.exists():
+                    stem, suffix = save_path.stem, save_path.suffix
+                    save_path = section_dir / f"{stem}_{idx}{suffix}"
+
+                await download.save_as(str(save_path))
+                self.log(f"    💾 {suggested}", "success")
+                success += 1
+
+            except Exception as e:
+                self.log(f"    ✗ Failed: {e}", "error")
+
+        self.log("", "dim")
+        self.log(f"  Files: {success}/{len(file_items)} downloaded", "success")
+        if success > 0:
+            self.log(f"  Saved to: downloads/files/", "dim")
+
+    async def _switch_to_instructor_role(self, tab) -> None:
+        """
+        Click through Moodle's Switch role to → Instructor flow.
+        Required so teacher edit controls (including H5P download checkbox)
+        are visible. Safe to call when already in Instructor role — Moodle
+        just re-applies and redirects back.
+        """
+        self.log("  → Switching to Instructor role…", "dim")
+        try:
+            # Open user menu dropdown
+            toggle = tab.locator('#user-menu-toggle')
+            if await toggle.count() == 0:
+                self.log("  ⚠ User menu not found — role switch skipped", "warning")
+                return
+            await toggle.first.click()
+            await tab.wait_for_timeout(600)
+
+            # Find the "Switch role to..." link and get its href
+            switch_link = tab.locator('a[href*="switchrole.php"]').first
+            if await switch_link.count() == 0:
+                self.log("  ✓ No switchrole link found — skipping", "dim")
+                # Close the dropdown by pressing Escape
+                await tab.keyboard.press("Escape")
+                return
+            href = await switch_link.get_attribute("href")
+            await tab.goto(href, wait_until="domcontentloaded", timeout=15000)
+            await tab.wait_for_timeout(800)
+
+            # Click the Instructor role button on the selection page
+            instructor_btn = tab.locator('button:has-text("Instructor")')
+            if await instructor_btn.count() == 0:
+                self.log("  ⚠ Instructor button not found on role page", "warning")
+                return
+            await instructor_btn.first.click()
+            await tab.wait_for_load_state("domcontentloaded", timeout=15000)
+            await tab.wait_for_timeout(1000)
+            self.log("  ✓ Switched to Instructor role", "success")
+        except Exception as e:
+            self.log(f"  ⚠ Role switch failed: {e}", "warning")
+
+    async def _enable_h5p_downloads(self, context, items: list) -> None:
+        """
+        For each H5P activity: open Settings, tick Allow download, Save and display.
+        Each item gets a fresh page so a crashed/stalled tab can't affect the rest.
+        """
+        h5p_items = [
+            i for i in items
+            if i.get("type") == "EXTERNAL"
+            and ("hvp" in i.get("hint", "") or "h5p" in i.get("hint", ""))
+            and i.get("href")
+        ]
+
+        if not h5p_items:
+            return
+
+        self.log("", "dim")
+        self.log("─" * 52, "dim")
+        self.log(f"🎮 H5P activities found: {len(h5p_items)}", "step")
+        self.log("  Enabling download on each…", "dim")
+
+        save_dir = Path(__file__).parent.parent / "downloads" / "h5p"
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        success = skipped = 0
+        for idx, item in enumerate(h5p_items, 1):
+            name      = item["name"]
+            url       = item["href"]
+            safe_name = re.sub(r'[^\w\s\-]', '', name).strip()[:80]
+            save_path = save_dir / f"{safe_name}.h5p"
+
+            self.log(f"  [{idx}/{len(h5p_items)}] {name}", "info")
+
+            if save_path.exists():
+                self.log(f"    ℹ Already downloaded — skipping", "dim")
+                success += 1
+                skipped += 1
+                continue
+
+            tab = await context.new_page()
+            try:
+                # Step 1: navigate to H5P activity
+                await tab.goto(url, wait_until="domcontentloaded", timeout=20000)
+                await tab.wait_for_timeout(1000)
+
+                # Step 2: navigate to Settings (strip &return=1 so Save and display goes to view.php)
+                self.log(f"    → Going to Settings…", "dim")
+                settings = tab.locator('a[href*="modedit.php?update="]')
+                if await settings.count() == 0:
+                    self.log(f"    ⚠ No Settings link — check teacher access", "warning")
+                    continue
+                settings_href = await settings.first.get_attribute("href")
+                settings_href = re.sub(r'&return=\d+', '', settings_href)
+                await tab.goto(settings_href, wait_until="domcontentloaded", timeout=15000)
+                await tab.wait_for_timeout(800)
+
+                # Step 3 & 4: enable Allow download via JS — works regardless of
+                # whether the section is collapsed (checkbox is in DOM either way).
+                # Covers all three known field IDs across Moodle H5P module types.
+                self.log(f"    → Checking Allow download checkbox…", "dim")
+                cb_result = await tab.evaluate("""() => {
+                    const ids = ['id_export', 'id_enabledownload', 'id_displayopt_export'];
+                    for (const id of ids) {
+                        const cb = document.getElementById(id);
+                        if (cb) {
+                            const was = cb.checked;
+                            cb.checked = true;
+                            if (!was) cb.dispatchEvent(new Event('change', { bubbles: true }));
+                            return { found: true, id, wasChecked: was };
+                        }
+                    }
+                    return { found: false };
+                }""")
+                if not cb_result or not cb_result.get("found"):
+                    self.log(f"    ⚠ Allow download checkbox not found", "warning")
+                    continue
+                if cb_result.get("wasChecked"):
+                    self.log(f"    ✓ Already enabled", "dim")
+                else:
+                    self.log(f"    ✓ Download enabled", "success")
+
+                # Step 5: Save and display (scroll into view — button is below the fold)
+                self.log(f"    → Clicking Save and display…", "dim")
+                save_btn = tab.locator('#id_submitbutton')
+                if await save_btn.count() == 0:
+                    self.log(f"    ⚠ Save and display button not found", "warning")
+                    continue
+                await save_btn.first.scroll_into_view_if_needed()
+                await tab.wait_for_timeout(500)
+                await save_btn.first.click()
+                try:
+                    await tab.wait_for_url(lambda u: "modedit.php" not in u, timeout=15000)
+                except Exception:
+                    self.log(f"    ⚠ Save didn't navigate away — still on {tab.url[:80]}", "warning")
+                    continue
+                self.log(f"    ✓ Saved — on: {tab.url[:60]}", "dim")
+                await tab.wait_for_timeout(2000)
+
+                # Step 6: click Reuse button — scroll first (H5P iframe lazy-loads when visible)
+                await tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await tab.wait_for_timeout(3000)
+
+                # Dismiss "Data Reset" dialog if it appears
+                for frame in tab.frames:
+                    try:
+                        ok_btn = frame.locator('.h5p-dialog-ok-button')
+                        if await ok_btn.count() > 0:
+                            self.log(f"    → Dismissing Data Reset dialog…", "dim")
+                            await ok_btn.first.click()
+                            await tab.wait_for_timeout(800)
+                            break
+                    except Exception:
+                        pass
+
+                reuse_clicked = False
+                for frame in tab.frames:
+                    try:
+                        btn = frame.locator('li.h5p-export button')
+                        if await btn.count() > 0:
+                            await btn.first.click()
+                            reuse_clicked = True
+                            break
+                    except Exception:
+                        pass
+
+                if not reuse_clicked:
+                    self.log(f"    ⚠ Reuse button not found in any frame", "warning")
+                    continue
+
+                # Step 7: wait for download dialog then click "Download as an .h5p file"
+
+                dl_frame = None
+                for _ in range(10):
+                    await tab.wait_for_timeout(500)
+                    for frame in tab.frames:
+                        try:
+                            if await frame.locator('.h5p-download-button').count() > 0:
+                                dl_frame = frame
+                                break
+                        except Exception:
+                            pass
+                    if dl_frame:
+                        break
+
+                if not dl_frame:
+                    self.log(f"    ⚠ Download dialog did not appear", "warning")
+                else:
+                    try:
+                        async with tab.expect_download(timeout=15000) as dl_info:
+                            await dl_frame.locator('.h5p-download-button').first.click()
+                        download = await dl_info.value
+                        await download.save_as(str(save_path))
+                        self.log(f"    💾 Saved: {safe_name}.h5p", "success")
+                        success += 1
+                    except Exception as e:
+                        self.log(f"    ✗ Download failed: {e}", "error")
+
+            except Exception as e:
+                self.log(f"    ✗ Failed: {e}", "error")
+            finally:
+                try:
+                    await tab.close()
+                except Exception:
+                    pass
+
+        self.log("", "dim")
+        new_downloads = success - skipped
+        if skipped:
+            self.log(
+                f"  H5P: {new_downloads} downloaded, {skipped} already cached ({success}/{len(h5p_items)} total)",
+                "success",
+            )
+        else:
+            self.log(f"  H5P: {success}/{len(h5p_items)} downloaded", "success")
+        if new_downloads > 0:
+            self.log(f"  Saved to: downloads/h5p/", "dim")
+
+    async def _h5p_open_interactives(self, tab, for_quiz: bool = False) -> bool:
+        df = self._DEEP_FIND_JS
+        try:
+            # Use Playwright native click so the browser properly fires focus/blur events.
+            # JS .click() bypasses the browser's focus machinery — the toolbar stays inactive.
+            editor_clicked = False
+            if for_quiz:
+                try:
+                    await tab.locator("d2l-activity-text-editor").click(timeout=5000)
+                    editor_clicked = True
+                except Exception:
+                    pass
+            if not editor_clicked:
+                for sel in (
+                    "d2l-htmleditor [contenteditable='true']",
+                    "[contenteditable='true']",
+                    "d2l-htmleditor",
+                ):
+                    try:
+                        await tab.locator(sel).first.click(timeout=3000)
+                        editor_clicked = True
+                        break
+                    except Exception:
+                        continue
+            if not editor_clicked:
+                self.log("  ⚠ Could not click editor body — toolbar may not activate", "warn")
+            await tab.wait_for_timeout(1500)
+
+            if for_quiz:
+                # Quiz editor: open via Creator+ Authoring Tools → H5P menu item.
+                creator_js = f"""() => {{
+                    {df}
+                    var btn = deepFind(document, function(e) {{
+                        if (e.tagName !== 'BUTTON') return false;
+                        var aria = (e.getAttribute && e.getAttribute('aria-label') || '').toLowerCase();
+                        return aria.includes('creator+') || aria.includes('authoring tools');
+                    }});
+                    if (!btn) return false;
+                    btn.click(); return true;
+                }}"""
+                creator_found = False
+                for _ in range(3):
+                    creator_found = await self._eval_in_any_frame(tab, creator_js)
+                    if creator_found:
+                        break
+                    await tab.wait_for_timeout(1000)
+
+                if not creator_found:
+                    self.log("  Toolbar chomped — clicking More Actions…", "dim")
+                    chomper_js = f"""() => {{
+                        {df}
+                        var chomper = deepFind(document, function(e) {{
+                            if ((e.tagName || '').toUpperCase() !== 'D2L-HTMLEDITOR-BUTTON-TOGGLE') return false;
+                            return ((e.getAttribute && e.getAttribute('class')) || '').includes('chomper');
+                        }});
+                        if (!chomper) return false;
+                        var inner = chomper.shadowRoot && chomper.shadowRoot.querySelector('button');
+                        if (inner) {{ inner.click(); return true; }}
+                        chomper.click(); return true;
+                    }}"""
+                    await self._eval_in_any_frame(tab, chomper_js)
+                    await tab.wait_for_timeout(700)
+                    for attempt in range(8):
+                        creator_found = await self._eval_in_any_frame(tab, creator_js)
+                        if creator_found:
+                            break
+                        self.log(f"  … waiting for toolbar (attempt {attempt + 1}/8)…", "dim")
+                        await tab.wait_for_timeout(1000)
+
+                if not creator_found:
+                    self.log("  ✗ Creator+ Authoring Tools button not found", "error")
+                    await self._diagnose(tab, ["creator", "authoring", "toolbar", "htmleditor"])
+                    return False
+                await tab.wait_for_timeout(1000)
+
+                found = await self._eval_in_any_frame(tab, f"""() => {{
+                    {df}
+                    var item = deepFind(document, function(e) {{
+                        return e.tagName && e.tagName.toUpperCase() === 'D2L-HTMLEDITOR-MENU-ITEM'
+                            && e.getAttribute && e.getAttribute('cmd') === 'h5p';
+                    }});
+                    if (!item) return false;
+                    var inner = item.shadowRoot ? item.shadowRoot.querySelector('button') : null;
+                    if (inner) {{ inner.click(); return true; }}
+                    item.click();
+                    return true;
+                }}""")
+
+                if not found:
+                    self.log("  ✗ Interactives (h5p) menu item not found", "error")
+                    await self._diagnose(tab, ["h5p", "interactive", "creator", "menu-item"])
+                    return False
+
+            else:
+                # Page editor: use Insert Stuff button (cmd="d2l-isf") — always visible, not chomped.
+                self.log("  → Clicking Insert Stuff toolbar button…", "dim")
+                isf_js = f"""() => {{
+                    {df}
+                    var btn = deepFind(document, function(e) {{
+                        if ((e.tagName || '').toUpperCase() !== 'D2L-HTMLEDITOR-BUTTON') return false;
+                        return e.getAttribute && e.getAttribute('cmd') === 'd2l-isf';
+                    }});
+                    if (!btn) return false;
+                    var inner = btn.shadowRoot && btn.shadowRoot.querySelector('button');
+                    if (inner) {{ inner.click(); return true; }}
+                    btn.click(); return true;
+                }}"""
+                isf_found = False
+                for attempt in range(6):
+                    isf_found = await self._eval_in_any_frame(tab, isf_js)
+                    if isf_found:
+                        break
+                    self.log(f"  … waiting for Insert Stuff button (attempt {attempt + 1}/6)…", "dim")
+                    await tab.wait_for_timeout(1000)
+
+                if not isf_found:
+                    self.log("  ✗ Insert Stuff button not found", "error")
+                    await self._diagnose(tab, ["insert stuff", "isf", "d2l-isf", "toolbar"])
+                    return False
+
+                self.log("  ✓ Insert Stuff dialog opened — looking for H5P provider…", "dim")
+                await tab.wait_for_timeout(2000)
+
+                # The Insert Stuff dialog lists providers; find and click the H5P one.
+                h5p_provider_found = False
+                for attempt in range(5):
+                    try:
+                        # H5P usually appears as a link or list item in the dialog
+                        isf_frame = tab.frame_locator('iframe[class*="insert"], iframe[title*="Insert"], iframe[src*="isf"], d2l-dialog iframe').first
+                        h5p_link = isf_frame.locator('a, li, button').filter(has_text="H5P").first
+                        await h5p_link.click(timeout=3000)
+                        h5p_provider_found = True
+                        self.log("  ✓ H5P provider selected", "dim")
+                        break
+                    except Exception:
+                        pass
+                    await tab.wait_for_timeout(1000)
+
+                if not h5p_provider_found:
+                    self.log("  ✗ H5P provider not found in Insert Stuff dialog", "error")
+                    await self._diagnose(tab, ["h5p", "insert", "provider", "lti"])
+                    return False
+
+            await tab.wait_for_timeout(2000)
+            return True
+        except Exception as e:
+            self.log(f"  ✗ _h5p_open_interactives error: {e}", "error")
+            return False
+
+    async def _find_h5p_list_frame(self, tab):
+        """Return the first live h5p.com frame that has the content list loaded."""
+        for _ in range(15):
+            for frame in tab.frames:
+                if "h5p.com" not in frame.url:
+                    continue
+                try:
+                    has_list = await frame.evaluate(
+                        "() => document.querySelectorAll('tr.content-item, a.create-content, a[href*=\"/content/create\"]').length > 0"
+                    )
+                    if has_list:
+                        return frame
+                except Exception:
+                    pass
+            await tab.wait_for_timeout(1000)
+        return None
+
+    async def _h5p_upload_one(self, tab, h5p_frame, h5p_file, item_name) -> bool:
+        """Upload one .h5p to H5P cloud via an already-open content list frame. Returns to list after."""
+        try:
+            # Check if already exists in cloud content list — skip if found.
+            # Re-find the live frame if the stored reference has a stale context.
+            name_key = item_name[:25].lower()
+            try:
+                already_exists = await h5p_frame.evaluate(f"""() => {{
+                    var key = {name_key!r};
+                    var rows = document.querySelectorAll('tr.content-item');
+                    for (var i = 0; i < rows.length; i++) {{
+                        var el = rows[i].querySelector('a.fable-title, .content-title, td a');
+                        var title = el ? el.textContent.trim().toLowerCase() : '';
+                        if (title.includes(key)) return true;
+                    }}
+                    return false;
+                }}""")
+            except Exception as frame_err:
+                if "context was destroyed" in str(frame_err) or "Target closed" in str(frame_err):
+                    h5p_frame = await self._find_h5p_list_frame(tab)
+                    if not h5p_frame:
+                        self.log(f"  ✗ H5P content list frame lost — cannot upload {item_name}", "error")
+                        return False
+                    already_exists = await h5p_frame.evaluate(f"""() => {{
+                        var key = {name_key!r};
+                        var rows = document.querySelectorAll('tr.content-item');
+                        for (var i = 0; i < rows.length; i++) {{
+                            var el = rows[i].querySelector('a.fable-title, .content-title, td a');
+                            var title = el ? el.textContent.trim().toLowerCase() : '';
+                            if (title.includes(key)) return true;
+                        }}
+                        return false;
+                    }}""")
+                else:
+                    raise
+            if already_exists:
+                self.log(f"  ✓ Already in H5P cloud: {item_name} — skipping upload", "dim")
+                return True
+
+            await h5p_frame.locator('a.create-content, a[href*="/content/create"]').first.click(timeout=10000)
+            await tab.wait_for_timeout(2500)
+
+            editor_frame = None
+            for _ in range(10):
+                for frame in tab.frames:
+                    if "h5p.com" in frame.url and "content" in frame.url:
+                        editor_frame = frame
+                        break
+                if editor_frame:
+                    break
+                await tab.wait_for_timeout(1000)
+            if not editor_frame:
+                self.log("  ✗ H5P editor frame lost after Add Content", "error")
+                return False
+
+            hub_frame = None
+            for _ in range(10):
+                for frame in tab.frames:
+                    try:
+                        if await frame.evaluate("() => !!document.querySelector('a#h5p-hub-upload')"):
+                            hub_frame = frame
+                            break
+                    except Exception:
+                        pass
+                if hub_frame:
+                    break
+                await tab.wait_for_timeout(1000)
+            if not hub_frame:
+                self.log("  ✗ H5P hub frame not found", "error")
+                return False
+
+            await hub_frame.evaluate("""() => {
+                var el = document.querySelector('a#h5p-hub-upload');
+                if (el) el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+            }""")
+            await tab.wait_for_timeout(800)
+
+            try:
+                async with tab.expect_file_chooser(timeout=5000) as fc_info:
+                    await hub_frame.locator('button.h5p-hub-upload-button').first.click()
+                fc = await fc_info.value
+                await fc.set_files(str(h5p_file))
+            except Exception:
+                await hub_frame.locator('input[type="file"][accept=".h5p"]').first.set_input_files(str(h5p_file))
+
+            await tab.wait_for_timeout(1000)
+            self.log("  → Clicking Use…", "dim")
+            await hub_frame.locator('button.h5p-hub-use-button').first.click(timeout=10000)
+            self.log("  → Waiting for H5P editor to load after Use…", "dim")
+            await tab.wait_for_timeout(6000)
+
+            # Check for validation error (missing H5P library on the cloud platform)
+            for frame in tab.frames:
+                try:
+                    err = await frame.evaluate("""() => {
+                        var el = document.querySelector('.h5p-error-report, .error-report, [class*="error"]');
+                        return el ? el.textContent.trim() : null;
+                    }""")
+                    if err and ("validat" in err.lower() or "missing" in err.lower() or "library" in err.lower()):
+                        # Parse the missing library name from the error if possible
+                        lib_match = re.search(r'missing main library\s+([\w\.\s]+\d+\.\d+)', err, re.IGNORECASE)
+                        missing_lib = lib_match.group(1).strip() if lib_match else "unknown library"
+                        self.log(f"  ✗ H5P upload failed — missing content type: {missing_lib}", "error")
+                        self.log(f"    Fix: Brightspace Admin → H5P → Content Type Hub → install '{missing_lib}' → re-run Phase A", "dim")
+                        # Try to navigate back to content list
+                        try:
+                            await frame.go_back(timeout=5000)
+                        except Exception:
+                            pass
+                        await tab.wait_for_timeout(2000)
+                        return False
+                except Exception:
+                    pass
+
+            dismissed = await self._auto_dismiss(tab, ["skip", "proceed without"])
+            if dismissed:
+                self.log("  → Dismissed skip/grade dialog", "dim")
+                await tab.wait_for_timeout(500)
+
+            # Set content title — search all frames for the input
+            self.log("  → Setting title…", "dim")
+            title_set = False
+            self.log(f"    frames available: {[f.url[:60] for f in tab.frames]}", "dim")
+            for frame in tab.frames:
+                try:
+                    count = await frame.locator('input.h5peditor-text[maxlength="255"]').count()
+                    self.log(f"    frame {frame.url[:50]!r}: found {count} title input(s)", "dim")
+                    if count > 0:
+                        inp = frame.locator('input.h5peditor-text[maxlength="255"]').first
+                        current = await inp.input_value()
+                        self.log(f"    current title value: {current!r}", "dim")
+                        await inp.click(click_count=3)
+                        await inp.fill(item_name)
+                        after = await inp.input_value()
+                        self.log(f"    title set to: {after!r}", "dim")
+                        title_set = True
+                        break
+                except Exception as te:
+                    self.log(f"    frame error: {te}", "dim")
+            if not title_set:
+                self.log("  ⚠ Title input not found — title not set", "warning")
+
+            self.log("  → Clicking Save…", "dim")
+            await editor_frame.locator('label.save-action').first.click(timeout=10000)
+            await tab.wait_for_timeout(2000)
+
+            await editor_frame.locator('a.btn-white.btn-folder').first.click(timeout=10000)
+            # Wait for content list to fully reload before returning — prevents
+            # "Execution context was destroyed" on the next upload's evaluate call
+            try:
+                await editor_frame.wait_for_url("**/content**", timeout=8000)
+                await editor_frame.locator('tr.content-item').first.wait_for(timeout=8000)
+            except Exception:
+                await tab.wait_for_timeout(3000)
+
+            self.log(f"  ✓ Uploaded: {item_name}", "success")
+            return True
+        except Exception as e:
+            self.log(f"  ✗ Upload failed for {item_name}: {e}", "error")
+            return False
+
+    async def _h5p_insert_from_list(self, tab, h5p_frame, item_name) -> bool:
+        """Find item by name in H5P content list and insert into BS editor."""
+        df = self._DEEP_FIND_JS
+        try:
+            self.log(f"  → Finding '{item_name}' in content list…", "dim")
+            name_key = item_name[:25].lower()
+            clicked = False
+            for _ in range(5):
+                try:
+                    result = await h5p_frame.evaluate(f"""() => {{
+                        var key = {name_key!r};
+                        var rows = document.querySelectorAll('tr.content-item');
+                        for (var i = 0; i < rows.length; i++) {{
+                            var el = rows[i].querySelector('a.fable-title, .content-title, td a');
+                            var title = el ? el.textContent.trim().toLowerCase() : '';
+                            if (title.includes(key)) {{
+                                var btn = rows[i].querySelector('button.lti-inserter, button');
+                                if (btn) {{ btn.click(); return title; }}
+                            }}
+                        }}
+                        var all = document.querySelectorAll('button.lti-inserter');
+                        if (all.length === 1) {{ all[0].click(); return 'only-one'; }}
+                        return null;
+                    }}""")
+                    if result:
+                        self.log(f"  ✓ Clicked Insert for: {result}", "dim")
+                        clicked = True
+                        break
+                except Exception:
+                    pass
+                await tab.wait_for_timeout(1000)
+
+            if not clicked:
+                self.log(f"  ✗ '{item_name}' not found in H5P content list", "error")
+                return False
+
+            # Click Insert in dialog footer (d2l-button[data-dialog-action="insert"])
+            await tab.wait_for_timeout(1500)
+            self.log("  → Clicking Insert in dialog footer…", "dim")
+            for _ in range(5):
+                try:
+                    ok = await tab.evaluate(f"""async () => {{
+                        {df}
+                        var btn = deepFind(document, function(e) {{
+                            if ((e.tagName || '').toUpperCase() !== 'D2L-BUTTON') return false;
+                            return e.getAttribute('data-dialog-action') === 'insert';
+                        }});
+                        if (!btn) return false;
+                        var inner = btn.shadowRoot && btn.shadowRoot.querySelector('button');
+                        (inner || btn).click();
+                        return true;
+                    }}""")
+                    if ok:
+                        break
+                except Exception:
+                    pass
+                await tab.wait_for_timeout(1000)
+
+            # "Add Grade Item" dialog appears after Insert — dismiss it
+            await tab.wait_for_timeout(1500)
+            self.log("  → Checking for 'Add Grade Item' dialog…", "dim")
+            dismissed = await self._auto_dismiss(tab, ["proceed without grade item", "proceed without", "skip"])
+            if dismissed:
+                self.log("  → Dismissed 'Add Grade Item' dialog", "dim")
+                await tab.wait_for_timeout(1000)
+                # After dismissing, a plain <button class="d2l-button" primary>Insert</button>
+                # appears in the Interactives dialog — search all frames for it
+                self.log("  → Clicking Insert again after grade item dismiss…", "dim")
+                second_insert_clicked = False
+                for attempt in range(8):
+                    for frame in tab.frames:
+                        try:
+                            clicked = await frame.evaluate(f"""() => {{
+                                {df}
+                                // plain <button class="d2l-button"> with text Insert
+                                var btns = document.querySelectorAll('button.d2l-button, button[primary]');
+                                for (var i = 0; i < btns.length; i++) {{
+                                    if ((btns[i].textContent || '').trim().toLowerCase() === 'insert') {{
+                                        btns[i].click();
+                                        return true;
+                                    }}
+                                }}
+                                // also try deepFind for d2l-button custom element with data-dialog-action
+                                var btn = deepFind(document, function(e) {{
+                                    if ((e.tagName || '').toUpperCase() !== 'D2L-BUTTON') return false;
+                                    return e.getAttribute('data-dialog-action') === 'insert';
+                                }});
+                                if (btn) {{
+                                    var inner = btn.shadowRoot && btn.shadowRoot.querySelector('button');
+                                    (inner || btn).click();
+                                    return true;
+                                }}
+                                return false;
+                            }}""")
+                            if clicked:
+                                self.log(f"  ✓ Second Insert clicked (frame: {frame.url[:50]})", "dim")
+                                second_insert_clicked = True
+                                break
+                        except Exception:
+                            pass
+                    if second_insert_clicked:
+                        break
+                    await tab.wait_for_timeout(800)
+                if not second_insert_clicked:
+                    self.log("  ⚠ Second Insert button not found", "warning")
+            else:
+                self.log("  → No grade item dialog found (ok)", "dim")
+
+            return True
+        except Exception as e:
+            self.log(f"  ✗ _h5p_insert_from_list error: {e}", "error")
+            return False
+
+    async def _h5p_upload_to_cloud(self, tab, h5p_file) -> tuple:
+        df = self._DEEP_FIND_JS
+        try:
+            # "Import Existing Interactive" only appears in the quiz Creator+ flow — skip if absent.
+            self.log("  → Checking for 'Import Existing Interactive' button…", "dim")
+            await tab.evaluate(f"""async () => {{
+                {df}
+                var btn = deepFind(document, function(e) {{
+                    var tag = e.tagName && e.tagName.toUpperCase();
+                    if (tag !== 'D2L-BUTTON' && tag !== 'BUTTON') return false;
+                    return (e.textContent || '').trim() === 'Import Existing Interactive';
+                }});
+                if (btn) btn.click();
+            }}""")
+            await tab.wait_for_timeout(1500)
+
+            # Find the H5P frame by URL — the frame selector differs between Creator+ and Insert Stuff paths.
+            self.log("  → Waiting for H5P LTI frame…", "dim")
+            h5p_frame = None
+            for _ in range(10):
+                for frame in tab.frames:
+                    if "h5p.com" in frame.url:
+                        h5p_frame = frame
+                        break
+                if h5p_frame:
+                    break
+                await tab.wait_for_timeout(1000)
+
+            if not h5p_frame:
+                self.log("  ✗ H5P LTI frame not found (no h5p.com frame appeared)", "error")
+                return (None, None)
+
+            self.log(f"  ✓ H5P frame found: {h5p_frame.url[:60]}…", "dim")
+            self.log("  → Clicking 'Add Content'…", "dim")
+            await h5p_frame.locator('a.create-content, a[href*="/content/create"]').first.click(timeout=10000)
+
+            # Frame navigates to /content/create — re-find it by URL.
+            self.log("  → Waiting for H5P editor to load…", "dim")
+            await tab.wait_for_timeout(2500)
+            h5p_frame = None
+            for _ in range(10):
+                for frame in tab.frames:
+                    if "h5p.com" in frame.url and "content" in frame.url:
+                        h5p_frame = frame
+                        break
+                if h5p_frame:
+                    break
+                await tab.wait_for_timeout(1000)
+            if not h5p_frame:
+                self.log("  ✗ H5P editor frame not found after Add Content", "error")
+                return (None, None)
+            self.log(f"  ✓ H5P editor frame: {h5p_frame.url[:60]}…", "dim")
+
+            # The H5P hub editor renders in a child iframe of the H5P frame.
+            # Scan ALL tab.frames to find the one that actually contains the Upload tab.
+            self.log("  → Finding H5P hub editor frame (Upload tab)…", "dim")
+            hub_frame = None
+            for _ in range(10):
+                for frame in tab.frames:
+                    try:
+                        has_it = await frame.evaluate("() => !!document.querySelector('a#h5p-hub-upload')")
+                        if has_it:
+                            hub_frame = frame
+                            break
+                    except Exception:
+                        pass
+                if hub_frame:
+                    break
+                await tab.wait_for_timeout(1000)
+            if not hub_frame:
+                self.log("  ✗ H5P hub editor frame not found", "error")
+                return (None, None)
+            self.log(f"  ✓ Hub frame found: {hub_frame.url[:60]}…", "dim")
+
+            self.log("  → Clicking 'Upload' tab…", "dim")
+            await hub_frame.evaluate("""() => {
+                var el = document.querySelector('a#h5p-hub-upload');
+                if (el) el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+            }""")
+            await tab.wait_for_timeout(800)
+
+            self.log("  → Selecting file to upload…", "dim")
+            # The upload panel has a styled button over a hidden file input.
+            # Try triggering the file chooser via the visible button first.
+            try:
+                async with tab.expect_file_chooser(timeout=5000) as fc_info:
+                    await hub_frame.locator('button.h5p-hub-upload-button').first.click()
+                fc = await fc_info.value
+                await fc.set_files(str(h5p_file))
+            except Exception:
+                # Fallback: set file directly on hidden input
+                await hub_frame.locator('input[type="file"][accept=".h5p"]').first.set_input_files(str(h5p_file))
+
+            # After file is chosen, the "Use" button activates — click it.
+            self.log("  → Clicking 'Use'…", "dim")
+            await tab.wait_for_timeout(1000)
+            await hub_frame.locator('button.h5p-hub-use-button').first.click(timeout=10000)
+
+            self.log("  → Uploading (waiting for H5P editor)…", "dim")
+            await tab.wait_for_timeout(6000)
+
+            self.log("  → Saving…", "dim")
+            # "Save and Insert" closes the Insert Stuff dialog and embeds H5P into the BS editor.
+            # After it's clicked the dialog frame detaches — do NOT try to interact with it further.
+            saved_and_inserted = False
+            try:
+                await h5p_frame.locator('button.lti-inserter.visible-for-many').first.click(timeout=5000)
+                self.log("  ✓ Clicked 'Save and Insert' — H5P embedded in page editor", "dim")
+                saved_and_inserted = True
+            except Exception:
+                pass
+
+            if not saved_and_inserted:
+                # Plain Save: stays in H5P.com, then we navigate back to content list.
+                try:
+                    await h5p_frame.locator('label.save-action').first.click(timeout=10000)
+                    self.log("  ✓ Clicked 'Save'", "dim")
+                except Exception as e:
+                    self.log(f"  ✗ Save failed: {e}", "error")
+                    return (None, None)
+                await tab.wait_for_timeout(3000)
+
+                content_id = None
+                for frame in tab.frames:
+                    if "h5p.com" in frame.url and "/content/" in frame.url:
+                        m = re.search(r'/content/(\d+)', frame.url)
+                        if m:
+                            content_id = m.group(1)
+                            break
+                if not content_id:
+                    try:
+                        edit_href = await h5p_frame.locator('a.edit-link[href*="/content/"]').first.get_attribute("href", timeout=3000)
+                        if edit_href:
+                            m = re.search(r'/content/(\d+)', edit_href)
+                            if m:
+                                content_id = m.group(1)
+                    except Exception:
+                        pass
+
+                self.log("  → Returning to H5P library…", "dim")
+                await h5p_frame.locator('a.btn-white.btn-folder').first.click()
+                await tab.wait_for_timeout(1500)
+
+                h5p_type = ""
+                try:
+                    if content_id:
+                        type_el = h5p_frame.locator(f'tr.content-item:has(button[onclick*="{content_id}"]) span.item-content-type')
+                        h5p_type = (await type_el.text_content(timeout=5000) or "").strip()
+                    else:
+                        type_el = h5p_frame.locator('tr.content-item span.item-content-type').first
+                        h5p_type = (await type_el.text_content(timeout=5000) or "").strip()
+                except Exception:
+                    h5p_type = ""
+
+                return (content_id, h5p_type)
+
+            # "Save and Insert" path: dialog is closed, H5P is now in the BS editor.
+            # Return content_id=None so caller knows to skip _h5p_insert_existing.
+            await tab.wait_for_timeout(2000)
+            return (None, "Page")
+
+        except Exception as e:
+            self.log(f"  ✗ _h5p_upload_to_cloud error: {e}", "error")
+            return (None, None)
+
+    async def _h5p_insert_existing(self, tab, content_id) -> bool:
+        df = self._DEEP_FIND_JS
+        try:
+            lti_frame = tab.frame_locator('[data-test-id="lti-launch-frame"]')
+            if content_id:
+                await lti_frame.locator(f'button[onclick*="{content_id}"]').first.click(timeout=5000)
+            else:
+                await lti_frame.locator('td.moves-to-bulk-menu button:has-text("Insert")').first.click(timeout=5000)
+            await tab.wait_for_timeout(1500)
+
+            await tab.evaluate(f"""async () => {{
+                {df}
+                var btn = deepFind(document, function(e) {{
+                    return e.tagName && e.tagName.toUpperCase() === 'D2L-BUTTON'
+                        && e.getAttribute && e.getAttribute('data-dialog-action') === 'insert';
+                }});
+                if (!btn) return;
+                var inner = btn.shadowRoot ? btn.shadowRoot.querySelector('button') : null;
+                if (inner) inner.click();
+                else btn.click();
+            }}""")
+            await tab.wait_for_timeout(1500)
+            return True
+        except Exception as e:
+            self.log(f"  ✗ _h5p_insert_existing error: {e}", "error")
+            return False
+
+    async def _h5p_finalize(self, tab, title: str, is_quiz: bool) -> bool:
+        df = self._DEEP_FIND_JS
+        try:
+            # Fill title — prefer exact maxlength match, fall back to any d2l-input
+            self.log(f"  → Setting title: {title!r}…", "dim")
+            title_filled = False
+            for sel in [
+                'input.d2l-input[maxlength="256"]' if is_quiz else 'input.d2l-input[maxlength="150"]',
+                'input.d2l-input[maxlength="256"]',
+                'input.d2l-input[maxlength="150"]',
+                'input.d2l-input',
+            ]:
+                try:
+                    loc = tab.locator(sel).first
+                    if await loc.count() > 0:
+                        await loc.click(click_count=3)
+                        await loc.fill(title)
+                        title_filled = True
+                        break
+                except Exception:
+                    pass
+            if not title_filled:
+                self.log("  ⚠ Title input not found", "warning")
+            await tab.wait_for_timeout(500)
+
+            # Save and Close — use d2l-button.d2l-desktop (documented selector)
+            self.log("  → Clicking Save and Close…", "dim")
+            saved = await tab.evaluate(f"""async () => {{
+                {df}
+                var btn = deepFind(document, function(e) {{
+                    return (e.tagName || '').toUpperCase() === 'D2L-BUTTON'
+                        && e.classList && e.classList.contains('d2l-desktop');
+                }});
+                if (!btn) return false;
+                var inner = btn.shadowRoot && btn.shadowRoot.querySelector('button');
+                (inner || btn).click();
+                return true;
+            }}""")
+            if not saved:
+                self.log("  ⚠ d2l-button.d2l-desktop not found — Save and Close may have failed", "warning")
+
+            # After Save and Close: "Add Grade Item" dialog → click "Proceed Without Grade Item"
+            await tab.wait_for_timeout(2000)
+            dismissed = await self._auto_dismiss(tab, ["proceed without grade item", "proceed without"])
+            if dismissed:
+                self.log("  → Auto-dismissed 'Add Grade Item' dialog", "dim")
+            await tab.wait_for_timeout(2000)
+            return True
+        except Exception as e:
+            self.log(f"  ✗ _h5p_finalize error: {e}", "error")
+            return False
+
+    async def _open_editor_and_get_h5p_frame(self, tab, bs_base, course_id, module_id):
+        """Navigate to a module, Create New Page, open Insert Stuff → H5P. Returns h5p_frame or None."""
+        df = self._DEEP_FIND_JS
+        await tab.goto(
+            f"{bs_base}/d2l/le/lessons/{course_id}/units/{module_id}",
+            wait_until="domcontentloaded", timeout=20000,
+        )
+        await tab.wait_for_timeout(2000)
+
+        create_ok = await self._eval_in_any_frame(tab, f"""() => {{
+            {df}
+            var btn = deepFind(document, function(e) {{
+                var tag = (e.tagName || '').toUpperCase();
+                if (tag !== 'D2L-BUTTON') return false;
+                return (e.classList && e.classList.contains('create-new-btn'))
+                    || ((e.getAttribute && e.getAttribute('aria-label') || '').includes('Create New'));
+            }});
+            if (!btn) return false;
+            var inner = btn.shadowRoot ? btn.shadowRoot.querySelector('button') : null;
+            (inner || btn).click(); return true;
+        }}""")
+        if not create_ok:
+            self.log("  ✗ Create New button not found", "error")
+            return None
+        await tab.wait_for_timeout(2000)
+
+        tile_ok = await self._eval_in_any_frame(tab, f"""() => {{
+            {df}
+            var el = deepFind(document, function(e) {{
+                return (e.tagName || '').toUpperCase() === 'A'
+                    && e.classList && e.classList.contains('add-material-tile')
+                    && (e.getAttribute('href') || '').includes('loadActivity/file/');
+            }});
+            if (!el) return false;
+            el.click(); return true;
+        }}""")
+        if not tile_ok:
+            self.log("  ✗ Page tile not found", "error")
+            return None
+
+        try:
+            await tab.wait_for_load_state("domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+        await tab.wait_for_timeout(1500)
+
+        dismissed = await self._auto_dismiss(tab, ["proceed without grade item", "proceed without"])
+        if dismissed:
+            self.log("  → Auto-dismissed 'Proceed Without Grade Item'", "dim")
+            await tab.wait_for_timeout(800)
+
+        ok = await self._h5p_open_interactives(tab, for_quiz=False)
+        if not ok:
+            self.log("  ✗ Could not open Insert Stuff / H5P", "error")
+            return None
+
+        h5p_frame = None
+        for _ in range(10):
+            for frame in tab.frames:
+                if "h5p.com" in frame.url:
+                    h5p_frame = frame
+                    break
+            if h5p_frame:
+                break
+            await tab.wait_for_timeout(1000)
+        return h5p_frame
+
+    async def _embed_h5p_in_brightspace(self, context, page, moodle_items, bs_flat, bs_base, course_id) -> None:
+        from urllib.parse import urlparse
+
+        h5p_dir = Path(__file__).parent.parent / "downloads" / "h5p"
+        h5p_files = list(h5p_dir.glob("*.h5p"))
+        if not h5p_files:
+            self.log("  ⚠ No .h5p files found in downloads/h5p/ — skipping embed", "warning")
+            return
+
+        section_map: dict = {}
+        current_section = ""
+        for item in moodle_items:
+            if item["type"] == "SECTION":
+                current_section = item["name"]
+            elif item["type"] == "EXTERNAL" and ("hvp" in item.get("hint", "") or "h5p" in item.get("hint", "")):
+                safe = re.sub(r'[^\w\s\-]', '', item["name"]).strip()[:80]
+                section_map[safe] = current_section
+
+        bs_mod_map: dict = {}
+        bs_mod_orig: dict = {}
+        for item in bs_flat:
+            if item["kind"] == "MODULE" and item.get("id"):
+                nk = _norm(item["title"])
+                bs_mod_map[nk] = item["id"]
+                bs_mod_orig[nk] = item["title"]
+
+        assignments = []
+        for f in h5p_files:
+            name = f.stem
+            moodle_section = section_map.get(name, "")
+            bs_module_title = None
+            bs_module_id = None
+            if moodle_section:
+                close = difflib.get_close_matches(_norm(moodle_section), list(bs_mod_map.keys()), n=1, cutoff=0.55)
+                if close:
+                    bs_module_title = bs_mod_orig[close[0]]
+                    bs_module_id = bs_mod_map[close[0]]
+            assignments.append({
+                "file": f, "name": name,
+                "moodle_section": moodle_section,
+                "bs_module_title": bs_module_title,
+                "bs_module_id": bs_module_id,
+            })
+
+        mod_order = {item["id"]: i for i, item in enumerate(bs_flat) if item["kind"] == "MODULE" and item.get("id")}
+        assignments.sort(key=lambda a: mod_order.get(a["bs_module_id"], 9999))
+
+        matched = [a for a in assignments if a["bs_module_id"]]
+        self.log("", "dim")
+        self.log(f"🎮 H5P Phase 2: {len(assignments)} files  ({len(matched)} matched to BS modules)", "step")
+        for a in assignments:
+            self.log(f"   {a['name']}  →  {a['bs_module_title'] or '⚠ no match'}", "info")
+
+        # Only upload files that actually belong to this Moodle course.
+        # Files with no moodle_section are leftovers from other courses in the downloads folder.
+        this_course = [a for a in assignments if a["moodle_section"]]
+        other_course = [a for a in assignments if not a["moodle_section"]]
+        if other_course:
+            self.log(f"  ↷ Skipping {len(other_course)} file(s) not found in this Moodle course:", "dim")
+            for a in other_course:
+                self.log(f"      {a['name']}", "dim")
+
+        phase_b_only = getattr(self, "h5p_phase_b_only", False)
+
+        if not phase_b_only:
+            if not await self._confirm(f"Found {len(this_course)} H5P file(s) for this course. Start Phase A (upload to cloud)?"):
+                return
+
+        # ── Phase A: Upload this course's files to H5P cloud ─────────────────
+        if phase_b_only:
+            self.log("⏭ Phase A skipped — going straight to Phase B", "info")
+        else:
+            self.log("", "dim")
+            self.log("Phase A — uploading all H5P files to cloud…", "step")
+
+        if not phase_b_only:
+            first = next((a for a in matched), None)
+            if not first:
+                self.log("  ✗ No matched modules — cannot open editor", "error")
+                return
+
+            upload_tab = await context.new_page()
+            try:
+                h5p_frame = await self._open_editor_and_get_h5p_frame(
+                    upload_tab, bs_base, course_id, first["bs_module_id"]
+                )
+                if not h5p_frame:
+                    self.log("  ✗ Could not open H5P content list for upload phase", "error")
+                    return
+
+                # Bulk-scan the entire content list once — no per-item navigation needed.
+                cloud_titles = []
+                try:
+                    cloud_titles = await h5p_frame.evaluate("""() => {
+                        var rows = document.querySelectorAll('tr.content-item');
+                        var titles = [];
+                        for (var i = 0; i < rows.length; i++) {
+                            var el = rows[i].querySelector('a.fable-title, .content-title, td a');
+                            if (el) titles.push(el.textContent.trim().toLowerCase());
+                        }
+                        return titles;
+                    }""")
+                except Exception:
+                    pass  # frame may not be ready yet; _h5p_upload_one will handle it
+
+                def _in_cloud(name):
+                    key = name[:25].lower()
+                    return any(key in t for t in cloud_titles)
+
+                to_upload = []
+                for item in this_course:
+                    if _in_cloud(item["name"]):
+                        self.log(f"  ✓ Already in H5P cloud: {item['name']} — skipping upload", "dim")
+                        item["upload_skipped"] = True
+                    else:
+                        to_upload.append(item)
+
+                if not to_upload:
+                    self.log("  ✓ All files already in cloud — nothing to upload", "success")
+                else:
+                    self.log(f"  → {len(to_upload)} file(s) need uploading", "info")
+                    for idx, item in enumerate(to_upload, 1):
+                        self.log(f"  [{idx}/{len(to_upload)}] Uploading: {item['name']}…", "info")
+                        ok = await self._h5p_upload_one(upload_tab, h5p_frame, item["file"], item["name"])
+                        if not ok:
+                            self.log(f"    ✗ Upload failed — will skip insert for this item", "warning")
+                            item["upload_failed"] = True
+            finally:
+                try:
+                    await upload_tab.close()
+                except Exception:
+                    pass
+
+            self.log("✓ Phase A complete — all files uploaded to H5P cloud", "success")
+
+        if not phase_b_only:
+            if not await self._confirm("Phase A done. Start Phase B (insert each into BS pages)?"):
+                return
+
+        # ── Phase B: Create a BS page per item and insert from cloud list ─────
+        self.log("", "dim")
+        self.log("Phase B — inserting H5P into Brightspace pages…", "step")
+        N = len(matched)
+        embedded_count = 0
+
+        for idx, item in enumerate(matched, 1):
+            if item.get("upload_failed"):
+                self.log(f"  [{idx}/{N}] Skipping {item['name']} (upload failed)", "warning")
+                continue
+
+            name = item["name"]
+            bs_module_title = item["bs_module_title"]
+            bs_module_id = item["bs_module_id"]
+            self.log(f"  [{idx}/{N}] {name}  →  {bs_module_title}", "info")
+
+            # Check live via API — stale bs_flat misses topics added in earlier iterations
+            already_in_bs = await self._verify_topic_in_module(
+                page, course_id, bs_module_id, name
+            )
+            if already_in_bs:
+                self.log(f"    ✓ Already in Brightspace — skipping", "dim")
+                self._summary["h5p_inserted"].append((name, bs_module_title))
+                embedded_count += 1
+                continue
+
+            tab = await context.new_page()
+            try:
+                h5p_frame = await self._open_editor_and_get_h5p_frame(
+                    tab, bs_base, course_id, bs_module_id
+                )
+                if not h5p_frame:
+                    self.log(f"    ✗ Could not open H5P content list — skipping", "error")
+                    self._summary["h5p_failed"].append((name, bs_module_title))
+                    continue
+
+                ok = await self._h5p_insert_from_list(tab, h5p_frame, name)
+                if not ok:
+                    self.log(f"    ✗ Insert failed — skipping", "error")
+                    self._summary["h5p_failed"].append((name, bs_module_title))
+                    continue
+
+                ok = await self._h5p_finalize(tab, name, is_quiz=False)
+                if not ok:
+                    self.log(f"    ⚠ Finalize had errors", "warning")
+
+                # Verify via API that the topic actually landed
+                confirmed = await self._verify_topic_in_module(
+                    page, course_id, bs_module_id, name
+                )
+                if confirmed:
+                    self.log(f"    ✓ Done + verified: {name} → {bs_module_title}", "success")
+                    self._summary["h5p_inserted"].append((name, bs_module_title))
+                else:
+                    self.log(f"    ⚠ Inserted but not confirmed in module via API", "warning")
+                    self._summary["h5p_failed"].append((name, bs_module_title))
+                embedded_count += 1
+
+            except Exception as e:
+                self.log(f"    ✗ Error on {name}: {e}", "error")
+                self._summary["h5p_failed"].append((name, bs_module_title))
+            finally:
+                try:
+                    await tab.close()
+                except Exception:
+                    pass
+
+        self.log("", "dim")
+        self.log(f"✅ H5P embed complete: {embedded_count}/{N} inserted", "success")
+
     async def _scan_moodle_labels_inline(self, tab, items: list) -> list:
         """
         Scan the current course page (already loaded) for pluginfile.php links
         and Kaltura iframes embedded inside label activity blocks.
+        Also detects Bootstrap accordion structure and stores raw body HTML.
         Labels render their content inline — they have no separate page to navigate to.
         """
         self.log("  Scanning label bodies on course page…", "dim")
         try:
             results = await tab.evaluate("""() => {
                 const found = [];
+
+                function linkType(href) {
+                    if (!href) return 'URL';
+                    if (href.includes('pluginfile.php') || href.includes('mod/resource/view.php')) return 'FILE';
+                    if (href.includes('mod/assign/view.php'))   return 'ASSIGN';
+                    if (href.includes('mod/quiz/view.php'))     return 'QUIZ';
+                    if (href.includes('mod/hvp/view.php') || href.includes('mod/h5pactivity/view.php')) return 'EXTERNAL';
+                    if (href.includes('mod/url/view.php'))      return 'URL';
+                    return 'URL';
+                }
+
                 document.querySelectorAll('li.section, li.section.main').forEach(section => {
                     const secEl   = section.querySelector('.sectionname, h3, h4');
                     const secName = secEl ? secEl.textContent.trim() : '';
+
                     section.querySelectorAll('li.activity.modtype_label').forEach(label => {
                         const nameEl    = label.querySelector('.instancename, .activityname a, a');
                         const labelName = nameEl ? nameEl.textContent.trim().replace(/\\s{2,}.*$/, '').trim() : '(label)';
@@ -803,9 +2873,39 @@ class ContentChecker:
                             '.contentafterlink, .description, .no-overflow, .labelcontent, .activitybody'
                         );
                         if (!body) return;
+
+                        // ── Accordion detection ──────────────────────────────
+                        const cards = body.querySelectorAll('.card');
+                        if (cards.length > 0) {
+                            const accordion_cards = [];
+                            cards.forEach(card => {
+                                const headerEl = card.querySelector('.card-header button, .card-header h5, .card-header');
+                                const title    = headerEl ? headerEl.textContent.trim().replace(/\\s+/g, ' ') : '(card)';
+                                const links    = [];
+                                card.querySelectorAll('a[href]').forEach(a => {
+                                    const href = a.href || '';
+                                    if (!href) return;
+                                    if (href.includes('readspeaker') || href.includes('docreader')) return;
+                                    const name = a.textContent.trim()
+                                              || a.getAttribute('title')
+                                              || a.getAttribute('aria-label');
+                                    if (!name) return; // icon-only / invisible links — skip
+                                    links.push({ name, href, type: linkType(href) });
+                                });
+                                accordion_cards.push({ title, links });
+                            });
+                            found.push({
+                                type: 'LABEL', name: '(accordion)',
+                                section: secName, parent_topic: labelName,
+                                accordion_cards,
+                                body_html: body.innerHTML,
+                            });
+                            return; // don't also scan this label for flat pluginfile links
+                        }
+
+                        // ── Flat label: scan for pluginfile.php links ────────
                         body.querySelectorAll('a[href*="pluginfile.php"]').forEach(a => {
                             const href = a.href || '';
-                            // skip ReadSpeaker proxy links (they wrap the real URL)
                             if (href.includes('readspeaker') || href.includes('docreader')) return;
                             const text = a.textContent.trim() || href.split('/').pop().split('?')[0];
                             if (href) found.push({
@@ -833,18 +2933,22 @@ class ContentChecker:
             self.log(f"  ⚠ Label inline scan failed: {e}", "warning")
             return []
 
-        # Deduplicate
+        # Deduplicate flat embedded items (accordion items are always unique)
         seen, dedup = set(), []
         for r in results:
+            if r.get("accordion_cards") is not None:
+                dedup.append(r)
+                continue
             key = r.get("href") or r.get("name")
             if key and key not in seen:
                 seen.add(key)
                 dedup.append(r)
 
+        files      = sum(1 for r in dedup if r["type"] == "FILE" and not r.get("accordion_cards"))
+        videos     = sum(1 for r in dedup if r["type"] == "VIDEO")
+        accordions = sum(1 for r in dedup if r.get("accordion_cards") is not None)
         if dedup:
-            files  = sum(1 for r in dedup if r["type"] == "FILE")
-            videos = sum(1 for r in dedup if r["type"] == "VIDEO")
-            self.log(f"  Labels: {files} embedded file(s), {videos} embedded video(s)", "dim")
+            self.log(f"  Labels: {files} embedded file(s), {videos} embedded video(s), {accordions} accordion(s)", "dim")
         return dedup
 
     async def _scan_moodle_page_bodies(self, tab, items: list) -> list:
@@ -988,6 +3092,15 @@ class ContentChecker:
                 current_sec = item["name"]
                 self.log("", "dim")
                 self.log(f"── {item['name']}", "step")
+            elif item["type"] == "LABEL" and item.get("accordion_cards") is not None:
+                parent = item.get("parent_topic", "")
+                label_line = f"   🏷  [accordion: {parent}]" if parent else "   🏷  [accordion]"
+                self.log(label_line, "dim")
+                for card in item["accordion_cards"]:
+                    self.log(f"       📂 {card['title']}", "info")
+                    for lnk in card.get("links", []):
+                        lnk_icon = _ICONS.get(lnk.get("type", "URL"), "🔗")
+                        self.log(f"          {lnk_icon} {lnk['name']}", "dim")
             elif item["type"] == "EXTERNAL":
                 detected = _detect_external_tool(item["name"], item.get("hint", ""))
                 tool_label, warning = detected if detected else ("External Tool", "External tool - will need to be re-linked")
@@ -1022,6 +3135,18 @@ class ContentChecker:
         counts = {"exact": 0, "fuzzy": 0, "found_in_search": 0, "found_in_content": 0, "missing": 0}
         external_items = []
 
+        # Build name→result lookup so accordion cards can show status inline
+        result_by_name = {_norm(r["name"]): r for r in results
+                          if r["type"] not in ("SECTION", "LABEL") and not r.get("embedded")}
+
+        # Names consumed inside an accordion — suppress from flat list to avoid duplicates
+        accordion_consumed: set = set()
+        for r in results:
+            if r.get("status") == "label_accordion":
+                for card in r.get("accordion_cards", []):
+                    for lnk in card.get("links", []):
+                        accordion_consumed.add(_norm(lnk["name"]))
+
         self.log("─" * 52, "dim")
         for r in results:
             icon = _ICONS.get(r["type"], "  ")
@@ -1037,6 +3162,40 @@ class ContentChecker:
                     self.log(f"❌ {icon} {r['name']}", "error")
                 continue
 
+            # ── Accordion label — nested card display ──────────────────────────
+            if r.get("status") == "label_accordion":
+                self.log(f"   🏷  [accordion]", "dim")
+                for card in r.get("accordion_cards", []):
+                    self.log(f"       📂 {card['title']}", "info")
+                    for lnk in card.get("links", []):
+                        matched_r  = result_by_name.get(_norm(lnk["name"]))
+                        lnk_icon   = _ICONS.get(matched_r["type"] if matched_r else lnk.get("type", "URL"), "🔗")
+                        if matched_r:
+                            st = matched_r["status"]
+                            if st == "exact":
+                                self.log(f"          ✅ {lnk_icon} {lnk['name']}", "success")
+                                counts["exact"] += 1
+                            elif st == "fuzzy":
+                                self.log(f"          ⚠️  {lnk_icon} {lnk['name']}", "warning")
+                                self.log(f"               → \"{matched_r['matched']}\" ({matched_r['score']}%)", "dim")
+                                counts["fuzzy"] += 1
+                            elif st == "found_in_search":
+                                self.log(f"          🔍 {lnk_icon} {lnk['name']}", "warning")
+                                counts["found_in_search"] += 1
+                            elif st == "found_in_content":
+                                self.log(f"          📑 {lnk_icon} {lnk['name']}", "warning")
+                                counts["found_in_content"] += 1
+                            elif st == "external":
+                                self.log(f"          🔌 {lnk_icon} {lnk['name']}", "warning")
+                                external_items.append(matched_r)
+                            else:
+                                self.log(f"          ❌ {lnk_icon} {lnk['name']}", "error")
+                                counts["missing"] += 1
+                        else:
+                            # External URL or unknown — show dimmed
+                            self.log(f"          🌐 {lnk['name']}", "dim")
+                continue
+
             if r["status"] == "external":
                 external_items.append(r)
                 self.log(f"   🔌 {r['name']}", "warning")
@@ -1044,6 +3203,10 @@ class ContentChecker:
 
             # Embedded items are shown in their own summary block at the bottom
             if r.get("embedded"):
+                continue
+
+            # Skip items already rendered inside an accordion card
+            if _norm(r["name"]) in accordion_consumed:
                 continue
 
             status = r["status"]
@@ -1118,6 +3281,95 @@ class ContentChecker:
                 extra    = f"  [entryId: {entry}]" if entry else "  ⚠ no entryId"
                 self.log(f"   🎥 {loc}  {r['name']}{extra}", "info")
 
+    # ── Final summary ─────────────────────────────────────────────────────────
+
+    def _log_final_summary(self, results: list) -> None:
+        s = self._summary
+        total_elapsed = time.time() - s["start_time"]
+
+        self.log("", "dim")
+        self.log("═" * 52, "dim")
+        self.log("📊 MIGRATION SUMMARY", "step")
+        self.log("═" * 52, "dim")
+
+        # ── Timing breakdown ──────────────────────────────────────────────────
+        self.log("", "dim")
+        self.log("⏱ Time per phase:", "info")
+        for phase, secs in s["timings"].items():
+            mins, sec = divmod(int(secs), 60)
+            label = f"{mins}m {sec:02d}s" if mins else f"{sec}s"
+            self.log(f"   {phase:<30} {label}", "dim")
+        mins, sec = divmod(int(total_elapsed), 60)
+        self.log(f"   {'TOTAL':<30} {mins}m {sec:02d}s", "info")
+
+        # ── Comparison results ────────────────────────────────────────────────
+        if results:
+            exact   = [r for r in results if r["status"] == "exact"]
+            fuzzy   = [r for r in results if r["status"] == "fuzzy"]
+            missing = [r for r in results if r["status"] == "missing"]
+            self.log("", "dim")
+            self.log("🔍 Comparison:", "info")
+            self.log(f"   ✅ {len(exact)} exact matches", "success")
+            if fuzzy:
+                self.log(f"   ⚠️  {len(fuzzy)} fuzzy matches (similar name, may need review):", "warning")
+                for r in fuzzy:
+                    matched_title = r["matched"][0] if isinstance(r["matched"], tuple) else r["matched"]
+                    score = r.get("score", "?")
+                    self.log(f"      • {r['name']}  →  \"{matched_title}\" ({score}%)", "dim")
+            if missing:
+                self.log(f"   ❌ {len(missing)} still missing after all steps:", "error")
+                for r in missing:
+                    self.log(f"      • [{r.get('section','?')}] {r['name']}", "dim")
+
+        # ── File uploads ──────────────────────────────────────────────────────
+        if s["files_uploaded"] or s["files_failed"]:
+            self.log("", "dim")
+            self.log("📄 File uploads:", "info")
+            for name, mod in s["files_uploaded"]:
+                self.log(f"   ✅ {name}  →  {mod}", "success")
+            for name, mod in s["files_failed"]:
+                self.log(f"   ❌ {name}  →  {mod}", "error")
+
+        # ── H5P embeds ────────────────────────────────────────────────────────
+        if s["h5p_inserted"] or s["h5p_failed"]:
+            self.log("", "dim")
+            self.log("🎮 H5P embeds:", "info")
+            for name, mod in s["h5p_inserted"]:
+                self.log(f"   ✅ {name}  →  {mod}", "success")
+            for name, mod in s["h5p_failed"]:
+                self.log(f"   ❌ {name}  →  {mod}", "error")
+
+        self.log("", "dim")
+        self.log("═" * 52, "dim")
+
+    async def _prompt_clear_downloads(self, course_id: str) -> None:
+        """Ask the user if they want to delete the downloads folder for this course."""
+        import shutil
+        downloads_dir = Path("downloads") / "files" / course_id
+        h5p_dir       = Path("downloads") / "h5p"
+
+        files_count = len(list(downloads_dir.iterdir())) if downloads_dir.exists() else 0
+        h5p_count   = len(list(h5p_dir.glob("*.h5p")))   if h5p_dir.exists()       else 0
+
+        if files_count == 0 and h5p_count == 0:
+            return
+
+        msg = (
+            f"Clear downloads to free up space?\n\n"
+            f"  • downloads/files/{course_id}/  ({files_count} file(s))\n"
+            f"  • downloads/h5p/                ({h5p_count} .h5p file(s))\n\n"
+            f"These are cached copies — re-running will re-download them from Moodle."
+        )
+        confirmed = await self._confirm(msg)
+        if confirmed:
+            if downloads_dir.exists():
+                shutil.rmtree(str(downloads_dir))
+            if h5p_dir.exists():
+                shutil.rmtree(str(h5p_dir))
+            self.log("🗑 Downloads cleared.", "success")
+        else:
+            self.log("↷ Downloads kept.", "dim")
+
     # ── Main flow ─────────────────────────────────────────────────────────────
 
     async def run(self) -> None:
@@ -1126,6 +3378,16 @@ class ContentChecker:
         bs_only     = bool(self.bs_url)     and not self.moodle_url
         moodle_only = bool(self.moodle_url) and not self.bs_url
         full        = bool(self.bs_url)     and bool(self.moodle_url)
+
+        # Initialise summary collector used by sub-functions throughout the run
+        self._summary = {
+            "start_time":     time.time(),
+            "timings":        {},
+            "files_uploaded": [],
+            "files_failed":   [],
+            "h5p_inserted":   [],
+            "h5p_failed":     [],
+        }
 
         p, browser, context, page = await launch_browser()
         try:
@@ -1150,7 +3412,9 @@ class ContentChecker:
                     return
 
                 self.log("─" * 52, "dim")
+                t0 = time.time()
                 bs_flat = await self._fetch_bs_toc(page, course_id)
+                self._summary["timings"]["Brightspace TOC fetch"] = time.time() - t0
                 if not bs_flat:
                     if self.on_complete:
                         self.on_complete()
@@ -1167,7 +3431,9 @@ class ContentChecker:
             # ── Moodle scrape ─────────────────────────────────────────────────
             if not bs_only:
                 self.log("─" * 52, "dim")
+                t0 = time.time()
                 moodle_items = await self._scrape_moodle(context)
+                self._summary["timings"]["Moodle scrape"] = time.time() - t0
                 if not moodle_items:
                     if self.on_complete:
                         self.on_complete()
@@ -1183,12 +3449,12 @@ class ContentChecker:
                         await asyncio.sleep(0.5)
                     return
 
-            # ── Compare ───────────────────────────────────────────────────────
+            # ── Compare + scans ───────────────────────────────────────────────
             self.log("─" * 52, "dim")
             self.log("Comparing Moodle items against Brightspace…", "info")
+            t0 = time.time()
             results = _compare_items(moodle_items, bs_flat)
 
-            # ── Search-bar scan for still-missing items ───────────────────────
             missing = [r for r in results if r["status"] == "missing"]
             if missing:
                 self.log("─" * 52, "dim")
@@ -1201,7 +3467,6 @@ class ContentChecker:
                             r["status"]  = "found_in_search"
                             r["matched"] = found_via_search[r["name"]]
 
-            # ── Page content scan (text search + Moodle link detector) ────────
             self.log("─" * 52, "dim")
             still_missing = [r for r in results if r["status"] == "missing"]
             found_in_content, moodle_links = await self._scan_page_content(
@@ -1212,9 +3477,34 @@ class ContentChecker:
                     if r["status"] == "missing" and r["name"] in found_in_content:
                         r["status"]  = "found_in_content"
                         r["matched"] = found_in_content[r["name"]]
+            self._summary["timings"]["Comparison + page scan"] = time.time() - t0
 
             self._log_report(results)
             self._log_link_report(moodle_links)
+
+            if self.on_file_checklist and getattr(self, "do_pdf_upload", True):
+                t0 = time.time()
+                await self._offer_missing_file_download(context, page, course_id, results, bs_flat)
+                self._summary["timings"]["File download + upload"] = time.time() - t0
+            elif not getattr(self, "do_pdf_upload", True):
+                self.log("⏭ PDF upload skipped (checkbox off)", "dim")
+
+            if moodle_links and getattr(self, "do_relink", False):
+                t0 = time.time()
+                await self._relink_moodle_files(context, page, course_id, moodle_links)
+                self._summary["timings"]["Moodle link re-link"] = time.time() - t0
+
+            if getattr(self, "do_h5p_embed", False) and moodle_items and bs_flat:
+                from urllib.parse import urlparse
+                parsed  = urlparse(self.bs_url)
+                bs_base = f"{parsed.scheme}://{parsed.netloc}"
+                t0 = time.time()
+                await self._embed_h5p_in_brightspace(context, page, moodle_items, bs_flat, bs_base, course_id)
+                self._summary["timings"]["H5P embed (Phase B)"] = time.time() - t0
+
+            # ── Final summary + cleanup prompt ────────────────────────────────
+            self._log_final_summary(results)
+            await self._prompt_clear_downloads(course_id)
 
             if self.on_complete:
                 self.on_complete()

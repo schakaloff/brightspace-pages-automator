@@ -1,7 +1,0 @@
-Restyle the SOURCE HTML using the STYLE REFERENCE layout. Apply the BLUE theme: primary #0E72ED, mid #2D8CFF, accent #00C6D7, background linear-gradient(135deg,#eaf4ff,#dffcff), shadow rgba(14,114,237,0.2). Keep all text and links. Compact spacing — minimal gaps between sections and cards. No left-side borders on cards. Return only the final HTML, no explanation.
-
-SOURCE:
-{source_html}
-
-REFERENCE:
-{style_reference_html}

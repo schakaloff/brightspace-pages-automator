@@ -1,7 +1,0 @@
-Restyle the SOURCE HTML using the STYLE REFERENCE layout. Apply the TEAL theme: primary #0D9488, mid #14B8A6, accent #2DD4BF, background linear-gradient(135deg,#eafaf8,#f0fffc), shadow rgba(13,148,136,0.2). Keep all text and links. Compact spacing — minimal gaps between sections and cards. No left-side borders on cards. Return only the final HTML, no explanation.
-
-SOURCE:
-{source_html}
-
-REFERENCE:
-{style_reference_html}
