@@ -1,7 +1,13 @@
+PySide6>=6.7
 playwright
+pillow
+google-generativeai
+python-dotenv
+requests
+pytest
+pytest-qt
 customtkinter
 CTkMessagebox
 CTkToolTip
-google-genai
 beautifulsoup4
 lxml
