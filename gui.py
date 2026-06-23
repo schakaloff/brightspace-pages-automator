@@ -535,6 +535,49 @@ class App(ctk.CTk):
 
         ctk.CTkFrame(body, height=1, fg_color=_DIVIDER).pack(fill="x", pady=(0, 20))
 
+        # ── Microsoft SSO Credentials ─────────────────────────────────────────
+        ctk.CTkLabel(
+            body, text="MICROSOFT SSO CREDENTIALS",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(0, 6))
+
+        sso_card = ctk.CTkFrame(body, fg_color=_CARD, corner_radius=10)
+        sso_card.pack(fill="x", pady=(0, 20))
+        sso_card.columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(sso_card, text="Email", font=ctk.CTkFont(size=11),
+                     text_color=_TEXT_DIM).grid(row=0, column=0, sticky="w", padx=14, pady=(12, 2))
+        self._sso_email_entry = ctk.CTkEntry(
+            sso_card, placeholder_text="NFirstname.Lastname@okanagan.bc.ca",
+            height=36, font=ctk.CTkFont(size=13),
+        )
+        self._sso_email_entry.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 8))
+        self._bind_paste_menu(self._sso_email_entry)
+
+        ctk.CTkLabel(sso_card, text="Password", font=ctk.CTkFont(size=11),
+                     text_color=_TEXT_DIM).grid(row=2, column=0, sticky="w", padx=14, pady=(0, 2))
+        self._sso_pass_entry = ctk.CTkEntry(
+            sso_card, placeholder_text="••••••••",
+            height=36, font=ctk.CTkFont(size=13), show="•",
+        )
+        self._sso_pass_entry.grid(row=3, column=0, sticky="ew", padx=14, pady=(0, 8))
+        self._bind_paste_menu(self._sso_pass_entry)
+
+        self._sso_status = ctk.CTkLabel(
+            sso_card, text="", font=ctk.CTkFont(size=11), text_color=_TEXT_FAINT,
+        )
+        self._sso_status.grid(row=4, column=0, sticky="w", padx=14)
+
+        ctk.CTkButton(
+            sso_card, text="💾  Save SSO Credentials", height=36,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._save_sso_credentials,
+        ).grid(row=5, column=0, sticky="ew", padx=14, pady=(4, 12))
+
+        self._load_sso_credentials()
+
+        ctk.CTkFrame(body, height=1, fg_color=_DIVIDER).pack(fill="x", pady=(0, 20))
+
         # Header
         ctk.CTkLabel(
             body, text="📖  How It Works",
@@ -798,6 +841,8 @@ class App(ctk.CTk):
                     on_pages_found=on_pages_found,
                     bs_username=self.bs_username,
                     bs_password=self.bs_password,
+                    sso_email=self.sso_email,
+                    sso_password=self.sso_password,
                 ))
             except Exception as e:
                 q.put((f"✗  {e}", "error"))
@@ -1055,6 +1100,8 @@ class App(ctk.CTk):
                     on_complete=on_complete,
                     bs_username=self.bs_username,
                     bs_password=self.bs_password,
+                    sso_email=self.sso_email,
+                    sso_password=self.sso_password,
                 ))
             except Exception as e:
                 q.put((f"✗  {e}", "error"))
@@ -1284,6 +1331,8 @@ class App(ctk.CTk):
                     confirm_fn=confirm_fn,
                     bs_username=self.bs_username,
                     bs_password=self.bs_password,
+                    sso_email=self.sso_email,
+                    sso_password=self.sso_password,
                 )
                 checker.do_relink = do_relink
                 checker.do_pdf_upload = do_pdf_upload
@@ -1376,6 +1425,8 @@ class App(ctk.CTk):
                     confirm_fn=confirm_fn,
                     bs_username=self.bs_username,
                     bs_password=self.bs_password,
+                    sso_email=self.sso_email,
+                    sso_password=self.sso_password,
                 )
                 checker.do_relink = False
                 checker.do_h5p_embed = True
@@ -1600,6 +1651,39 @@ class App(ctk.CTk):
         import keyring
         u = self.bs_username
         return keyring.get_password("BrightspacePagesAutomator", u) or "" if u else ""
+
+    def _save_sso_credentials(self):
+        import keyring
+        email = self._sso_email_entry.get().strip()
+        password = self._sso_pass_entry.get().strip()
+        if not email:
+            self._sso_status.configure(text="⚠  Enter an email first.", text_color=_TAG_COLORS["warning"])
+            return
+        self._save_config({"sso_email": email})
+        if password:
+            keyring.set_password("BrightspacePagesAutomator_SSO", email, password)
+        self._sso_status.configure(text="✓  Saved", text_color=_TAG_COLORS["success"])
+        self.after(3000, lambda: self._sso_status.configure(text=""))
+
+    def _load_sso_credentials(self):
+        import keyring
+        cfg = self._load_config()
+        email = cfg.get("sso_email", "")
+        if email:
+            self._sso_email_entry.insert(0, email)
+            password = keyring.get_password("BrightspacePagesAutomator_SSO", email)
+            if password:
+                self._sso_pass_entry.insert(0, password)
+
+    @property
+    def sso_email(self) -> str:
+        return self._load_config().get("sso_email", "")
+
+    @property
+    def sso_password(self) -> str:
+        import keyring
+        e = self.sso_email
+        return keyring.get_password("BrightspacePagesAutomator_SSO", e) or "" if e else ""
 
     def _load_config(self) -> dict:
         try:

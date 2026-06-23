@@ -58,6 +58,8 @@ class UnitCollector:
         on_complete: Optional[Callable] = None,
         bs_username: str = "",
         bs_password: str = "",
+        sso_email: str = "",
+        sso_password: str = "",
     ):
         self.unit_url = unit_url
         self.target_url = target_url
@@ -70,6 +72,8 @@ class UnitCollector:
         self._on_complete = on_complete
         self.bs_username = bs_username
         self.bs_password = bs_password
+        self.sso_email = sso_email
+        self.sso_password = sso_password
         self._clipboard_lock = asyncio.Lock()
         self._link_lock = asyncio.Lock()
         self._dl_dir = Path(tempfile.gettempdir()) / "brightspace_collector"
@@ -1040,7 +1044,7 @@ class UnitCollector:
 
         p, browser, context, page = await launch_browser()
         try:
-            await wait_for_login(page, context, self.bs_username or None, self.bs_password or None)
+            await wait_for_login(page, context, self.bs_username or None, self.bs_password or None, self.sso_email or None, self.sso_password or None)
             self.log("─" * 52, "dim")
             self.log(f"Navigating to unit: {self.unit_url}", "info")
 
@@ -1168,6 +1172,8 @@ async def run(
     on_complete: Callable = None,
     bs_username: str = "",
     bs_password: str = "",
+    sso_email: str = "",
+    sso_password: str = "",
 ) -> None:
     await UnitCollector(
         unit_url=unit_url,
@@ -1181,4 +1187,6 @@ async def run(
         on_complete=on_complete,
         bs_username=bs_username,
         bs_password=bs_password,
+        sso_email=sso_email,
+        sso_password=sso_password,
     ).run()

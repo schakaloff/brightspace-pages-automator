@@ -279,6 +279,8 @@ class ContentChecker:
         confirm_fn:           Optional[Callable] = None,
         bs_username:          str               = "",
         bs_password:          str               = "",
+        sso_email:            str               = "",
+        sso_password:         str               = "",
     ):
         self.bs_url                 = bs_url.strip()
         self.moodle_url             = moodle_url.strip()
@@ -295,6 +297,8 @@ class ContentChecker:
         self.do_h5p_embed           = False
         self.bs_username            = bs_username
         self.bs_password            = bs_password
+        self.sso_email              = sso_email
+        self.sso_password           = sso_password
 
     async def _confirm(self, msg: str) -> bool:
         if not self.confirm_fn:
@@ -3395,7 +3399,7 @@ class ContentChecker:
 
         p, browser, context, page = await launch_browser()
         try:
-            await wait_for_login(page, context, self.bs_username or None, self.bs_password or None)
+            await wait_for_login(page, context, self.bs_username or None, self.bs_password or None, self.sso_email or None, self.sso_password or None)
 
             bs_flat      = None
             moodle_items = None
