@@ -796,6 +796,8 @@ class App(ctk.CTk):
                     style_reference_html=style_reference_html,
                     theme_name=self._selected_theme,
                     on_pages_found=on_pages_found,
+                    bs_username=self.bs_username,
+                    bs_password=self.bs_password,
                 ))
             except Exception as e:
                 q.put((f"✗  {e}", "error"))
@@ -1051,6 +1053,8 @@ class App(ctk.CTk):
                     parallel_pages=parallel_pages,
                     log=lambda msg, tag="info": q.put((msg, tag)),
                     on_complete=on_complete,
+                    bs_username=self.bs_username,
+                    bs_password=self.bs_password,
                 ))
             except Exception as e:
                 q.put((f"✗  {e}", "error"))
@@ -1278,6 +1282,8 @@ class App(ctk.CTk):
                     file_checklist_event=file_checklist_event,
                     on_file_checklist=on_file_checklist,
                     confirm_fn=confirm_fn,
+                    bs_username=self.bs_username,
+                    bs_password=self.bs_password,
                 )
                 checker.do_relink = do_relink
                 checker.do_pdf_upload = do_pdf_upload
@@ -1368,6 +1374,8 @@ class App(ctk.CTk):
                     file_checklist_event=file_checklist_event,
                     on_file_checklist=on_file_checklist,
                     confirm_fn=confirm_fn,
+                    bs_username=self.bs_username,
+                    bs_password=self.bs_password,
                 )
                 checker.do_relink = False
                 checker.do_h5p_embed = True

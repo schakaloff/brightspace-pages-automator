@@ -56,6 +56,8 @@ class UnitCollector:
         parallel_pages: int = 3,
         log: Optional[Callable] = None,
         on_complete: Optional[Callable] = None,
+        bs_username: str = "",
+        bs_password: str = "",
     ):
         self.unit_url = unit_url
         self.target_url = target_url
@@ -66,6 +68,8 @@ class UnitCollector:
         self.parallel_pages = max(1, parallel_pages)
         self._log_fn = log
         self._on_complete = on_complete
+        self.bs_username = bs_username
+        self.bs_password = bs_password
         self._clipboard_lock = asyncio.Lock()
         self._link_lock = asyncio.Lock()
         self._dl_dir = Path(tempfile.gettempdir()) / "brightspace_collector"
@@ -1036,7 +1040,7 @@ class UnitCollector:
 
         p, browser, context, page = await launch_browser()
         try:
-            await wait_for_login(page, context)
+            await wait_for_login(page, context, self.bs_username or None, self.bs_password or None)
             self.log("─" * 52, "dim")
             self.log(f"Navigating to unit: {self.unit_url}", "info")
 
@@ -1162,6 +1166,8 @@ async def run(
     parallel_pages: int = 3,
     log: Callable = None,
     on_complete: Callable = None,
+    bs_username: str = "",
+    bs_password: str = "",
 ) -> None:
     await UnitCollector(
         unit_url=unit_url,
@@ -1173,4 +1179,6 @@ async def run(
         parallel_pages=parallel_pages,
         log=log,
         on_complete=on_complete,
+        bs_username=bs_username,
+        bs_password=bs_password,
     ).run()

@@ -10,19 +10,51 @@ from playwright.async_api import async_playwright, BrowserContext, Page
 from config import SESSION_FILE
 
 
-async def wait_for_login(page: Page, context: BrowserContext) -> None:
+async def _do_auto_login(page: Page, username: str, password: str) -> bool:
+    """
+    Attempt to fill and submit the Manual Login form on the D2L login page.
+    Returns True if the form was submitted, False if the page wasn't a login page.
+    """
+    try:
+        await page.goto("https://learn.okanagancollege.ca/d2l/login", timeout=15000)
+        await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        # Expand the Manual Login accordion
+        accordion = page.locator(".d2l-collapsible-panel-header-primary")
+        await accordion.wait_for(state="visible", timeout=8000)
+        await accordion.click()
+        await page.wait_for_timeout(600)
+        # Fill credentials
+        await page.get_by_label("Username").fill(username)
+        await page.get_by_label("Password").fill(password)
+        await page.get_by_role("button", name="Log In").click()
+        return True
+    except Exception as e:
+        print(f"  Auto-login attempt failed: {e}")
+        return False
+
+
+async def wait_for_login(
+    page: Page,
+    context: BrowserContext,
+    username: str | None = None,
+    password: str | None = None,
+) -> None:
     """
     Navigate to Brightspace and wait for login if needed.
+    If username/password are provided, auto-fills the Manual Login form.
     If the saved session is still valid the loop exits in ~3 s without user action.
-    Identical behaviour to quiz automator's _wait_for_login.
     """
     print("Opening Brightspace...")
-    await page.goto("https://learn.okanagancollege.ca")
-    print("─" * 50)
-    print("  Log in with your Okanagan College account.")
-    print("  Complete any MFA steps (email code, authenticator, etc.).")
-    print("  Script continues automatically once you reach the home page.")
-    print("─" * 50)
+    if username and password:
+        print("  Attempting auto-login with saved credentials...")
+        await _do_auto_login(page, username, password)
+    else:
+        await page.goto("https://learn.okanagancollege.ca")
+        print("─" * 50)
+        print("  Log in with your Okanagan College account.")
+        print("  Complete any MFA steps (email code, authenticator, etc.).")
+        print("  Script continues automatically once you reach the home page.")
+        print("─" * 50)
     for i in range(180):
         await page.wait_for_timeout(3000)   # always wait — no path can skip this
         url = page.url
