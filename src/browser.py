@@ -43,6 +43,12 @@ async def _do_ms_sso_login(page: Page, sso_email: str, sso_password: str) -> Non
         )
         await page.get_by_role("textbox", name="Enter the password for").fill(sso_password)
         await page.get_by_role("button", name="Sign in").click()
+        await page.wait_for_load_state("domcontentloaded", timeout=15000)
+        # "Stay signed in?" prompt
+        stay_no = page.locator('#idBtn_Back')
+        if await stay_no.count() > 0:
+            await stay_no.click()
+            await page.wait_for_load_state("domcontentloaded", timeout=10000)
         print("  SSO credentials submitted — approve MFA on your phone if prompted.")
     except Exception as e:
         print(f"  SSO auto-fill failed: {e}")

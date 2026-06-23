@@ -578,6 +578,49 @@ class App(ctk.CTk):
 
         ctk.CTkFrame(body, height=1, fg_color=_DIVIDER).pack(fill="x", pady=(0, 20))
 
+        # ── Moodle Credentials ────────────────────────────────────────────────
+        ctk.CTkLabel(
+            body, text="MOODLE CREDENTIALS",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=_TEXT_FAINT,
+        ).pack(anchor="w", pady=(0, 6))
+
+        moodle_card = ctk.CTkFrame(body, fg_color=_CARD, corner_radius=10)
+        moodle_card.pack(fill="x", pady=(0, 20))
+        moodle_card.columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(moodle_card, text="Username", font=ctk.CTkFont(size=11),
+                     text_color=_TEXT_DIM).grid(row=0, column=0, sticky="w", padx=14, pady=(12, 2))
+        self._moodle_user_entry = ctk.CTkEntry(
+            moodle_card, placeholder_text="n.firstname",
+            height=36, font=ctk.CTkFont(size=13),
+        )
+        self._moodle_user_entry.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 8))
+        self._bind_paste_menu(self._moodle_user_entry)
+
+        ctk.CTkLabel(moodle_card, text="Password", font=ctk.CTkFont(size=11),
+                     text_color=_TEXT_DIM).grid(row=2, column=0, sticky="w", padx=14, pady=(0, 2))
+        self._moodle_pass_entry = ctk.CTkEntry(
+            moodle_card, placeholder_text="••••••••",
+            height=36, font=ctk.CTkFont(size=13), show="•",
+        )
+        self._moodle_pass_entry.grid(row=3, column=0, sticky="ew", padx=14, pady=(0, 8))
+        self._bind_paste_menu(self._moodle_pass_entry)
+
+        self._moodle_status = ctk.CTkLabel(
+            moodle_card, text="", font=ctk.CTkFont(size=11), text_color=_TEXT_FAINT,
+        )
+        self._moodle_status.grid(row=4, column=0, sticky="w", padx=14)
+
+        ctk.CTkButton(
+            moodle_card, text="💾  Save Moodle Credentials", height=36,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._save_moodle_credentials,
+        ).grid(row=5, column=0, sticky="ew", padx=14, pady=(4, 12))
+
+        self._load_moodle_credentials()
+
+        ctk.CTkFrame(body, height=1, fg_color=_DIVIDER).pack(fill="x", pady=(0, 20))
+
         # Header
         ctk.CTkLabel(
             body, text="📖  How It Works",
@@ -1333,6 +1376,8 @@ class App(ctk.CTk):
                     bs_password=self.bs_password,
                     sso_email=self.sso_email,
                     sso_password=self.sso_password,
+                    moodle_username=self.moodle_username,
+                    moodle_password=self.moodle_password,
                 )
                 checker.do_relink = do_relink
                 checker.do_pdf_upload = do_pdf_upload
@@ -1427,6 +1472,8 @@ class App(ctk.CTk):
                     bs_password=self.bs_password,
                     sso_email=self.sso_email,
                     sso_password=self.sso_password,
+                    moodle_username=self.moodle_username,
+                    moodle_password=self.moodle_password,
                 )
                 checker.do_relink = False
                 checker.do_h5p_embed = True
@@ -1684,6 +1731,39 @@ class App(ctk.CTk):
         import keyring
         e = self.sso_email
         return keyring.get_password("BrightspacePagesAutomator_SSO", e) or "" if e else ""
+
+    def _save_moodle_credentials(self):
+        import keyring
+        username = self._moodle_user_entry.get().strip()
+        password = self._moodle_pass_entry.get().strip()
+        if not username:
+            self._moodle_status.configure(text="⚠  Enter a username first.", text_color=_TAG_COLORS["warning"])
+            return
+        self._save_config({"moodle_username": username})
+        if password:
+            keyring.set_password("BrightspacePagesAutomator_Moodle", username, password)
+        self._moodle_status.configure(text="✓  Saved", text_color=_TAG_COLORS["success"])
+        self.after(3000, lambda: self._moodle_status.configure(text=""))
+
+    def _load_moodle_credentials(self):
+        import keyring
+        cfg = self._load_config()
+        username = cfg.get("moodle_username", "")
+        if username:
+            self._moodle_user_entry.insert(0, username)
+            password = keyring.get_password("BrightspacePagesAutomator_Moodle", username)
+            if password:
+                self._moodle_pass_entry.insert(0, password)
+
+    @property
+    def moodle_username(self) -> str:
+        return self._load_config().get("moodle_username", "")
+
+    @property
+    def moodle_password(self) -> str:
+        import keyring
+        u = self.moodle_username
+        return keyring.get_password("BrightspacePagesAutomator_Moodle", u) or "" if u else ""
 
     def _load_config(self) -> dict:
         try:
