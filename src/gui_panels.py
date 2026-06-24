@@ -9,6 +9,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QFrame, QScrollArea, QSpinBox,
+    QToolButton, QMenu, QSizePolicy,
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 
@@ -428,31 +429,37 @@ class CheckerPanel(QWidget):
         layout.addWidget(self._moodle_entry)
         layout.addSpacing(14)
 
-        from PySide6.QtWidgets import QCheckBox
-        self._relink_cb   = QCheckBox("Re-link Moodle files in Brightspace after check")
-        self._pdf_cb      = QCheckBox("Upload missing PDFs / files to Brightspace")
-        self._h5p_cb      = QCheckBox("Upload H5P to Brightspace")
-        self._relink_cb.setChecked(True)
-        self._pdf_cb.setChecked(True)
-        for cb in (self._relink_cb, self._pdf_cb, self._h5p_cb):
-            layout.addWidget(cb)
-            layout.addSpacing(4)
-        layout.addSpacing(10)
-
-        # Run buttons row
-        btn_row = QHBoxLayout(); btn_row.setSpacing(8)
-        self._run_btn = QPushButton("Run Check")
-        self._run_btn.setFixedHeight(42)
+        # Split run button + dropdown menu
+        self._run_btn = QToolButton()
+        self._run_btn.setText("Run Check")
         self._run_btn.setIcon(make_icon("run", "#ffffff", 14))
+        self._run_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._run_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self._run_btn.setFixedHeight(42)
+        self._run_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._run_btn.clicked.connect(self._start_run)
-        btn_row.addWidget(self._run_btn, 3)
 
-        self._phase_b_btn = QPushButton("Phase B — H5P Upload")
-        self._phase_b_btn.setProperty("variant", "phase-b")
-        self._phase_b_btn.setFixedHeight(42)
-        self._phase_b_btn.clicked.connect(self._start_phase_b)
-        btn_row.addWidget(self._phase_b_btn, 1)
-        layout.addLayout(btn_row)
+        run_menu = QMenu(self._run_btn)
+
+        full_run_act = run_menu.addAction("Full Run")
+        full_run_act.triggered.connect(self._start_run)
+
+        h5p_act = run_menu.addAction("H5P Upload Only")
+        h5p_act.triggered.connect(self._start_phase_b)
+
+        run_menu.addSeparator()
+
+        self._relink_act = run_menu.addAction("Re-link Moodle files")
+        self._relink_act.setCheckable(True); self._relink_act.setChecked(True)
+
+        self._pdf_act = run_menu.addAction("Upload missing files")
+        self._pdf_act.setCheckable(True); self._pdf_act.setChecked(True)
+
+        self._h5p_act = run_menu.addAction("Upload H5P")
+        self._h5p_act.setCheckable(True); self._h5p_act.setChecked(False)
+
+        self._run_btn.setMenu(run_menu)
+        layout.addWidget(self._run_btn)
         layout.addSpacing(8)
 
         # Pause-point buttons (hidden until needed)
@@ -535,7 +542,6 @@ class CheckerPanel(QWidget):
         self._dl_label.hide()
 
         self._run_btn.setText("Running…"); self._run_btn.setEnabled(False)
-        self._phase_b_btn.setEnabled(False)
         self._log.clear_log()
 
         q = self._log_queue
@@ -580,9 +586,9 @@ class CheckerPanel(QWidget):
                     moodle_username=self._mw.moodle_username,
                     moodle_password=self._mw.moodle_password,
                 )
-                checker.do_relink     = self._relink_cb.isChecked()
-                checker.do_pdf_upload = self._pdf_cb.isChecked()
-                checker.do_h5p_embed  = self._h5p_cb.isChecked()
+                checker.do_relink     = self._relink_act.isChecked()
+                checker.do_pdf_upload = self._pdf_act.isChecked()
+                checker.do_h5p_embed  = self._h5p_act.isChecked()
                 checker.file_checklist_result = file_result
                 checker.h5p_skip_flag = skip_flag
                 if phase_b:
@@ -615,7 +621,6 @@ class CheckerPanel(QWidget):
                 msg, tag = self._log_queue.get_nowait()
                 if msg == "__DONE__":
                     self._run_btn.setText("Run Check"); self._run_btn.setEnabled(True)
-                    self._phase_b_btn.setEnabled(True)
                     self._ready_btn.hide()
                     self._h5p_ready_btn.hide(); self._h5p_skip_btn.hide()
                     dl = Path(__file__).parent.parent / "downloads"

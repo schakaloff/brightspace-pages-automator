@@ -269,6 +269,7 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     if sys.platform == "win32" and sys.stdout is not None:
         sys.stdout.reconfigure(encoding="utf-8")
+    os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
     app = QApplication(sys.argv)
     app.setStyleSheet(APP_STYLESHEET)
     win = MainWindow()

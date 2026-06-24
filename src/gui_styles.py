@@ -100,4 +100,27 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; 
 
 QScrollArea {{ border: none; background: transparent; }}
 QScrollArea > QWidget > QWidget {{ background: transparent; }}
+
+QToolButton {{
+    background-color: {OC_TEAL}; color: #ffffff; border: none;
+    border-radius: 6px; padding: 10px 18px; font-size: 13px; font-weight: 600;
+}}
+QToolButton:hover {{ background-color: {OC_TEAL_MID}; }}
+QToolButton:disabled {{ background-color: #1a2a2c; color: {TEXT_SEC}; }}
+QToolButton::menu-button {{
+    border: none; border-left: 1px solid {OC_TEAL_MID};
+    border-top-right-radius: 6px; border-bottom-right-radius: 6px;
+    width: 22px;
+}}
+QToolButton::menu-arrow {{ image: none; width: 0px; }}
+
+QMenu {{
+    background-color: {PANEL}; border: 1px solid {BORDER_ACT};
+    color: {TEXT_PRI}; border-radius: 6px; padding: 4px 0px;
+}}
+QMenu::item {{ padding: 8px 20px; border-radius: 4px; font-size: 12px; }}
+QMenu::item:selected {{ background-color: {OC_TEAL}; color: #ffffff; }}
+QMenu::item:checked {{ color: {DONE}; }}
+QMenu::item:checked:selected {{ color: #ffffff; }}
+QMenu::separator {{ height: 1px; background: {BORDER}; margin: 4px 10px; }}
 """
