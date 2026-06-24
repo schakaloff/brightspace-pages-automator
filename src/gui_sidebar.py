@@ -104,9 +104,10 @@ class StepButton(QPushButton):
             p.setPen(Qt.PenStyle.NoPen)
             p.drawEllipse(dot_x - dot_r, dot_y - dot_r, dot_r * 2, dot_r * 2)
         elif self._state == self.LOCKED:
-            p.setOpacity(0.35)
-            lk = make_pixmap("locked", TEXT_SEC, 12)
-            p.drawPixmap(dot_x - 6, dot_y - 6, lk)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor(TEXT_FAINT), 1.2))
+            p.setOpacity(0.5)
+            p.drawEllipse(dot_x - dot_r, dot_y - dot_r, dot_r * 2, dot_r * 2)
             p.setOpacity(1.0)
         elif self._state == self.PENDING:
             p.setBrush(Qt.BrushStyle.NoBrush)

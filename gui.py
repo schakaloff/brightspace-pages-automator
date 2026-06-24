@@ -81,10 +81,14 @@ class MainWindow(QMainWindow):
         for panel in (self._checker, self._collector, self._restyle, self._settings):
             self._stack.addWidget(panel)  # indices 0-3
 
+        # All steps start unlocked — users can navigate freely
+        for n in (1, 2, 3):
+            self._sidebar.set_step_state(n, StepButton.PENDING)
+
         # Cross-panel wiring
-        self._checker.step_success.connect(lambda: self._unlock_step(2))
+        self._checker.step_success.connect(lambda: self._sidebar.set_step_state(1, StepButton.DONE))
         self._checker.continue_next.connect(lambda: self._on_step(2))
-        self._collector.step_success.connect(lambda: self._unlock_step(3))
+        self._collector.step_success.connect(lambda: self._sidebar.set_step_state(2, StepButton.DONE))
         self._collector.continue_next.connect(lambda: self._on_step(3))
         self._settings.api_key_changed.connect(self._set_api_key)
 
@@ -99,9 +103,6 @@ class MainWindow(QMainWindow):
     def _on_settings(self):
         self._stack.setCurrentIndex(3)
         self._sidebar.set_active(None)
-
-    def _unlock_step(self, n: int):
-        self._sidebar.set_step_state(n, StepButton.PENDING)
 
     # ── Credentials (delegated to SettingsPanel) ─────────────
     @property
