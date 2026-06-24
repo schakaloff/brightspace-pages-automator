@@ -4,10 +4,8 @@ pillow
 google-generativeai
 python-dotenv
 requests
+keyring
 pytest
 pytest-qt
-customtkinter
-CTkMessagebox
-CTkToolTip
 beautifulsoup4
 lxml

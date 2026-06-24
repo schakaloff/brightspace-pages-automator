@@ -10,25 +10,87 @@ from playwright.async_api import async_playwright, BrowserContext, Page
 from config import SESSION_FILE
 
 
-async def wait_for_login(page: Page, context: BrowserContext) -> None:
+async def _do_auto_login(page: Page, username: str, password: str) -> bool:
+    """
+    Attempt to fill and submit the Manual Login form on the D2L login page.
+    Returns True if the form was submitted, False if the page wasn't a login page.
+    """
+    try:
+        await page.goto("https://learn.okanagancollege.ca/d2l/login", timeout=15000)
+        await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        # Expand the Manual Login accordion
+        accordion = page.locator(".d2l-collapsible-panel-header-primary")
+        await accordion.wait_for(state="visible", timeout=8000)
+        await accordion.click()
+        await page.wait_for_timeout(600)
+        # Fill credentials
+        await page.get_by_label("Username").fill(username)
+        await page.get_by_label("Password").fill(password)
+        await page.get_by_role("button", name="Log In").click()
+        return True
+    except Exception as e:
+        print(f"  Auto-login attempt failed: {e}")
+        return False
+
+
+async def _do_ms_sso_login(page: Page, sso_email: str, sso_password: str) -> None:
+    """Fill the Microsoft SSO email + password form. MFA approval is still manual."""
+    try:
+        await page.get_by_role("textbox", name="Enter your email, phone, or").fill(sso_email)
+        await page.get_by_role("button", name="Next").click()
+        await page.get_by_role("textbox", name="Enter the password for").wait_for(
+            state="visible", timeout=10000
+        )
+        await page.get_by_role("textbox", name="Enter the password for").fill(sso_password)
+        await page.get_by_role("button", name="Sign in").click()
+        await page.wait_for_load_state("domcontentloaded", timeout=15000)
+        # "Stay signed in?" prompt
+        stay_no = page.locator('#idBtn_Back')
+        if await stay_no.count() > 0:
+            await stay_no.click()
+            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        print("  SSO credentials submitted — approve MFA on your phone if prompted.")
+    except Exception as e:
+        print(f"  SSO auto-fill failed: {e}")
+
+
+async def wait_for_login(
+    page: Page,
+    context: BrowserContext,
+    username: str | None = None,
+    password: str | None = None,
+    sso_email: str | None = None,
+    sso_password: str | None = None,
+) -> None:
     """
     Navigate to Brightspace and wait for login if needed.
+    If username/password are provided, auto-fills the Manual Login form.
+    If sso_email/sso_password are provided, auto-fills the Microsoft SSO form.
     If the saved session is still valid the loop exits in ~3 s without user action.
-    Identical behaviour to quiz automator's _wait_for_login.
     """
     print("Opening Brightspace...")
-    await page.goto("https://learn.okanagancollege.ca")
-    print("─" * 50)
-    print("  Log in with your Okanagan College account.")
-    print("  Complete any MFA steps (email code, authenticator, etc.).")
-    print("  Script continues automatically once you reach the home page.")
-    print("─" * 50)
+    if username and password:
+        print("  Attempting auto-login with saved credentials...")
+        await _do_auto_login(page, username, password)
+    else:
+        await page.goto("https://learn.okanagancollege.ca")
+        print("─" * 50)
+        print("  Log in with your Okanagan College account.")
+        print("  Complete any MFA steps (email code, authenticator, etc.).")
+        print("  Script continues automatically once you reach the home page.")
+        print("─" * 50)
+    _sso_attempted = False
     for i in range(180):
         await page.wait_for_timeout(3000)   # always wait — no path can skip this
         url = page.url
         if i % 10 == 9:
             print(f"  Still waiting... ({(i + 1) * 3}s)  |  {url[:80]}")
-        if "microsoftonline.com" in url or "learn.okanagancollege.ca" not in url:
+        if "microsoftonline.com" in url:
+            if sso_email and sso_password and not _sso_attempted:
+                _sso_attempted = True
+                await _do_ms_sso_login(page, sso_email, sso_password)
+            continue
+        if "learn.okanagancollege.ca" not in url:
             continue
         try:
             has_login_form = await page.evaluate("() => !!document.querySelector('#userName')")

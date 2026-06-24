@@ -171,11 +171,103 @@ class SettingsPanel(QWidget):
         layout.addWidget(_divider())
         layout.addSpacing(20)
 
+        # ── Section 3: Brightspace Credentials ───────────────────────────────
+        layout.addWidget(_form_label("BRIGHTSPACE CREDENTIALS"))
+        layout.addSpacing(6)
+
+        self._bs_user_field = QLineEdit()
+        self._bs_user_field.setPlaceholderText("n.firstname")
+        self._bs_user_field.setFixedHeight(40)
+        layout.addWidget(self._bs_user_field)
+        layout.addSpacing(6)
+
+        self._bs_pass_field = QLineEdit()
+        self._bs_pass_field.setPlaceholderText("Password")
+        self._bs_pass_field.setEchoMode(QLineEdit.EchoMode.Password)
+        self._bs_pass_field.setFixedHeight(40)
+        layout.addWidget(self._bs_pass_field)
+        layout.addSpacing(6)
+
+        self._bs_cred_status = QLabel("")
+        self._bs_cred_status.setProperty("role", "dim")
+        layout.addWidget(self._bs_cred_status)
+
+        bs_save_btn = QPushButton("Save Brightspace Credentials")
+        bs_save_btn.setProperty("variant", "secondary")
+        bs_save_btn.setFixedHeight(36)
+        bs_save_btn.clicked.connect(self._save_bs_credentials)
+        layout.addWidget(bs_save_btn)
+        layout.addSpacing(24)
+        layout.addWidget(_divider())
+        layout.addSpacing(20)
+
+        # ── Section 4: Microsoft SSO Credentials ─────────────────────────────
+        layout.addWidget(_form_label("MICROSOFT SSO CREDENTIALS"))
+        layout.addSpacing(6)
+
+        self._sso_email_field = QLineEdit()
+        self._sso_email_field.setPlaceholderText("NFirstname.Lastname@okanagan.bc.ca")
+        self._sso_email_field.setFixedHeight(40)
+        layout.addWidget(self._sso_email_field)
+        layout.addSpacing(6)
+
+        self._sso_pass_field = QLineEdit()
+        self._sso_pass_field.setPlaceholderText("Password")
+        self._sso_pass_field.setEchoMode(QLineEdit.EchoMode.Password)
+        self._sso_pass_field.setFixedHeight(40)
+        layout.addWidget(self._sso_pass_field)
+        layout.addSpacing(6)
+
+        self._sso_status = QLabel("")
+        self._sso_status.setProperty("role", "dim")
+        layout.addWidget(self._sso_status)
+
+        sso_save_btn = QPushButton("Save SSO Credentials")
+        sso_save_btn.setProperty("variant", "secondary")
+        sso_save_btn.setFixedHeight(36)
+        sso_save_btn.clicked.connect(self._save_sso_credentials)
+        layout.addWidget(sso_save_btn)
+        layout.addSpacing(24)
+        layout.addWidget(_divider())
+        layout.addSpacing(20)
+
+        # ── Section 5: Moodle Credentials ────────────────────────────────────
+        layout.addWidget(_form_label("MOODLE CREDENTIALS"))
+        layout.addSpacing(6)
+
+        self._moodle_user_field = QLineEdit()
+        self._moodle_user_field.setPlaceholderText("n.firstname")
+        self._moodle_user_field.setFixedHeight(40)
+        layout.addWidget(self._moodle_user_field)
+        layout.addSpacing(6)
+
+        self._moodle_pass_field = QLineEdit()
+        self._moodle_pass_field.setPlaceholderText("Password")
+        self._moodle_pass_field.setEchoMode(QLineEdit.EchoMode.Password)
+        self._moodle_pass_field.setFixedHeight(40)
+        layout.addWidget(self._moodle_pass_field)
+        layout.addSpacing(6)
+
+        self._moodle_status = QLabel("")
+        self._moodle_status.setProperty("role", "dim")
+        layout.addWidget(self._moodle_status)
+
+        moodle_save_btn = QPushButton("Save Moodle Credentials")
+        moodle_save_btn.setProperty("variant", "secondary")
+        moodle_save_btn.setFixedHeight(36)
+        moodle_save_btn.clicked.connect(self._save_moodle_credentials)
+        layout.addWidget(moodle_save_btn)
+        layout.addSpacing(24)
+        layout.addWidget(_divider())
+        layout.addSpacing(20)
+
         # ── Version footer ────────────────────────────────────────────────────
         ver = QLabel("Brightspace Pages Automator  v0.8.0")
         ver.setStyleSheet(f"color:{TEXT_FAINT}; font-size:11px;")
         layout.addWidget(ver)
         layout.addStretch()
+
+        self._load_credentials()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -184,6 +276,36 @@ class SettingsPanel(QWidget):
         self._key_field.blockSignals(True)
         self._key_field.setText(key)
         self._key_field.blockSignals(False)
+
+    @property
+    def bs_username(self) -> str:
+        return self._mw.load_config().get("bs_username", "")
+
+    @property
+    def bs_password(self) -> str:
+        import keyring
+        u = self.bs_username
+        return keyring.get_password("BrightspacePagesAutomator", u) or "" if u else ""
+
+    @property
+    def sso_email(self) -> str:
+        return self._mw.load_config().get("sso_email", "")
+
+    @property
+    def sso_password(self) -> str:
+        import keyring
+        e = self.sso_email
+        return keyring.get_password("BrightspacePagesAutomator_SSO", e) or "" if e else ""
+
+    @property
+    def moodle_username(self) -> str:
+        return self._mw.load_config().get("moodle_username", "")
+
+    @property
+    def moodle_password(self) -> str:
+        import keyring
+        u = self.moodle_username
+        return keyring.get_password("BrightspacePagesAutomator_Moodle", u) or "" if u else ""
 
     # ── Private slots ─────────────────────────────────────────────────────────
 
@@ -194,6 +316,70 @@ class SettingsPanel(QWidget):
     def _save_api_key(self):
         if hasattr(self._mw, "save_config"):
             self._mw.save_config({"gemini_api_key": self._key_field.text().strip()})
+
+    def _load_credentials(self):
+        import keyring
+        cfg = self._mw.load_config() if hasattr(self._mw, "load_config") else {}
+
+        bs_user = cfg.get("bs_username", "")
+        if bs_user:
+            self._bs_user_field.setText(bs_user)
+            pw = keyring.get_password("BrightspacePagesAutomator", bs_user)
+            if pw:
+                self._bs_pass_field.setText(pw)
+
+        sso_email = cfg.get("sso_email", "")
+        if sso_email:
+            self._sso_email_field.setText(sso_email)
+            pw = keyring.get_password("BrightspacePagesAutomator_SSO", sso_email)
+            if pw:
+                self._sso_pass_field.setText(pw)
+
+        moodle_user = cfg.get("moodle_username", "")
+        if moodle_user:
+            self._moodle_user_field.setText(moodle_user)
+            pw = keyring.get_password("BrightspacePagesAutomator_Moodle", moodle_user)
+            if pw:
+                self._moodle_pass_field.setText(pw)
+
+    def _save_bs_credentials(self):
+        import keyring
+        username = self._bs_user_field.text().strip()
+        password = self._bs_pass_field.text().strip()
+        if not username:
+            self._bs_cred_status.setText("Enter a username first.")
+            return
+        self._mw.save_config({"bs_username": username})
+        if password:
+            keyring.set_password("BrightspacePagesAutomator", username, password)
+        self._bs_cred_status.setText("Saved.")
+        QTimer.singleShot(3000, lambda: self._bs_cred_status.setText(""))
+
+    def _save_sso_credentials(self):
+        import keyring
+        email = self._sso_email_field.text().strip()
+        password = self._sso_pass_field.text().strip()
+        if not email:
+            self._sso_status.setText("Enter an email first.")
+            return
+        self._mw.save_config({"sso_email": email})
+        if password:
+            keyring.set_password("BrightspacePagesAutomator_SSO", email, password)
+        self._sso_status.setText("Saved.")
+        QTimer.singleShot(3000, lambda: self._sso_status.setText(""))
+
+    def _save_moodle_credentials(self):
+        import keyring
+        username = self._moodle_user_field.text().strip()
+        password = self._moodle_pass_field.text().strip()
+        if not username:
+            self._moodle_status.setText("Enter a username first.")
+            return
+        self._mw.save_config({"moodle_username": username})
+        if password:
+            keyring.set_password("BrightspacePagesAutomator_Moodle", username, password)
+        self._moodle_status.setText("Saved.")
+        QTimer.singleShot(3000, lambda: self._moodle_status.setText(""))
 
 
 # ── CheckerPanel ──────────────────────────────────────────────────────────────
@@ -387,6 +573,12 @@ class CheckerPanel(QWidget):
                     file_checklist_event=file_ev,
                     on_file_checklist=lambda d: q.put(("__CHK_FILE_CHECKLIST__", (d, file_result, file_ev))),
                     confirm_fn=confirm,
+                    bs_username=self._mw.bs_username,
+                    bs_password=self._mw.bs_password,
+                    sso_email=self._mw.sso_email,
+                    sso_password=self._mw.sso_password,
+                    moodle_username=self._mw.moodle_username,
+                    moodle_password=self._mw.moodle_password,
                 )
                 checker.do_relink     = self._relink_cb.isChecked()
                 checker.do_pdf_upload = self._pdf_cb.isChecked()
@@ -664,6 +856,10 @@ class CollectorPanel(QWidget):
                     parallel_pages=parallel,
                     log=lambda msg, tag="info": q.put((msg, tag)),
                     on_complete=on_done,
+                    bs_username=self._mw.bs_username,
+                    bs_password=self._mw.bs_password,
+                    sso_email=self._mw.sso_email,
+                    sso_password=self._mw.sso_password,
                 ))
             except Exception as e:
                 q.put((f"Error: {e}", "error"))
@@ -789,6 +985,10 @@ class RestylePanel(QWidget):
                     style_reference_html=style_reference_html,
                     theme_name=self._selected_theme[0],
                     on_pages_found=on_pages_found,
+                    bs_username=self._mw.bs_username,
+                    bs_password=self._mw.bs_password,
+                    sso_email=self._mw.sso_email,
+                    sso_password=self._mw.sso_password,
                 ))
             except Exception as e:
                 q.put((f"Error: {e}", "error"))

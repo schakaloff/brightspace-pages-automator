@@ -103,6 +103,31 @@ class MainWindow(QMainWindow):
     def _unlock_step(self, n: int):
         self._sidebar.set_step_state(n, StepButton.PENDING)
 
+    # ── Credentials (delegated to SettingsPanel) ─────────────
+    @property
+    def bs_username(self) -> str:
+        return self._settings.bs_username
+
+    @property
+    def bs_password(self) -> str:
+        return self._settings.bs_password
+
+    @property
+    def sso_email(self) -> str:
+        return self._settings.sso_email
+
+    @property
+    def sso_password(self) -> str:
+        return self._settings.sso_password
+
+    @property
+    def moodle_username(self) -> str:
+        return self._settings.moodle_username
+
+    @property
+    def moodle_password(self) -> str:
+        return self._settings.moodle_password
+
     # ── Gemini API key ───────────────────────────────────────
     @property
     def gemini_api_key(self) -> str:

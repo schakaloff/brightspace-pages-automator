@@ -277,6 +277,12 @@ class ContentChecker:
         file_checklist_event: threading.Event    = None,
         on_file_checklist:    Callable           = None,
         confirm_fn:           Optional[Callable] = None,
+        bs_username:          str               = "",
+        bs_password:          str               = "",
+        sso_email:            str               = "",
+        sso_password:         str               = "",
+        moodle_username:      str               = "",
+        moodle_password:      str               = "",
     ):
         self.bs_url                 = bs_url.strip()
         self.moodle_url             = moodle_url.strip()
@@ -291,6 +297,12 @@ class ContentChecker:
         self.file_checklist_result  = []
         self.confirm_fn             = confirm_fn
         self.do_h5p_embed           = False
+        self.bs_username            = bs_username
+        self.bs_password            = bs_password
+        self.sso_email              = sso_email
+        self.sso_password           = sso_password
+        self.moodle_username        = moodle_username
+        self.moodle_password        = moodle_password
 
     async def _confirm(self, msg: str) -> bool:
         if not self.confirm_fn:
@@ -1351,30 +1363,33 @@ class ContentChecker:
             await tab.wait_for_timeout(1500)
 
             if "login" in tab.url.lower() or "course" not in tab.url.lower():
-                try:
-                    from api_config import (
-                        MOODLE_USERNAME as moodle_user,
-                        MOODLE_PASSWORD as moodle_pass,
-                    )
-                    try:
-                        from api_config import MICROSOFT_SSO_PASSWORD as sso_pass
-                    except ImportError:
-                        sso_pass = moodle_pass
-                except ImportError:
-                    moodle_user, moodle_pass = "", ""
+                moodle_user = self.moodle_username
+                moodle_pass = self.moodle_password
+                sso_pass    = self.sso_password or moodle_pass
 
                 async def _click_manual_login():
+                    self.log("  Navigating to Manual Login form…", "info")
                     try:
-                        link = tab.locator('a[href*="saml=off"]')
-                        if await link.count() > 0:
-                            self.log("  Clicking Manual Login…", "info")
-                            await link.first.click()
-                            await tab.wait_for_load_state("domcontentloaded", timeout=10000)
-                            await tab.wait_for_timeout(2000)
-                            return True
+                        await tab.goto(
+                            "https://mymoodle.okanagan.bc.ca/login/index.php?saml=off",
+                            wait_until="domcontentloaded", timeout=15000,
+                        )
+                        await tab.wait_for_timeout(1000)
+                        # "Already logged in as X — log out?" dialog (SSO session still active)
+                        logout_btn = tab.locator('button:has-text("Log out")')
+                        if await logout_btn.count() > 0:
+                            self.log("  Clearing existing SSO session (Log out)…", "info")
+                            await logout_btn.first.click()
+                            await tab.wait_for_load_state("domcontentloaded", timeout=15000)
+                            await tab.wait_for_timeout(1000)
+                            await tab.goto(
+                                "https://mymoodle.okanagan.bc.ca/login/index.php?saml=off",
+                                wait_until="domcontentloaded", timeout=15000,
+                            )
+                            await tab.wait_for_timeout(1000)
+                        return True
                     except Exception:
-                        pass
-                    return False
+                        return False
 
                 async def _handle_microsoft_sso():
                     """Handle Microsoft account picker + password page."""
@@ -1424,6 +1439,14 @@ class ContentChecker:
                             await tab.locator('#idSIButton9').click()
                             await tab.wait_for_load_state("domcontentloaded", timeout=15000)
                             await tab.wait_for_timeout(2000)
+                            # "Stay signed in?" prompt
+                            if "microsoftonline.com" in tab.url:
+                                stay_no = tab.locator('#idBtn_Back')
+                                if await stay_no.count() > 0:
+                                    self.log("  Dismissing 'Stay signed in?' prompt…", "info")
+                                    await stay_no.click()
+                                    await tab.wait_for_load_state("domcontentloaded", timeout=10000)
+                                    await tab.wait_for_timeout(1500)
                         except Exception as e:
                             self.log(f"  ⚠ Microsoft password step failed: {e}", "warning")
 
@@ -1452,9 +1475,15 @@ class ContentChecker:
                     if moodle_user and moodle_pass:
                         self.log("  Filling Moodle credentials…", "info")
                         try:
-                            await tab.locator('#username').fill(moodle_user)
-                            await tab.locator('#password').fill(moodle_pass)
-                            await tab.locator('#loginbtn').click()
+                            await tab.evaluate("""([u, p]) => {
+                                const set = Object.getOwnPropertyDescriptor(
+                                    window.HTMLInputElement.prototype, 'value').set;
+                                const uEl = document.querySelector('#username');
+                                const pEl = document.querySelector('#password');
+                                set.call(uEl, u); uEl.dispatchEvent(new Event('input', {bubbles:true}));
+                                set.call(pEl, p); pEl.dispatchEvent(new Event('input', {bubbles:true}));
+                                document.querySelector('#loginbtn').click();
+                            }""", [moodle_user, moodle_pass])
                             await tab.wait_for_load_state("domcontentloaded", timeout=15000)
                             await tab.wait_for_timeout(2000)
                             self.log("✓ Moodle login complete", "success")
@@ -1462,7 +1491,7 @@ class ContentChecker:
                             self.log(f"✗ Auto-login failed: {e}", "error")
                             return None
                     else:
-                        self.log("  Credentials not set in api_config.py — log in manually.", "warning")
+                        self.log("  Moodle credentials not set in Settings — log in manually.", "warning")
                         for i in range(120):
                             await tab.wait_for_timeout(3000)
                             if i % 10 == 9:
@@ -3391,7 +3420,7 @@ class ContentChecker:
 
         p, browser, context, page = await launch_browser()
         try:
-            await wait_for_login(page, context)
+            await wait_for_login(page, context, self.bs_username or None, self.bs_password or None, self.sso_email or None, self.sso_password or None)
 
             bs_flat      = None
             moodle_items = None
