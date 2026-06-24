@@ -1,5 +1,11 @@
 # Brightspace Pages Automator — Project Guide
 
+# Claude Code System Guidelines
+- Do NOT spawn background subagents or parallel task agents ask for permission if you do want to spawn them.
+- Complete all file modifications, reading, and terminal execution directly within the main session.
+- If a task requires subtask decomposition, print the plan to the main terminal first.
+
+
 ## What This Project Does
 
 Automates editing HTML content inside Brightspace (D2L) LMS pages using Playwright and Gemini AI.

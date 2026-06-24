@@ -665,7 +665,10 @@ class CheckerPanel(QWidget):
                     self.step_success.emit()
                 elif msg == "__CHK_MOODLE_WAITING__":
                     self._ready_btn.setText("Ready — Scrape Now")
-                    self._ready_btn.clicked.disconnect() if self._ready_btn.receivers(self._ready_btn.clicked) > 0 else None
+                    try:
+                        self._ready_btn.clicked.disconnect()
+                    except RuntimeError:
+                        pass
                     self._ready_btn.clicked.connect(self._moodle_ready)
                     self._ready_btn.show()
                 elif msg == "__CHK_H5P_WAITING__":
