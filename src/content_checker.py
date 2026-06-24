@@ -184,10 +184,12 @@ _JS_MOODLE_ITEMS = """() => {
         modtype_quiz:         'QUIZ',
         modtype_url:          'URL',
         modtype_page:         'PAGE',
+        modtype_book:         'PAGE',
         modtype_forum:        'FORUM',
         modtype_label:        'LABEL',
         modtype_folder:       'FOLDER',
         modtype_kalturamedia: 'EXTERNAL',
+        modtype_kalvidres:    'VIDEO',
         modtype_lti:          'EXTERNAL',
         modtype_hvp:          'EXTERNAL',
         modtype_h5pactivity:  'EXTERNAL',
@@ -203,15 +205,17 @@ _JS_MOODLE_ITEMS = """() => {
         const kframe = body.querySelector('iframe[src*="kaltura"]');
         const hasVideo = !!(vjsEl || kframe);
         let entryId = '';
+        let kframeTitle = '';
         if (kframe) {
             const m = (kframe.src || '').match(/entryid\\/([^\\/]+)/);
             if (m) entryId = m[1];
+            kframeTitle = kframe.getAttribute('title') || '';
         }
 
         const rawText = body.textContent.trim().replace(/\\s+/g, ' ');
         const isOnlyNoise = /^Video Player is loading/.test(rawText);
         if (isOnlyNoise || (hasVideo && rawText.replace(/Video Player.*/, '').trim().length < 5)) {
-            return { type: 'VIDEO', name: entryId ? 'Kaltura video [' + entryId + ']' : '(embedded video)' };
+            return { type: 'VIDEO', name: kframeTitle || (entryId ? 'Kaltura video [' + entryId + ']' : 'Kaltura Video') };
         }
 
         const cleanText = rawText.replace(/Video Player is loading.*?(Current Time \\d|$)/g, '').trim();
@@ -497,7 +501,7 @@ class ContentChecker:
             if r["status"] == "missing"
             and r["type"] not in {"VIDEO", "LABEL"}
             and len(r["name"].strip()) > 3
-            and r["name"] not in {"(embedded video)", "(image)"}
+            and r["name"] not in {"(embedded video)", "Kaltura Video", "(image)"}
         ]
         if not searchable:
             return {}
@@ -627,7 +631,7 @@ class ContentChecker:
             if r["status"] == "missing"
             and r["type"] not in {"VIDEO", "LABEL"}
             and len(r["name"].strip()) > 3
-            and r["name"] not in {"(embedded video)", "(image)"}
+            and r["name"] not in {"(embedded video)", "Kaltura Video", "(image)"}
         ]
         search_names = [r["name"].lower() for r in still_missing]
 
@@ -1580,7 +1584,16 @@ class ContentChecker:
                 else:
                     ordered.append(item)
 
-            items = ordered + flat_embedded + embedded
+            # Deduplicate embedded lists across both scanners (same href+parent → keep first)
+            _seen_emb: set = set()
+            _deduped_emb: list = []
+            for _e in flat_embedded + embedded:
+                _key = (_e.get("href") or _e.get("name"), _e.get("parent_topic", ""))
+                if _key and _key not in _seen_emb:
+                    _seen_emb.add(_key)
+                    _deduped_emb.append(_e)
+            items = ordered + _deduped_emb
+            await self._enrich_kaltura_titles(tab.context, _deduped_emb)
 
             # If there are H5P items, pause so the user can check the browser
             # (e.g. switch out of preview mode) before downloads start.
@@ -2895,6 +2908,49 @@ class ContentChecker:
                     const secEl   = section.querySelector('.sectionname, h3, h4');
                     const secName = secEl ? secEl.textContent.trim() : '';
 
+                    // ── Section summary (.summarytext) — videos/files embedded in the section intro ──
+                    const summaryEl = section.querySelector('.summarytext, .section-summary');
+                    if (summaryEl) {
+                        const labelName = '(section summary)';
+                        summaryEl.querySelectorAll('a[href*="pluginfile.php"]').forEach(a => {
+                            const href = a.href || '';
+                            if (href.includes('readspeaker') || href.includes('docreader')) return;
+                            const text = a.textContent.trim() || href.split('/').pop().split('?')[0];
+                            if (href) found.push({ type: 'FILE', name: text, href, embedded: true, section: secName, parent_topic: labelName });
+                        });
+                        summaryEl.querySelectorAll('iframe[src*="kaltura"]').forEach(f => {
+                            const src = f.src || '';
+                            const frameTitle = f.getAttribute('title') || '';
+                            const m = src.match(/entryid\\/([^\\/&?]+)/i) || src.match(/entry_id=([^&]+)/i) || src.match(/\\/([01]_[a-z0-9]+)(?:\\/|$)/i);
+                            const entryId = m ? m[1] : '';
+                            const name = frameTitle || (entryId ? 'Kaltura video [' + entryId + ']' : 'Kaltura Video');
+                            found.push({ type: 'VIDEO', name, href: src, entryId, embedded: true, section: secName, parent_topic: labelName });
+                        });
+                        summaryEl.querySelectorAll('.video-js').forEach(el => {
+                            const setupStr = el.getAttribute('data-setup-lazy') || el.getAttribute('data-setup') || '{}';
+                            try {
+                                const setup = JSON.parse(setupStr);
+                                const ytSrc = (setup.sources || []).find(s => s.src && s.src.includes('youtube.com'));
+                                if (ytSrc) {
+                                    const m = ytSrc.src.match(/[?&]v=([^&]+)/);
+                                    const videoId = m ? m[1] : '';
+                                    const title = el.getAttribute('title') || '';
+                                    const name = title || (videoId ? 'YouTube video [' + videoId + ']' : '(embedded video)');
+                                    found.push({ type: 'VIDEO', name, href: ytSrc.src, embedded: true, section: secName, parent_topic: labelName });
+                                }
+                            } catch(e) {}
+                        });
+                        summaryEl.querySelectorAll('iframe[src*="youtube.com"], iframe[src*="youtube-nocookie.com"]').forEach(f => {
+                            if (f.closest('.video-js')) return;
+                            const src = f.src || '';
+                            const m = src.match(/\\/embed\\/([^?&\\/]+)/);
+                            const videoId = m ? m[1] : '';
+                            const title = f.getAttribute('title') || '';
+                            const name = title || (videoId ? 'YouTube video [' + videoId + ']' : '(embedded video)');
+                            found.push({ type: 'VIDEO', name, href: videoId ? 'https://www.youtube.com/watch?v=' + videoId : src, embedded: true, section: secName, parent_topic: labelName });
+                        });
+                    }
+
                     section.querySelectorAll('li.activity.modtype_label').forEach(label => {
                         const nameEl    = label.querySelector('.instancename, .activityname a, a');
                         const labelName = nameEl ? nameEl.textContent.trim().replace(/\\s{2,}.*$/, '').trim() : '(label)';
@@ -2944,13 +3000,47 @@ class ContentChecker:
                         });
                         body.querySelectorAll('iframe[src*="kaltura"]').forEach(f => {
                             const src = f.src || '';
+                            const frameTitle = f.getAttribute('title') || '';
                             const m   = src.match(/entryid\\/([^\\/&?]+)/i)
                                      || src.match(/entry_id=([^&]+)/i)
                                      || src.match(/\\/([01]_[a-z0-9]+)(?:\\/|$)/i);
                             const entryId = m ? m[1] : '';
-                            const name    = entryId ? 'Kaltura video [' + entryId + ']' : '(embedded video)';
+                            const name    = frameTitle || (entryId ? 'Kaltura video [' + entryId + ']' : 'Kaltura Video');
                             found.push({
                                 type: 'VIDEO', name, href: src, entryId,
+                                embedded: true, section: secName, parent_topic: labelName
+                            });
+                        });
+
+                        // video.js YouTube players in labels
+                        body.querySelectorAll('.video-js').forEach(el => {
+                            const setupStr = el.getAttribute('data-setup-lazy') || el.getAttribute('data-setup') || '{}';
+                            try {
+                                const setup = JSON.parse(setupStr);
+                                const ytSrc = (setup.sources || []).find(s => s.src && s.src.includes('youtube.com'));
+                                if (ytSrc) {
+                                    const m = ytSrc.src.match(/[?&]v=([^&]+)/);
+                                    const videoId = m ? m[1] : '';
+                                    const title = el.getAttribute('title') || '';
+                                    const name = title || (videoId ? 'YouTube video [' + videoId + ']' : '(embedded video)');
+                                    found.push({
+                                        type: 'VIDEO', name, href: ytSrc.src,
+                                        embedded: true, section: secName, parent_topic: labelName
+                                    });
+                                }
+                            } catch(e) {}
+                        });
+
+                        // Plain YouTube iframes in labels not inside a video.js container
+                        body.querySelectorAll('iframe[src*="youtube.com"], iframe[src*="youtube-nocookie.com"]').forEach(f => {
+                            if (f.closest('.video-js')) return;
+                            const src = f.src || '';
+                            const m = src.match(/\\/embed\\/([^?&\\/]+)/);
+                            const videoId = m ? m[1] : '';
+                            const title = f.getAttribute('title') || '';
+                            const name = title || (videoId ? 'YouTube video [' + videoId + ']' : '(embedded video)');
+                            found.push({
+                                type: 'VIDEO', name, href: videoId ? 'https://www.youtube.com/watch?v=' + videoId : src,
                                 embedded: true, section: secName, parent_topic: labelName
                             });
                         });
@@ -3031,11 +3121,12 @@ class ContentChecker:
                     // Kaltura iframes — extract entryId from src
                     document.querySelectorAll('iframe[src*="kaltura"]').forEach(f => {
                         const src = f.src || '';
+                        const frameTitle = f.getAttribute('title') || '';
                         const m   = src.match(/entryid\\/([^\\/&?]+)/i)
                                  || src.match(/entry_id=([^&]+)/i)
                                  || src.match(/\\/([01]_[a-z0-9]+)(?:\\/|$)/i);
                         const entryId = m ? m[1] : '';
-                        const name    = entryId ? 'Kaltura video [' + entryId + ']' : '(embedded video)';
+                        const name    = frameTitle || (entryId ? 'Kaltura video [' + entryId + ']' : 'Kaltura Video');
                         found.push({ type: 'VIDEO', name, href: src, entryId, embedded: true });
                     });
 
@@ -3044,6 +3135,33 @@ class ContentChecker:
                         const entryId = el.getAttribute('data-entry-id') || '';
                         const name    = entryId ? 'Kaltura video [' + entryId + ']' : '(embedded kaltura player)';
                         found.push({ type: 'VIDEO', name, href: '', entryId, embedded: true });
+                    });
+
+                    // video.js YouTube players (vjs-youtube / data-setup-lazy with youtube src)
+                    document.querySelectorAll('.video-js').forEach(el => {
+                        const setupStr = el.getAttribute('data-setup-lazy') || el.getAttribute('data-setup') || '{}';
+                        try {
+                            const setup = JSON.parse(setupStr);
+                            const ytSrc = (setup.sources || []).find(s => s.src && s.src.includes('youtube.com'));
+                            if (ytSrc) {
+                                const m = ytSrc.src.match(/[?&]v=([^&]+)/);
+                                const videoId = m ? m[1] : '';
+                                const title = el.getAttribute('title') || '';
+                                const name = title || (videoId ? 'YouTube video [' + videoId + ']' : '(embedded video)');
+                                found.push({ type: 'VIDEO', name, href: ytSrc.src, embedded: true });
+                            }
+                        } catch(e) {}
+                    });
+
+                    // Plain YouTube iframes not already inside a video.js container
+                    document.querySelectorAll('iframe[src*="youtube.com"], iframe[src*="youtube-nocookie.com"]').forEach(f => {
+                        if (f.closest('.video-js')) return;
+                        const src = f.src || '';
+                        const m = src.match(/\\/embed\\/([^?&\\/]+)/);
+                        const videoId = m ? m[1] : '';
+                        const title = f.getAttribute('title') || '';
+                        const name = title || (videoId ? 'YouTube video [' + videoId + ']' : '(embedded video)');
+                        found.push({ type: 'VIDEO', name, href: videoId ? 'https://www.youtube.com/watch?v=' + videoId : src, embedded: true });
                     });
 
                     return found;
@@ -3090,6 +3208,37 @@ class ContentChecker:
                 self.log(f"    ● {sec_label}{name}  →  {',  '.join(hit_strs)}", "info")
 
         return dedup
+
+    async def _enrich_kaltura_titles(self, context, items: list) -> None:
+        """Navigate to each Kaltura VIDEO URL in a new tab to extract the player title."""
+        targets = [
+            r for r in items
+            if r.get("type") == "VIDEO"
+            and r.get("href")
+            and "kaltura" in r.get("href", "").lower()
+            and r.get("name") == "Kaltura Video"
+        ]
+        if not targets:
+            return
+
+        self.log(f"  Fetching titles for {len(targets)} Kaltura video(s)…", "dim")
+        page = await context.new_page()
+        try:
+            for item in targets:
+                try:
+                    await page.goto(item["href"], wait_until="domcontentloaded", timeout=15000)
+                    await page.wait_for_selector('[data-plugin-name="titleLabel"]', timeout=6000)
+                    title = await page.evaluate("""() => {
+                        const el = document.querySelector('[data-plugin-name="titleLabel"]');
+                        return el ? (el.getAttribute('title') || el.textContent.trim()) : '';
+                    }""")
+                    if title:
+                        item["name"] = title
+                        self.log(f"    🎥 {title}", "dim")
+                except Exception:
+                    pass
+        finally:
+            await page.close()
 
     def _log_moodle_items(self, items: list) -> None:
         _ICONS = {
@@ -3176,11 +3325,38 @@ class ContentChecker:
                     for lnk in card.get("links", []):
                         accordion_consumed.add(_norm(lnk["name"]))
 
+        # Group embedded items by parent_topic so they can be shown inline
+        from collections import defaultdict
+        embedded_by_parent: dict = defaultdict(list)
+        section_desc_by_section: dict = defaultdict(list)
+        for r in results:
+            if r.get("embedded"):
+                pt = r.get("parent_topic", "")
+                if pt == "(section summary)":
+                    section_desc_by_section[r.get("section", "")].append(r)
+                else:
+                    embedded_by_parent[pt].append(r)
+
+        def _fmt_embedded(emb: dict, indent: str) -> None:
+            href  = emb.get("href", "")
+            entry = emb.get("entryId", "")
+            icon  = "📄" if emb.get("type") == "FILE" else "🎥"
+            if entry:
+                extra = f"  [entryId: {entry}]"
+            elif "youtube.com" in href:
+                extra = f"  [{href}]"
+            else:
+                extra = ""
+            self.log(f"{indent}{icon} {emb['name']}{extra}", "dim")
+
+        current_section_name = ""
+
         self.log("─" * 52, "dim")
         for r in results:
             icon = _ICONS.get(r["type"], "  ")
 
             if r["type"] == "SECTION":
+                current_section_name = r["name"]
                 self.log("", "dim")
                 if r["status"] == "exact":
                     self.log(f"✅ {icon} {r['name']}", "step")
@@ -3189,6 +3365,9 @@ class ContentChecker:
                     self.log(f"⚠️  {icon} {r['name']}  →  \"{matched}\" ({score}%)", "warning")
                 else:
                     self.log(f"❌ {icon} {r['name']}", "error")
+                # Section-description embedded items appear right below the header
+                for emb in section_desc_by_section.get(current_section_name, []):
+                    _fmt_embedded(emb, "   ")
                 continue
 
             # ── Accordion label — nested card display ──────────────────────────
@@ -3255,6 +3434,10 @@ class ContentChecker:
             else:
                 self.log(f"   ❌ {icon} {r['name']}", "error")
 
+            # Show any embedded content found inside this activity, indented with arrow
+            for emb in embedded_by_parent.get(r["name"], []):
+                _fmt_embedded(emb, "        └─ ")
+
         total = sum(counts.values())
         self.log("", "dim")
         self.log("─" * 52, "dim")
@@ -3287,28 +3470,7 @@ class ContentChecker:
                     self.log(f"      ⚠ {warning}", "warning")
                     seen_warnings.add(warning)
 
-        # ── Embedded files / videos summary ────────────────────────────────────
-        embedded = [r for r in results if r.get("embedded")]
-        if embedded:
-            emb_files  = [r for r in embedded if r["type"] == "FILE"]
-            emb_videos = [r for r in embedded if r["type"] == "VIDEO"]
-            self.log("", "dim")
-            self.log("─" * 52, "dim")
-            self.log(f"📎 Embedded Content Found ({len(embedded)} items: {len(emb_files)} files, {len(emb_videos)} videos)", "step")
-            self.log("   Discovered inside page bodies — need migration:", "dim")
-            self.log("", "dim")
-            for r in emb_files:
-                section = r.get("section", "")
-                parent  = r.get("parent_topic", "")
-                loc     = f"[{section} › {parent}]" if section and parent else f"[{parent or section}]"
-                self.log(f"   📄 {loc}  {r['name']}", "info")
-            for r in emb_videos:
-                section  = r.get("section", "")
-                parent   = r.get("parent_topic", "")
-                loc      = f"[{section} › {parent}]" if section and parent else f"[{parent or section}]"
-                entry    = r.get("entryId", "")
-                extra    = f"  [entryId: {entry}]" if entry else "  ⚠ no entryId"
-                self.log(f"   🎥 {loc}  {r['name']}{extra}", "info")
+        # Embedded content is now shown inline under each section above
 
     # ── Final summary ─────────────────────────────────────────────────────────
 
