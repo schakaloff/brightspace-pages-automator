@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, Q
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QIcon, QPixmap
 
-from gui_styles import APP_STYLESHEET, BG
+import gui_styles
 from gui_sidebar import Sidebar, StepButton
 from gui_icons import make_icon
 
@@ -29,8 +29,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Brightspace Pages Automator")
-        self.setMinimumSize(960, 760)
-        self.resize(1100, 800)
+        self.setMinimumSize(720, 560)
+        self.resize(860, 640)
         self._gemini_key   = ""
         self._chromium_ready = False
         self._set_window_icon()
@@ -38,6 +38,8 @@ class MainWindow(QMainWindow):
         self._load_api_key()
         self._start_chromium_check()
         self._start_update_check()
+        saved_theme = self.load_config().get("theme", "dark")
+        self.set_theme(saved_theme)
 
     # ── Window icon (PIL → QPixmap) ──────────────────────────
     def _set_window_icon(self):
@@ -103,6 +105,21 @@ class MainWindow(QMainWindow):
     def _on_settings(self):
         self._stack.setCurrentIndex(3)
         self._sidebar.set_active(None)
+
+    # ── Theme ────────────────────────────────────────────────
+    def set_theme(self, name: str):
+        gui_styles.set_theme(name)
+        QApplication.instance().setStyleSheet(gui_styles.get_stylesheet())
+        self._sidebar.refresh_theme()
+        self._settings.mark_active_theme(name)
+        # Refresh log widgets in each panel
+        for panel in (self._checker, self._collector, self._restyle):
+            for log in panel.findChildren(type(self._checker)):
+                pass  # panels refresh via stylesheet
+        from gui_log import LogWidget
+        for log in self.findChildren(LogWidget):
+            log.refresh_theme()
+        self.save_config({"theme": name})
 
     # ── Credentials (delegated to SettingsPanel) ─────────────
     @property
@@ -270,9 +287,21 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     if sys.platform == "win32" and sys.stdout is not None:
         sys.stdout.reconfigure(encoding="utf-8")
-    os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
+
+    # HiDPI fix: detect DPR/logical-DPI mismatch and re-launch with correct scale
+    if "QT_SCALE_FACTOR" not in os.environ:
+        _probe = QApplication([sys.argv[0]])
+        _s = _probe.primaryScreen()
+        _dpr = _s.devicePixelRatio()
+        _ldpi = _s.logicalDotsPerInch()
+        _probe.quit()
+        del _probe
+        if _dpr >= 1.5 and _ldpi < 120:
+            os.environ["QT_SCALE_FACTOR"] = "1.5"
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+
     app = QApplication(sys.argv)
-    app.setStyleSheet(APP_STYLESHEET)
+    app.setStyleSheet(gui_styles.get_stylesheet())
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

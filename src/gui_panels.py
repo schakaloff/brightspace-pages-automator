@@ -2,6 +2,7 @@
 import asyncio
 import os
 import queue
+import sys
 import threading
 import webbrowser
 from pathlib import Path
@@ -24,10 +25,8 @@ from gui_icons import make_icon
 # ── Shared helpers (used by Tasks 8 and 9 as well) ───────────────────────────
 
 def _divider() -> QFrame:
-    """Return a thin horizontal rule styled to BORDER color."""
     line = QFrame()
-    line.setFrameShape(QFrame.Shape.HLine)
-    line.setStyleSheet(f"color:{BORDER};background:{BORDER};max-height:1px;")
+    line.setProperty("role", "divider")
     return line
 
 
@@ -86,6 +85,31 @@ class SettingsPanel(QWidget):
         layout.addWidget(_divider())
         layout.addSpacing(20)
 
+        # ── Section 0: Appearance ─────────────────────────────────────────────
+        layout.addWidget(_form_label("APPEARANCE"))
+        layout.addSpacing(6)
+
+        theme_row = QHBoxLayout()
+        theme_row.setSpacing(8)
+        theme_row.setAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        self._btn_dark = QPushButton("Dark")
+        self._btn_dark.setProperty("variant", "secondary")
+        self._btn_dark.setFixedSize(80, 36)
+        self._btn_dark.clicked.connect(lambda: self._mw.set_theme("dark"))
+
+        self._btn_light = QPushButton("Light")
+        self._btn_light.setProperty("variant", "secondary")
+        self._btn_light.setFixedSize(80, 36)
+        self._btn_light.clicked.connect(lambda: self._mw.set_theme("light"))
+
+        theme_row.addWidget(self._btn_dark)
+        theme_row.addWidget(self._btn_light)
+        layout.addLayout(theme_row)
+        layout.addSpacing(24)
+        layout.addWidget(_divider())
+        layout.addSpacing(20)
+
         # ── Section 1: Gemini API Key ─────────────────────────────────────────
         layout.addWidget(_form_label("GEMINI API KEY"))
         layout.addSpacing(6)
@@ -138,12 +162,15 @@ class SettingsPanel(QWidget):
         open_btn = QPushButton("Open Folder")
         open_btn.setProperty("variant", "secondary")
         open_btn.setFixedHeight(36)
-        open_btn.clicked.connect(
-            lambda: os.startfile(
-                str(downloads_path) if downloads_path.exists()
-                else str(downloads_path.parent)
-            )
-        )
+        def _open_folder():
+            p = str(downloads_path) if downloads_path.exists() else str(downloads_path.parent)
+            if sys.platform == "win32":
+                os.startfile(p)
+            elif sys.platform == "darwin":
+                import subprocess; subprocess.Popen(["open", p])
+            else:
+                import subprocess; subprocess.Popen(["xdg-open", p])
+        open_btn.clicked.connect(_open_folder)
         dl_row.addWidget(open_btn)
         layout.addLayout(dl_row)
         layout.addSpacing(24)
@@ -264,13 +291,22 @@ class SettingsPanel(QWidget):
 
         # ── Version footer ────────────────────────────────────────────────────
         ver = QLabel("Brightspace Pages Automator  v0.8.0")
-        ver.setStyleSheet(f"color:{TEXT_FAINT}; font-size:11px;")
+        ver.setProperty("role", "dim")
+        ver.setStyleSheet("font-size:11px;")
         layout.addWidget(ver)
         layout.addStretch()
 
         self._load_credentials()
 
     # ── Public API ────────────────────────────────────────────────────────────
+
+    def mark_active_theme(self, name: str):
+        """Highlight the active theme button."""
+        for btn, theme in ((self._btn_dark, "dark"), (self._btn_light, "light")):
+            active = theme == name
+            btn.setProperty("variant", "theme-active" if active else "secondary")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
 
     def set_api_key(self, key: str):
         """Set the API key field without emitting api_key_changed."""
@@ -432,8 +468,7 @@ class CheckerPanel(QWidget):
         # Split run button + dropdown menu
         self._run_btn = QToolButton()
         self._run_btn.setText("Run Check")
-        self._run_btn.setIcon(make_icon("run", "#ffffff", 14))
-        self._run_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._run_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self._run_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         self._run_btn.setFixedHeight(42)
         self._run_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -502,7 +537,6 @@ class CheckerPanel(QWidget):
         self._continue_btn = QPushButton("Continue to Unit Collector")
         self._continue_btn.setProperty("variant", "next-step")
         self._continue_btn.setFixedHeight(38)
-        self._continue_btn.setIcon(make_icon("next", "#dde0ee", 14))
         self._continue_btn.hide()
         self._continue_btn.clicked.connect(self.continue_next)
         layout.addWidget(self._continue_btn)
@@ -797,7 +831,6 @@ class CollectorPanel(QWidget):
 
         self._run_btn = QPushButton("Collect & Assemble")
         self._run_btn.setFixedHeight(42)
-        self._run_btn.setIcon(make_icon("run", "#ffffff", 14))
         self._run_btn.clicked.connect(self._start_run)
         layout.addWidget(self._run_btn)
         layout.addSpacing(8)
@@ -811,7 +844,6 @@ class CollectorPanel(QWidget):
         self._continue_btn = QPushButton("Continue to Page Changer")
         self._continue_btn.setProperty("variant", "next-step")
         self._continue_btn.setFixedHeight(38)
-        self._continue_btn.setIcon(make_icon("next", "#dde0ee", 14))
         self._continue_btn.hide()
         self._continue_btn.clicked.connect(self.continue_next)
         layout.addWidget(self._continue_btn)
@@ -933,7 +965,6 @@ class RestylePanel(QWidget):
 
         self._run_btn = QPushButton("Start")
         self._run_btn.setFixedSize(110, 42)
-        self._run_btn.setIcon(make_icon("run", "#ffffff", 14))
         self._run_btn.clicked.connect(self._start_run)
         url_row.addWidget(self._run_btn)
         layout.addLayout(url_row)

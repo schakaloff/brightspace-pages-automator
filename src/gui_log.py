@@ -3,20 +3,18 @@ from PySide6.QtWidgets import QTextEdit, QLabel
 from PySide6.QtGui import QTextCharFormat, QColor, QFont, QFontDatabase, QKeySequence
 from PySide6.QtCore import Qt, QTimer
 
-from gui_styles import (
-    LOG_INFO, LOG_SUCCESS, LOG_ERROR, LOG_WARNING, LOG_STEP, LOG_DIM,
-    TEXT_SEC, BG,
-)
+import gui_styles
 
-_TAG_COLORS = {
-    "info":    LOG_INFO,
-    "success": LOG_SUCCESS,
-    "error":   LOG_ERROR,
-    "warning": LOG_WARNING,
-    "step":    LOG_STEP,
-    "dim":     LOG_DIM,
-}
 _LOG_FONTS = ["Cascadia Code", "JetBrains Mono", "Consolas", "Courier New"]
+
+_TAG_KEYS = {
+    "info":    "LOG_INFO",
+    "success": "LOG_SUCCESS",
+    "error":   "LOG_ERROR",
+    "warning": "LOG_WARNING",
+    "step":    "LOG_STEP",
+    "dim":     "LOG_DIM",
+}
 
 
 class LogWidget(QTextEdit):
@@ -36,14 +34,21 @@ class LogWidget(QTextEdit):
     def _setup_zoom_badge(self):
         self._zoom_level = 100
         self._zoom_badge = QLabel("100%", self)
-        self._zoom_badge.setStyleSheet(
-            f"color:{TEXT_SEC};background:rgba(13,13,18,200);"
-            "padding:2px 6px;border-radius:3px;font-size:10px;"
-        )
+        self._apply_zoom_badge_style()
         self._zoom_badge.hide()
         self._zoom_timer = QTimer(self)
         self._zoom_timer.setSingleShot(True)
         self._zoom_timer.timeout.connect(self._zoom_badge.hide)
+
+    def _apply_zoom_badge_style(self):
+        c = gui_styles.current
+        self._zoom_badge.setStyleSheet(
+            f"color:{c['TEXT_SEC']};background:{c['PANEL']}CC;"
+            "padding:2px 6px;border-radius:3px;font-size:10px;"
+        )
+
+    def refresh_theme(self):
+        self._apply_zoom_badge_style()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -93,7 +98,8 @@ class LogWidget(QTextEdit):
 
     def append_log(self, text: str, tag: str = "info"):
         fmt = QTextCharFormat()
-        fmt.setForeground(QColor(_TAG_COLORS.get(tag, LOG_INFO)))
+        key = _TAG_KEYS.get(tag, "LOG_INFO")
+        fmt.setForeground(QColor(gui_styles.current[key]))
         cursor = self.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         cursor.insertText(text + "\n", fmt)
