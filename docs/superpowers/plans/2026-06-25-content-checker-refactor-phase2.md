@@ -1,6 +1,6 @@
 # content_checker.py Refactor Phase 2 — Moodle Scraper Extraction Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Use `/superpowers:executing-plans 2026-06-25-content-checker-refactor-phase2.md` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Extract ~800 lines of Moodle scraping logic from `content_checker.py` into `src/moodle_scraper.py`, leaving `ContentChecker` as a thin orchestrator.
 
