@@ -1,6 +1,6 @@
 # content_checker.py Refactor Phase 1 — H5P Extraction Implementation Plan
 
-> **For agentic workers:** Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Extract ~1,135 lines of H5P logic from `content_checker.py` into `src/h5p_handler.py`, with shared JS in `src/js_helpers.py`. Zero behaviour change.
 
@@ -25,11 +25,11 @@
 **Interfaces:**
 - Produces: `DEEP_FIND_JS: str` — imported by Task 2 and Task 3
 
-- [ ] **Step 1: Read the constant to copy**
+- [x] **Step 1: Read the constant to copy**
 
 Open `src/content_checker.py` lines 1010–1025. The class attribute `_DEEP_FIND_JS` is the JS string to move.
 
-- [ ] **Step 2: Create `src/js_helpers.py`**
+- [x] **Step 2: Create `src/js_helpers.py`**
 
 ```python
 # Shared JavaScript helpers used across multiple modules.
@@ -52,7 +52,7 @@ DEEP_FIND_JS = """
     """
 ```
 
-- [ ] **Step 3: Verify file is importable**
+- [x] **Step 3: Verify file is importable**
 
 ```bash
 cd "c:/Users/300353682/OneDrive - Okanagan College/Desktop/Page Automator/brightspace-pages-automator"
@@ -61,7 +61,7 @@ venv/Scripts/python -c "from src.js_helpers import DEEP_FIND_JS; print(len(DEEP_
 
 Expected output: `280 chars OK` (approximately)
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/js_helpers.py
@@ -80,7 +80,7 @@ git commit -m "refactor: add js_helpers.py with DEEP_FIND_JS constant"
 - Consumes: `DEEP_FIND_JS` from `src.js_helpers`
 - Produces: `H5PHandler` class with methods listed below
 
-- [ ] **Step 1: Create the file with class scaffold**
+- [x] **Step 1: Create the file with class scaffold**
 
 ```python
 from __future__ import annotations
@@ -101,7 +101,7 @@ class H5PHandler:
         self._DEEP_FIND_JS = DEEP_FIND_JS
 ```
 
-- [ ] **Step 2: Copy all 10 H5P methods from `content_checker.py` into `H5PHandler`**
+- [x] **Step 2: Copy all 10 H5P methods from `content_checker.py` into `H5PHandler`**
 
 Copy these methods verbatim (change `self` references stay — they now refer to `H5PHandler`):
 
@@ -131,7 +131,7 @@ Copy these methods verbatim (change `self` references stay — they now refer to
 
 Error log strings referencing old method names (e.g. `"✗ _h5p_open_interactives error"`) can stay as-is — they're log output, not code.
 
-- [ ] **Step 3: Verify file is importable**
+- [x] **Step 3: Verify file is importable**
 
 ```bash
 venv/Scripts/python -c "from src.h5p_handler import H5PHandler; print('H5PHandler OK')"
@@ -139,7 +139,7 @@ venv/Scripts/python -c "from src.h5p_handler import H5PHandler; print('H5PHandle
 
 Expected: `H5PHandler OK`
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/h5p_handler.py
@@ -156,7 +156,7 @@ git commit -m "refactor: add H5PHandler class (extracted from content_checker)"
 **Interfaces:**
 - Consumes: `H5PHandler` from `src.h5p_handler`, `DEEP_FIND_JS` from `src.js_helpers`
 
-- [ ] **Step 1: Add imports at top of `content_checker.py`**
+- [x] **Step 1: Add imports at top of `content_checker.py`**
 
 Find the existing import block (around line 1–28). Add:
 
@@ -165,7 +165,7 @@ from .js_helpers import DEEP_FIND_JS
 from .h5p_handler import H5PHandler
 ```
 
-- [ ] **Step 2: Replace `_DEEP_FIND_JS` class attribute with import**
+- [x] **Step 2: Replace `_DEEP_FIND_JS` class attribute with import**
 
 Find line ~1010:
 ```python
@@ -181,7 +181,7 @@ Replace with:
     _DEEP_FIND_JS = DEEP_FIND_JS
 ```
 
-- [ ] **Step 3: Instantiate `H5PHandler` in `ContentChecker.__init__`**
+- [x] **Step 3: Instantiate `H5PHandler` in `ContentChecker.__init__`**
 
 At the end of `__init__` (after line 309, before the closing of `__init__`), add:
 
@@ -189,7 +189,7 @@ At the end of `__init__` (after line 309, before the closing of `__init__`), add
         self._h5p = H5PHandler(self.log)
 ```
 
-- [ ] **Step 4: Update the 2 external call sites**
+- [x] **Step 4: Update the 2 external call sites**
 
 **Call site 1** — line ~1630 (inside `_scrape_moodle`):
 ```python
@@ -207,7 +207,7 @@ await self._embed_h5p_in_brightspace(context, page, moodle_items, bs_flat, bs_ba
 await self._h5p.embed_in_brightspace(context, page, moodle_items, bs_flat, bs_base, course_id)
 ```
 
-- [ ] **Step 5: Comment out `_upload_files_to_bs_module_ui`**
+- [x] **Step 5: Comment out `_upload_files_to_bs_module_ui`**
 
 Find lines 1054–1145. Add a comment block above the method:
 
@@ -220,11 +220,11 @@ Find lines 1054–1145. Add a comment block above the method:
 
 Comment out the entire method body (lines 1054–1145).
 
-- [ ] **Step 6: Remove the 10 H5P method definitions from `ContentChecker`**
+- [x] **Step 6: Remove the 10 H5P method definitions from `ContentChecker`**
 
 Delete lines 1748–2883 from `content_checker.py` (the original H5P methods). They now live in `H5PHandler`.
 
-- [ ] **Step 7: Verify import still works**
+- [x] **Step 7: Verify import still works**
 
 ```bash
 venv/Scripts/python -c "from src.content_checker import ContentChecker; print('ContentChecker OK')"
@@ -232,7 +232,7 @@ venv/Scripts/python -c "from src.content_checker import ContentChecker; print('C
 
 Expected: `ContentChecker OK`
 
-- [ ] **Step 8: Verify line count dropped**
+- [x] **Step 8: Verify line count dropped**
 
 ```bash
 wc -l src/content_checker.py
@@ -240,7 +240,7 @@ wc -l src/content_checker.py
 
 Expected: ~2,640 lines (was 3,777)
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/content_checker.py
@@ -253,8 +253,8 @@ git commit -m "refactor: delegate H5P methods to H5PHandler, comment out dead UI
 
 After all 3 tasks complete:
 
-- [ ] Launch the app: `.\run.bat` — GUI opens without import errors
-- [ ] Open Checker tab — no errors on load
-- [ ] Check git log shows 3 clean commits
+- [x] Launch the app: `.\run.bat` — GUI opens without import errors
+- [x] Open Checker tab — no errors on load
+- [x] Check git log shows 3 clean commits
 
 No automated tests exist for this codebase — verification is import check + app launch.
