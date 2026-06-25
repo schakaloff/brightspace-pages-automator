@@ -28,6 +28,10 @@ class PageAutomator:
         style_reference_html: str = "",
         theme_name: str = "blue",
         on_pages_found: Callable = None,
+        bs_username: str = "",
+        bs_password: str = "",
+        sso_email: str = "",
+        sso_password: str = "",
     ):
         self.url = url
         self.log = log
@@ -36,6 +40,10 @@ class PageAutomator:
         self.style_reference_html = style_reference_html
         self.theme_name = theme_name
         self.on_pages_found = on_pages_found  # fn(pages) -> (start_idx, count)
+        self.bs_username = bs_username
+        self.bs_password = bs_password
+        self.sso_email = sso_email
+        self.sso_password = sso_password
         self._clipboard_lock = asyncio.Lock()  # one tab touches clipboard at a time
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -379,7 +387,7 @@ class PageAutomator:
 
         p, browser, context, page = await launch_browser()
         try:
-            await wait_for_login(page, context)
+            await wait_for_login(page, context, self.bs_username or None, self.bs_password or None, self.sso_email or None, self.sso_password or None)
 
             self.log("─" * 52, "dim")
             self.log(f"Navigating to: {self.url}", "info")
@@ -447,6 +455,10 @@ async def run(
     style_reference_html: str = "",
     theme_name: str = "blue",
     on_pages_found: Callable = None,
+    bs_username: str = "",
+    bs_password: str = "",
+    sso_email: str = "",
+    sso_password: str = "",
 ) -> None:
     await PageAutomator(
         url=url,
@@ -456,4 +468,8 @@ async def run(
         style_reference_html=style_reference_html,
         theme_name=theme_name,
         on_pages_found=on_pages_found,
+        bs_username=bs_username,
+        bs_password=bs_password,
+        sso_email=sso_email,
+        sso_password=sso_password,
     ).run()
