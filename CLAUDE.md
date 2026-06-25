@@ -108,3 +108,25 @@ First run installs venv, dependencies, and Playwright Chromium automatically. Lo
 ```
 GEMINI_API_KEY=your_key_here   # in .env file
 ```
+
+---
+
+## Playwright — Token Efficiency (IMPORTANT)
+
+Always use `browser_evaluate` (targeted JS) for data extraction — **never** `browser_snapshot`.
+
+- Snapshots return the full accessibility tree (50–60 KB+) and burn tokens fast.
+- `browser_evaluate` returns only what you ask for (usually under 1 KB).
+
+```js
+// Good — extract exactly what you need
+page.evaluate(() =>
+  [...document.querySelectorAll('a[href*="pluginfile"]')]
+    .map(a => ({ name: a.textContent.trim(), url: a.href }))
+)
+
+// Bad — returns entire page accessibility tree
+browser_snapshot()
+```
+
+Only use `browser_snapshot` when you genuinely need to discover unknown page structure or find element refs to click on. Switch to `browser_evaluate` as soon as you know what to look for.

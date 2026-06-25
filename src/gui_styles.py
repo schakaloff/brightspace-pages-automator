@@ -48,7 +48,7 @@ LIGHT = {
     "LOG_ERROR":   "#b91c1c",
     "LOG_WARNING": "#b45309",
     "LOG_STEP":    "#0e7490",
-    "LOG_DIM":     "#d1d5db",
+    "LOG_DIM":     "#020305",
 }
 
 current = dict(DARK)

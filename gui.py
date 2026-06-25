@@ -73,7 +73,10 @@ class MainWindow(QMainWindow):
         root.addWidget(self._stack, 1)
 
         # Panels imported lazily to keep imports fast
-        from gui_panels import CheckerPanel, CollectorPanel, RestylePanel, SettingsPanel
+        from panels.checker_panel import CheckerPanel
+        from panels.collector_panel import CollectorPanel
+        from panels.restyle_panel import RestylePanel
+        from panels.settings_panel import SettingsPanel
 
         self._checker   = CheckerPanel(self)
         self._collector = CollectorPanel(self)
@@ -281,26 +284,26 @@ class MainWindow(QMainWindow):
         self.save_config({
             "gemini_api_key": self._gemini_key,
         })
-        super().closeEvent(event)
+        event.accept()
+        os._exit(0)
 
 
 if __name__ == "__main__":
     if sys.platform == "win32" and sys.stdout is not None:
         sys.stdout.reconfigure(encoding="utf-8")
 
+    app = QApplication(sys.argv)
+
     # HiDPI fix: detect DPR/logical-DPI mismatch and re-launch with correct scale
     if "QT_SCALE_FACTOR" not in os.environ:
-        _probe = QApplication([sys.argv[0]])
-        _s = _probe.primaryScreen()
+        _s = app.primaryScreen()
         _dpr = _s.devicePixelRatio()
         _ldpi = _s.logicalDotsPerInch()
-        _probe.quit()
-        del _probe
         if _dpr >= 1.5 and _ldpi < 120:
             os.environ["QT_SCALE_FACTOR"] = "1.5"
+            app.quit()
+            del app
             os.execv(sys.executable, [sys.executable] + sys.argv)
-
-    app = QApplication(sys.argv)
     app.setStyleSheet(gui_styles.get_stylesheet())
     win = MainWindow()
     win.show()

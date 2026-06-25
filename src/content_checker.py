@@ -717,7 +717,7 @@ class ContentChecker:
         import base64, mimetypes
 
         data = local_path.read_bytes()
-        if len(data) > 8 * 1024 * 1024:
+        if len(data) > 50 * 1024 * 1024:
             self.log(f"    ⚠ Skipped (file too large: {len(data)//1024} KB)", "warning")
             return None
 
@@ -855,7 +855,6 @@ class ContentChecker:
         files: list,
     ) -> None:
         from collections import defaultdict
-        from urllib.parse import urlparse
 
         # Per-course subfolder so re-runs and multiple courses stay separate
         save_dir = Path("downloads") / "files" / course_id
@@ -960,10 +959,6 @@ class ContentChecker:
         self.log(f"", "dim")
         self.log(f"⬆ Uploading {len(downloaded)} file(s) to Brightspace…", "step")
 
-        # Extract BS domain (e.g. https://learn.okanagancollege.ca)
-        parsed   = urlparse(self.bs_url)
-        bs_base  = f"{parsed.scheme}://{parsed.netloc}"
-
         # Group files by module so we open one BS tab per module
         by_module: dict = defaultdict(list)
         no_module: list = []
@@ -982,24 +977,25 @@ class ContentChecker:
 
             for local, fi in items:
                 name = fi["name"]
-                ok = await self._upload_files_to_bs_module_ui(
-                    context, bs_base, course_id, mod_id, mod_title, [local]
-                )
-                if not ok:
-                    self.log(f"    ✗ {name} — upload UI failed", "error")
+
+                # Step 1: upload file bytes to BS course files via API
+                bs_url = await self._upload_file_to_brightspace(bs_page, course_id, local)
+                if not bs_url:
+                    self.log(f"    ✗ {name} — file upload failed", "error")
                     self._summary["files_failed"].append((name, mod_title))
                     fail_count += 1
                     continue
 
-                confirmed = await self._verify_topic_in_module(
-                    bs_page, course_id, mod_id, name
+                # Step 2: create a module topic pointing to that file
+                ok = await self._create_bs_file_topic(
+                    bs_page, course_id, mod_id, name, bs_url
                 )
-                if confirmed:
+                if ok:
                     self.log(f"    ✓ {name}", "success")
                     self._summary["files_uploaded"].append((name, mod_title))
                     ok_count += 1
                 else:
-                    self.log(f"    ⚠ {name} — not confirmed in module after upload", "warning")
+                    self.log(f"    ✗ {name} — topic creation failed", "error")
                     self._summary["files_failed"].append((name, mod_title))
                     fail_count += 1
 
@@ -1550,9 +1546,11 @@ class ContentChecker:
                 return None
 
             # Deep scan: (1) scan label bodies on the course page itself,
-            # (2) then navigate to each PAGE topic for its body HTML
+            # (2) navigate to each PAGE topic for its body HTML,
+            # (3) navigate into each FOLDER activity to list its files
             inline_embedded = await self._scan_moodle_labels_inline(tab, items)
             embedded        = await self._scan_moodle_page_bodies(tab, items)
+            folder_files    = await self._scan_moodle_folders(tab, items)
 
             # Accordion LABEL items must be inserted after their SECTION item so
             # _compare_items sees them in section order (appending at end misattributes
@@ -1587,7 +1585,7 @@ class ContentChecker:
             # Deduplicate embedded lists across both scanners (same href+parent → keep first)
             _seen_emb: set = set()
             _deduped_emb: list = []
-            for _e in flat_embedded + embedded:
+            for _e in flat_embedded + embedded + folder_files:
                 _key = (_e.get("href") or _e.get("name"), _e.get("parent_topic", ""))
                 if _key and _key not in _seen_emb:
                     _seen_emb.add(_key)
@@ -1630,9 +1628,6 @@ class ContentChecker:
                 self.log("  ⏭ H5P download skipped.", "dim")
             else:
                 await self._enable_h5p_downloads(context, items)
-
-            # Stage 2: download all embedded files from Moodle
-            await self._download_moodle_files(tab, items)
 
             await tab.close()
             n_items = sum(1 for i in items if i["type"] != "SECTION")
@@ -1683,7 +1678,11 @@ class ContentChecker:
                 section_dir.mkdir(parents=True, exist_ok=True)
 
                 async with tab.expect_download(timeout=20000) as dl_info:
-                    await tab.goto(href, wait_until="domcontentloaded", timeout=20000)
+                    try:
+                        await tab.goto(href, wait_until="domcontentloaded", timeout=20000)
+                    except Exception as e:
+                        if "Download is starting" not in str(e):
+                            raise
 
                 download  = await dl_info.value
                 suggested = download.suggested_filename or re.sub(r'[^\w\s\-.]', '', name).strip()[:80]
@@ -3206,6 +3205,71 @@ class ContentChecker:
                     icon = icons.get(h["type"], "?")
                     hit_strs.append(f"{icon} {h['name']}")
                 self.log(f"    ● {sec_label}{name}  →  {',  '.join(hit_strs)}", "info")
+
+        return dedup
+
+    async def _scan_moodle_folders(self, tab, items: list) -> list:
+        """
+        Visit each FOLDER activity and scrape the files listed inside it.
+        Returns a flat list of FILE items (embedded=True) to append to the main list.
+        Moodle folder pages list files as <a href="...pluginfile.php..."> links.
+        """
+        section_of: dict = {}
+        current_section = ""
+        for item in items:
+            if item["type"] == "SECTION":
+                current_section = item["name"]
+            else:
+                section_of[item.get("href", "")] = current_section
+
+        folders = [
+            i for i in items
+            if i["type"] == "FOLDER" and i.get("href") and not i.get("embedded")
+        ]
+        if not folders:
+            return []
+
+        self.log(f"  Scanning {len(folders)} folder(s) for files…", "info")
+        found = []
+
+        for folder in folders:
+            url     = folder["href"]
+            section = section_of.get(url, "")
+            try:
+                await tab.goto(url, wait_until="domcontentloaded", timeout=20000)
+                await tab.wait_for_timeout(600)
+
+                files = await tab.evaluate("""() => {
+                    const out = [];
+                    document.querySelectorAll('a[href*="pluginfile.php"]').forEach(a => {
+                        const href = a.href || '';
+                        const name = a.textContent.trim() || href.split('/').pop().split('?')[0];
+                        if (href && name) out.push({ type: 'FILE', name, href, embedded: true });
+                    });
+                    return out;
+                }""")
+
+                if files:
+                    self.log(f"    📁 {folder['name']}  →  {len(files)} file(s)", "info")
+                else:
+                    self.log(f"    ○ {folder['name']}  (empty or no direct files)", "dim")
+
+                for f in files:
+                    f["section"]      = section
+                    f["parent_topic"] = folder["name"]
+                    found.append(f)
+
+            except Exception as e:
+                self.log(f"    ✗ {folder['name']}: {e}", "warning")
+
+        # Deduplicate by href
+        seen:  set  = set()
+        dedup: list = []
+        for r in found:
+            key = r.get("href") or r.get("name")
+            if key and key not in seen:
+                seen.add(key)
+                dedup.append(r)
 
         return dedup
 
