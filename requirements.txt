@@ -1,8 +1,12 @@
+PySide6>=6.7
 playwright
-customtkinter
-CTkMessagebox
-CTkToolTip
-google-genai
+pillow
+google-generativeai
+python-dotenv
+requests
+keyring
+pytest
+pytest-qt
 beautifulsoup4
 lxml
 keyring
