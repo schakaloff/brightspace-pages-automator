@@ -1,4 +1,12 @@
-# Shared JavaScript helpers used across multiple modules.
+# Shared helpers used across multiple modules.
+
+import html as _html
+
+
+def _norm(text: str) -> str:
+    """Lowercase + decode HTML entities so &amp; == & in comparisons."""
+    return _html.unescape(text).lower().strip()
+
 
 DEEP_FIND_JS = """
     function deepFind(root, fn, depth) {
