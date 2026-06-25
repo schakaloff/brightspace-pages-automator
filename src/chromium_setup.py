@@ -8,14 +8,17 @@ import sys
 
 
 def is_chromium_installed() -> bool:
-    from playwright.sync_api import sync_playwright
-
-    p = sync_playwright().start()
-    try:
-        from pathlib import Path
-        return Path(p.chromium.executable_path).exists()
-    finally:
-        p.stop()
+    # Fast check first — avoids launching Node just to get a file path
+    import glob
+    from pathlib import Path
+    for pattern in [
+        str(Path.home() / "AppData/Local/ms-playwright/chromium-*/chrome-win64/chrome.exe"),
+        str(Path.home() / ".cache/ms-playwright/chromium-*/chrome-linux/chrome"),
+        str(Path.home() / "Library/Caches/ms-playwright/chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium"),
+    ]:
+        if glob.glob(pattern):
+            return True
+    return False
 
 
 def install_chromium(progress_cb) -> tuple[bool, str]:
