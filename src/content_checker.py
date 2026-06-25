@@ -22,8 +22,8 @@ from typing import Callable, List, Optional
 
 from playwright.async_api import BrowserContext, Page
 from config import SESSION_FILE
-from .js_helpers import DEEP_FIND_JS
-from .h5p_handler import H5PHandler
+from js_helpers import DEEP_FIND_JS
+from h5p_handler import H5PHandler
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

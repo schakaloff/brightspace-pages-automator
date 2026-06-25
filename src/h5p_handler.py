@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
-from .js_helpers import DEEP_FIND_JS, _norm
+from js_helpers import DEEP_FIND_JS, _norm
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, Page
