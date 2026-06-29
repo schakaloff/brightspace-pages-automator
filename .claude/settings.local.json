@@ -10,7 +10,22 @@
       "Bash(python *)",
       "Bash(python3 *)",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(git -C /home/apelsinchik/antigravity/brightspace-page-automator log --oneline -10)",
+      "Bash(git -C /home/apelsinchik/antigravity/brightspace-page-automator log --oneline kaltura..HEAD)",
+      "Bash(git -C /home/apelsinchik/antigravity/brightspace-page-automator log --oneline -20)",
+      "Skill(update-config)",
+      "mcp__plugin_playwright_playwright__browser_navigate",
+      "Bash(npx playwright *)",
+      "Bash(git -C /home/apelsinchik/antigravity/brightspace-page-automator add docs/superpowers/specs/2026-06-25-kaltura-categorizer-design.md)",
+      "Bash(git -C /home/apelsinchik/antigravity/brightspace-page-automator commit -m \"docs: add Kaltura categorizer design spec\")",
+      "Bash(git *)",
+      "Bash(bash /home/apelsinchik/.claude/plugins/cache/claude-plugins-official/superpowers/6.0.3/skills/subagent-driven-development/scripts/task-brief /home/apelsinchik/antigravity/brightspace-page-automator/docs/superpowers/plans/2026-06-25-kaltura-categorizer.md 1)",
+      "Bash(bash *)",
+      "Bash(/home/apelsinchik/antigravity/brightspace-page-automator/.venv/bin/python *)",
+      "Bash(.venv/bin/python *)",
+      "Bash(.venv/bin/pip install *)",
+      "Bash(PYTHONPATH=src .venv/bin/python *)"
     ]
   }
 }
