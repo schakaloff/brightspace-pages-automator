@@ -179,8 +179,8 @@ class KalturaCategorizer:
         module_url = f"{base_url}/d2l/le/content/{course_id}/modules/{module_id}/home"
         try:
             await bs_page.goto(module_url, wait_until="domcontentloaded", timeout=30000)
-        except Exception:
-            pass
+        except Exception as e:
+            log_fn(f"  ⚠ Navigation to module failed: {e}", "warning")
         await bs_page.wait_for_timeout(2000)
 
         # ── Shadow-DOM helpers ─────────────────────────────────────────────────
@@ -382,7 +382,10 @@ class KalturaCategorizer:
             bs_browser = await p.chromium.launch(headless=False)
             try:
                 storage = SESSION_FILE if os.path.exists(SESSION_FILE) else None
-                bs_context = await bs_browser.new_context(storage_state=storage)
+                bs_context = await bs_browser.new_context(
+                    storage_state=storage,
+                    permissions=["clipboard-read", "clipboard-write"],
+                )
                 kmc_page = await kmc_context.new_page()
                 bs_page = await bs_context.new_page()
 
@@ -411,8 +414,11 @@ class KalturaCategorizer:
                     except Exception as e:
                         log_fn(f"✗ {name}: {e}", "error")
 
-                await kmc_context.storage_state(path=KMC_SESSION_FILE)
             finally:
+                try:
+                    await kmc_context.storage_state(path=KMC_SESSION_FILE)
+                except Exception:
+                    pass
                 await kmc_browser.close()
                 await bs_browser.close()
 
