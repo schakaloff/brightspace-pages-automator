@@ -80,6 +80,49 @@ class KalturaCategorizer:
                 await browser.close()
         return results
 
+    async def get_bs_modules(self, bs_url: str) -> list[dict]:
+        """Return [{id, title}] for all modules in the Brightspace course via D2L TOC API."""
+        from content_checker import _extract_course_id
+        course_id = _extract_course_id(bs_url)
+        if not course_id:
+            raise ValueError(f"Could not extract course ID from URL: {bs_url}")
+        base_url = "/".join(bs_url.split("/")[:3])
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            try:
+                storage = SESSION_FILE if os.path.exists(SESSION_FILE) else None
+                context = await browser.new_context(storage_state=storage)
+                page = await context.new_page()
+                await page.goto(
+                    f"{base_url}/d2l/le/content/{course_id}/home",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                modules = await page.evaluate(
+                    """async (courseId) => {
+                        const resp = await fetch(
+                            `/d2l/api/le/1.0/${courseId}/content/toc`,
+                            {credentials: 'include'}
+                        );
+                        if (!resp.ok) return null;
+                        const toc = await resp.json();
+                        const result = [];
+                        function collect(modules) {
+                            for (const m of (modules || [])) {
+                                result.push({id: String(m.ModuleId), title: m.Title || '(unnamed)'});
+                                collect(m.Modules);
+                            }
+                        }
+                        collect(toc.Modules || []);
+                        return result;
+                    }""",
+                    course_id,
+                )
+                return modules or []
+            finally:
+                await browser.close()
+
     async def categorize_entries(
         self,
         entries: list[dict],
