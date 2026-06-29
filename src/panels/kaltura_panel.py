@@ -45,12 +45,18 @@ class KalturaPanel(QWidget):
 
         layout.addWidget(_form_label("MOODLE COURSE URL"))
         layout.addSpacing(4)
+        moodle_row = QHBoxLayout()
         self._moodle_url = QLineEdit()
         self._moodle_url.setPlaceholderText(
             "https://mymoodle.okanagan.bc.ca/course/view.php?id=183744"
         )
         self._moodle_url.setFixedHeight(40)
-        layout.addWidget(self._moodle_url)
+        moodle_row.addWidget(self._moodle_url)
+        self._login_btn = QPushButton("Login to Moodle")
+        self._login_btn.setFixedHeight(40)
+        self._login_btn.clicked.connect(self._start_login)
+        moodle_row.addWidget(self._login_btn)
+        layout.addLayout(moodle_row)
         layout.addSpacing(12)
 
         bs_row = QHBoxLayout()
@@ -214,6 +220,32 @@ class KalturaPanel(QWidget):
 
     # ── Workers ───────────────────────────────────────────────────────────────
 
+    def _start_login(self):
+        url = self._moodle_url.text().strip() or "https://mymoodle.okanagan.bc.ca"
+        self._login_btn.setText("Logging in…")
+        self._login_btn.setEnabled(False)
+        q = self._log_queue
+
+        moodle_user = self._mw.moodle_username
+        moodle_pass = self._mw.moodle_password
+
+        def worker():
+            try:
+                from kaltura_categorizer import KalturaCategorizer
+                q.put(("Logging in to Moodle…", "dim"))
+                asyncio.run(KalturaCategorizer().login_to_moodle(
+                    url,
+                    moodle_username=moodle_user,
+                    moodle_password=moodle_pass,
+                    log_fn=lambda msg, tag="dim": q.put((msg, tag)),
+                ))
+                q.put(("__LOGIN_DONE__", None))
+            except Exception as e:
+                q.put((f"Login error: {e}", "error"))
+                q.put(("__LOGIN_DONE__", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _start_scan(self):
         url = self._moodle_url.text().strip()
         if not url:
@@ -230,7 +262,9 @@ class KalturaPanel(QWidget):
             try:
                 from kaltura_categorizer import KalturaCategorizer
                 q.put(("Scanning Moodle course…", "dim"))
-                entries = asyncio.run(KalturaCategorizer().scan_moodle_course(url))
+                entries = asyncio.run(KalturaCategorizer().scan_moodle_course(
+                    url, log_fn=lambda msg, tag="dim": q.put((msg, tag))
+                ))
                 q.put(("__SCAN_DONE__", entries))
             except Exception as e:
                 q.put((f"Scan error: {e}", "error"))
@@ -246,12 +280,23 @@ class KalturaPanel(QWidget):
         self._fetch_modules_btn.setText("Fetching…")
         self._fetch_modules_btn.setEnabled(False)
         q = self._log_queue
+        bs_user = self._mw.bs_username
+        bs_pass = self._mw.bs_password
+        sso_email = self._mw.sso_email
+        sso_pass = self._mw.sso_password
 
         def worker():
             try:
                 from kaltura_categorizer import KalturaCategorizer
                 q.put(("Fetching Brightspace modules…", "dim"))
-                modules = asyncio.run(KalturaCategorizer().get_bs_modules(bs_url))
+                modules = asyncio.run(KalturaCategorizer().get_bs_modules(
+                    bs_url,
+                    bs_username=bs_user,
+                    bs_password=bs_pass,
+                    sso_email=sso_email,
+                    sso_password=sso_pass,
+                    log_fn=lambda msg, tag="dim": q.put((msg, tag)),
+                ))
                 q.put(("__MODULES_DONE__", modules))
             except Exception as e:
                 q.put((f"Fetch modules error: {e}", "error"))
@@ -299,7 +344,11 @@ class KalturaPanel(QWidget):
         try:
             while True:
                 msg, payload = self._log_queue.get_nowait()
-                if msg == "__SCAN_DONE__":
+                if msg == "__LOGIN_DONE__":
+                    self._login_btn.setText("Login to Moodle")
+                    self._login_btn.setEnabled(True)
+                    self._log.append_log("Moodle session saved — ready to scan.", "success")
+                elif msg == "__SCAN_DONE__":
                     entries = payload
                     self._scan_btn.setText("Scan Moodle")
                     self._scan_btn.setEnabled(True)

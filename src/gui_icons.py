@@ -50,6 +50,22 @@ def _restyle(p, s, c):
     p.drawRect(QRectF(s * 0.72 - sq / 2, s * 0.28 - sq / 2, sq, sq))
 
 
+def _kaltura(p, s, c):
+    pen = QPen(c, 1.8)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRoundedRect(QRectF(s * 0.1, s * 0.2, s * 0.8, s * 0.6), 3, 3)
+    p.setBrush(QBrush(c))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawPolygon(QPolygonF([
+        QPointF(s * 0.38, s * 0.35),
+        QPointF(s * 0.38, s * 0.65),
+        QPointF(s * 0.68, s * 0.50),
+    ]))
+
+
 def _settings(p, s, c):
     p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(c))
     cx, cy = s / 2, s / 2
@@ -112,6 +128,7 @@ def _running(p, s, c):
 
 _FNS = {
     "checker": _checker, "collect": _collect, "restyle": _restyle,
+    "kaltura": _kaltura,
     "settings": _settings, "run": _run, "next": _next_arrow,
     "done": _done, "locked": _locked, "running": _running,
 }
