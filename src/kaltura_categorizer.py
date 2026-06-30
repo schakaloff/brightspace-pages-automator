@@ -46,68 +46,108 @@ class KalturaCategorizer:
                     log(f"Not on Moodle — got redirected to {page.url[:80]} — session may have expired. Use 'Login to Moodle' first.", "error")
                     return []
 
-                # Collect all kalvidres links — original flat approach (proven reliable)
-                links = await page.evaluate("""() => {
-                    return [...document.querySelectorAll('a[href*="mod/kalvidres/view.php"]')]
-                        .map(a => a.href);
-                }""")
-                links = list(dict.fromkeys(links))  # deduplicate, preserve order
-                log(f"Found {len(links)} kalvidres link(s) on course page")
-
-                if not links:
-                    # Debug: show page title so we know what we landed on
-                    title = await page.title()
-                    log(f"Page title: {title!r} — check URL is a Moodle course page", "warning")
-                    return []
-
-                # Best-effort: map each link to its Moodle section name
-                link_to_section = await page.evaluate("""() => {
+                # Collect kalvidres links AND mod/page links (pages may embed Kaltura)
+                link_data = await page.evaluate("""() => {
                     const map = {};
                     document.querySelectorAll('li.section, li.section.main').forEach(section => {
                         const heading = section.querySelector('.sectionname, h3, h4');
                         const sectionName = heading ? heading.textContent.trim() : '(unnamed section)';
-                        section.querySelectorAll('a[href*="mod/kalvidres/view.php"]').forEach(a => {
-                            map[a.href] = sectionName;
+                        section.querySelectorAll(
+                            'a[href*="mod/kalvidres/view.php"], a[href*="mod/page/view.php"]'
+                        ).forEach(a => {
+                            if (!map[a.href]) map[a.href] = sectionName;
                         });
                     });
                     return map;
                 }""")
 
-                link_items = [
-                    {"href": link, "section_name": link_to_section.get(link, "")}
-                    for link in links
-                ]
+                all_links = list(link_data.keys())
+                log(f"Found {len(all_links)} candidate link(s) on course page (kalvidres + pages)")
 
-                for i, item in enumerate(link_items, 1):
-                    link = item["href"]
-                    section_name = item["section_name"]
-                    log(f"[{i}/{len(link_items)}] Visiting {link}")
+                if not all_links:
+                    title = await page.title()
+                    log(f"Page title: {title!r} — check URL is a Moodle course page", "warning")
+                    return []
+
+                for i, link in enumerate(all_links, 1):
+                    section_name = link_data[link]
+                    log(f"[{i}/{len(all_links)}] Visiting {link}")
                     try:
                         await page.goto(link, wait_until="networkidle", timeout=20000)
 
-                        iframe_src = await page.evaluate("""() => {
-                            const f = document.querySelector('iframe#contentframe');
-                            return f ? f.src : '';
-                        }""")
-                        if not iframe_src:
-                            log(f"  No contentframe iframe found — skipping", "warning")
-                            continue
-                        m = re.search(r'entryid%2F([\w_]+)', iframe_src, re.IGNORECASE)
-                        if not m:
-                            log(f"  No entryid in iframe src: {iframe_src[:80]!r} — skipping", "warning")
-                            continue
-                        entry_id = m.group(1)
+                        if "mod/kalvidres" in link:
+                            # Dedicated Kaltura activity — entryId in iframe src
+                            iframe_src = await page.evaluate("""() => {
+                                const f = document.querySelector('iframe#contentframe');
+                                return f ? f.src : '';
+                            }""")
+                            if not iframe_src:
+                                log(f"  No contentframe iframe — skipping", "warning")
+                                continue
+                            m = re.search(r'entryid%2F([\w_]+)', iframe_src, re.IGNORECASE)
+                            if not m:
+                                log(f"  No entryid in iframe src — skipping", "warning")
+                                continue
+                            entry_id = m.group(1)
+                            title = await page.title()
+                            name = re.sub(r'\s*\|\s*OCmoodle\s*$', '', title).strip()
+                            log(f"  → kalvidres entry_id={entry_id}  name={name!r}", "info")
+                            results.append({
+                                "entry_id": entry_id,
+                                "name": name,
+                                "moodle_url": link,
+                                "section_name": section_name,
+                            })
 
-                        title = await page.title()
-                        name = re.sub(r'\s*\|\s*OCmoodle\s*$', '', title).strip()
-                        log(f"  → entry_id={entry_id}  name={name!r}  section={section_name!r}", "info")
+                        else:
+                            # mod/page — scan body HTML for embedded Kaltura entryIds
+                            embedded = await page.evaluate("""() => {
+                                const found = [];
+                                // iframe src pattern: entryId=xxx or entryid/xxx
+                                document.querySelectorAll('iframe[src*="kaltura"]').forEach(f => {
+                                    const m = f.src.match(/entryid[%2F\/=]+([\w_]+)/i);
+                                    if (m) found.push(m[1]);
+                                });
+                                // script-based: entryId: 'xxx' or entryId: "xxx"
+                                document.querySelectorAll('script').forEach(s => {
+                                    const matches = [...s.textContent.matchAll(/entryId\s*[=:]\s*['"]([^'"]+)['"]/gi)];
+                                    matches.forEach(m => found.push(m[1]));
+                                });
+                                // also check div id="kaltura_player_NNN" — extract entryId from sibling script
+                                document.querySelectorAll('[id^="kaltura_player_"]').forEach(el => {
+                                    // entryId already captured by script scan above
+                                });
+                                return [...new Set(found)];
+                            }""")
 
-                        results.append({
-                            "entry_id": entry_id,
-                            "name": name,
-                            "moodle_url": link,
-                            "section_name": section_name,
-                        })
+                            if not embedded:
+                                log(f"  No Kaltura embeds found in page — skipping", "dim")
+                                continue
+
+                            # Prefer page h1 over browser tab title — tab title includes course prefix
+                            page_name = await page.evaluate("""() => {
+                                const h1 = document.querySelector(
+                                    '.page-header-headings h1, .activity-name h1, h1.h2, h1'
+                                );
+                                return h1 ? h1.textContent.trim() : '';
+                            }""")
+                            if not page_name:
+                                page_title = await page.title()
+                                page_name = re.sub(r'\s*\|\s*OCmoodle\s*$', '', page_title).strip()
+                                # strip course prefix "COURSE_CODE: " if present
+                                page_name = re.sub(r'^[A-Z0-9_\-]+:\s*', '', page_name).strip()
+                            log(f"  Found {len(embedded)} Kaltura embed(s) in page: {page_name!r}", "info")
+
+                            for j, entry_id in enumerate(embedded):
+                                name = page_name if len(embedded) == 1 else f"{page_name} ({j+1})"
+                                log(f"  → page embed entry_id={entry_id}  name={name!r}", "info")
+                                results.append({
+                                    "entry_id": entry_id,
+                                    "name": name,
+                                    "moodle_url": link,
+                                    "section_name": section_name,
+                                })
+
                     except Exception as e:
                         log(f"  Error: {repr(e)} — skipping", "warning")
                         continue
@@ -406,14 +446,19 @@ class KalturaCategorizer:
         await bs_page.wait_for_timeout(1200)
 
         # ── Click "Page" tile ──────────────────────────────────────────────────
-        # Confirmed selector: a.add-material-tile with .material-tile-text === "Page"
-        # Dialog renders inside smart-curriculum iframe; shadow DOM traversal needed.
         _JS_PAGE_TILE = """() => {
             function deepFind(root, depth) {
                 if (depth === 0) return null;
+                // Primary: a.add-material-tile with child text "Page"
                 for (const a of root.querySelectorAll('a.add-material-tile')) {
                     const t = a.querySelector('.material-tile-text');
                     if (t && t.textContent.trim() === 'Page') { a.click(); return true; }
+                }
+                // Fallback: any <a> or <button> whose visible text is exactly "Page"
+                for (const el of root.querySelectorAll('a, button')) {
+                    if (el.textContent.trim() === 'Page' && el.offsetParent !== null) {
+                        el.click(); return true;
+                    }
                 }
                 for (const c of root.querySelectorAll('*')) {
                     if (c.shadowRoot) {
@@ -427,7 +472,7 @@ class KalturaCategorizer:
 
         page_tile_found = False
         frames = [bs_page, *[f for f in bs_page.frames if f != bs_page.main_frame]]
-        for attempt in range(8):
+        for attempt in range(20):
             for ctx in frames:
                 try:
                     if await ctx.evaluate(_JS_PAGE_TILE):
@@ -437,7 +482,7 @@ class KalturaCategorizer:
                     pass
             if page_tile_found:
                 break
-            await bs_page.wait_for_timeout(800)
+            await bs_page.wait_for_timeout(600)
 
         if not page_tile_found:
             log_fn("  ✗ 'Page' tile not found", "error")

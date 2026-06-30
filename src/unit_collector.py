@@ -787,7 +787,14 @@ class UnitCollector:
                     except Exception:
                         pass
                 if clicked_insert_on_error:
-                    await page.wait_for_timeout(800)
+                    await page.wait_for_timeout(1200)
+                    # Check if dialog already closed — if so, insertion is done
+                    try:
+                        if await page.locator('iframe[title="Insert Stuff"], iframe.d2l-dialog-frame').count() == 0:
+                            self.log(f"  ✓ Inserted (via error-Insert): {file_item['filename']}", "success")
+                            return True
+                    except Exception:
+                        pass
                     break
 
             # Step 5b: Handle overwrite dialog if the file already exists
