@@ -450,38 +450,6 @@ class KalturaCategorizer:
             await bs_page.wait_for_timeout(4000)
         await bs_page.wait_for_timeout(1500)
 
-        # ── Fill title ─────────────────────────────────────────────────────────
-        # Title input is "Untitled" placeholder inside shadow DOM
-        title_filled = await bs_page.evaluate("""(t) => {
-            function deepFind(root, depth) {
-                if (depth === 0) return null;
-                for (const inp of root.querySelectorAll('input')) {
-                    if (inp.value === 'Untitled' || inp.placeholder === 'Untitled') return inp;
-                }
-                for (const c of root.querySelectorAll('*')) {
-                    if (c.shadowRoot) {
-                        const f = deepFind(c.shadowRoot, depth - 1);
-                        if (f) return f;
-                    }
-                }
-                return null;
-            }
-            const inp = deepFind(document, 12);
-            if (!inp) return false;
-            inp.focus();
-            inp.select();
-            inp.value = '';
-            inp.dispatchEvent(new Event('input', {bubbles:true}));
-            inp.value = t;
-            inp.dispatchEvent(new Event('input', {bubbles:true}));
-            inp.dispatchEvent(new Event('change', {bubbles:true}));
-            return true;
-        }""", title)
-        if title_filled:
-            log_fn(f"  ✓ Title: {title}", "dim")
-        else:
-            log_fn("  ⚠ Title field not found — set manually", "warning")
-
         # ── Open Source Code editor ────────────────────────────────────────────
         # Toolbar may have overflow; try direct then via more-options chomper
         source_opened = False
@@ -547,6 +515,40 @@ class KalturaCategorizer:
                 await btn.first.click()
                 break
         await bs_page.wait_for_timeout(1500)
+
+        # ── Fill title (after source code dialog closed, before Save and Close) ─
+        # Use JS only to locate + focus the input, then Playwright keyboard to type
+        # — synthetic JS events don't trigger Lit/D2L property observers.
+        title_focused = await bs_page.evaluate("""() => {
+            function findTitleInput(root, depth) {
+                if (depth === 0) return null;
+                for (const inp of root.querySelectorAll('input[type="text"], input:not([type])')) {
+                    const label = (inp.getAttribute('aria-label') || '').toLowerCase();
+                    if (
+                        label.includes('title') ||
+                        inp.maxLength === 150 ||
+                        inp.value === 'Untitled' ||
+                        inp.placeholder === 'Untitled'
+                    ) { inp.focus(); inp.select(); return true; }
+                }
+                for (const c of root.querySelectorAll('*')) {
+                    if (c.shadowRoot) {
+                        if (findTitleInput(c.shadowRoot, depth - 1)) return true;
+                    }
+                }
+                return false;
+            }
+            return findTitleInput(document, 12);
+        }""")
+        if title_focused:
+            await bs_page.wait_for_timeout(200)
+            await bs_page.keyboard.press("Control+a")
+            await bs_page.wait_for_timeout(100)
+            await bs_page.keyboard.type(title, delay=30)
+            await bs_page.wait_for_timeout(500)
+            log_fn(f"  ✓ Title typed: {title}", "dim")
+        else:
+            log_fn("  ⚠ Title field not found — set manually", "warning")
 
         # ── Save and Close page ────────────────────────────────────────────────
         for selector in (
