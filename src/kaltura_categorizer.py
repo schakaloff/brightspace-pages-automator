@@ -293,6 +293,7 @@ class KalturaCategorizer:
         await kmc_page.goto(KMC_URL, wait_until="networkidle", timeout=20000)
 
         search = kmc_page.locator("input[type='text']").first
+        await search.wait_for(state="visible", timeout=10000)
         await search.click()
         await search.click(click_count=3)
         await search.type(entry_id)
@@ -406,28 +407,37 @@ class KalturaCategorizer:
 
         # ── Click "Page" tile ──────────────────────────────────────────────────
         # Confirmed selector: a.add-material-tile with .material-tile-text === "Page"
+        # Dialog renders inside smart-curriculum iframe; shadow DOM traversal needed.
         _JS_PAGE_TILE = """() => {
-            const frames = [document];
-            for (const f of document.querySelectorAll('iframe')) {
-                try { if (f.contentDocument) frames.push(f.contentDocument); } catch(e) {}
-            }
-            for (const doc of frames) {
-                for (const a of doc.querySelectorAll('a.add-material-tile')) {
+            function deepFind(root, depth) {
+                if (depth === 0) return null;
+                for (const a of root.querySelectorAll('a.add-material-tile')) {
                     const t = a.querySelector('.material-tile-text');
                     if (t && t.textContent.trim() === 'Page') { a.click(); return true; }
                 }
+                for (const c of root.querySelectorAll('*')) {
+                    if (c.shadowRoot) {
+                        if (deepFind(c.shadowRoot, depth - 1)) return true;
+                    }
+                }
+                return false;
             }
-            return false;
+            return deepFind(document, 12);
         }"""
 
         page_tile_found = False
-        for ctx in [bs_page, *[f for f in bs_page.frames if f != bs_page.main_frame]]:
-            try:
-                if await ctx.evaluate(_JS_PAGE_TILE):
-                    page_tile_found = True
-                    break
-            except Exception:
-                pass
+        frames = [bs_page, *[f for f in bs_page.frames if f != bs_page.main_frame]]
+        for attempt in range(8):
+            for ctx in frames:
+                try:
+                    if await ctx.evaluate(_JS_PAGE_TILE):
+                        page_tile_found = True
+                        break
+                except Exception:
+                    pass
+            if page_tile_found:
+                break
+            await bs_page.wait_for_timeout(800)
 
         if not page_tile_found:
             log_fn("  ✗ 'Page' tile not found", "error")
@@ -574,7 +584,7 @@ class KalturaCategorizer:
         base_url = "/".join(bs_url.split("/")[:3])
 
         async with async_playwright() as p:
-            kmc_context, kmc_browser = await self._get_kmc_context(p)
+            kmc_context, kmc_browser, kmc_page = await self._get_kmc_context(p)
             bs_browser = await p.chromium.launch(headless=False, slow_mo=80)
             try:
                 storage = SESSION_FILE if os.path.exists(SESSION_FILE) else None
@@ -583,7 +593,6 @@ class KalturaCategorizer:
                     no_viewport=True,
                     permissions=["clipboard-read", "clipboard-write"],
                 )
-                kmc_page = await kmc_context.new_page()
                 bs_page = await bs_context.new_page()
                 log_fn(f"BS page created, closed={bs_page.is_closed()}", "dim")
 
@@ -645,12 +654,11 @@ class KalturaCategorizer:
             # If not on entries list (expired session / SSO redirect), wait indefinitely
             if "kmcng/content/entries/list" not in page.url:
                 await page.wait_for_url("**/kmcng/content/entries/list**", timeout=0)
-                # Let the SPA finish rendering before saving session
                 await page.wait_for_timeout(2000)
 
             await context.storage_state(path=KMC_SESSION_FILE)
-            await page.close()
-            return context, browser
+            # Return page so caller can reuse it — avoids opening KMC a second time
+            return context, browser, page
         except Exception:
             await browser.close()
             raise
