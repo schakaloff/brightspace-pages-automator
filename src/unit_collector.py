@@ -1,4 +1,5 @@
 import asyncio
+import re
 import tempfile
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -863,6 +864,36 @@ class UnitCollector:
                     continue
                 break
 
+            # Step 5c: Fill the link-text field with the corrected name (if we have one)
+            # so Brightspace shows a readable title instead of the raw file path.
+            corrected = file_item.get("corrected_name")
+            if corrected:
+                display_name = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", corrected)
+                _JS_FILL_ZK = """(name) => {
+                    const el = document.querySelector('#z_k');
+                    if (!el) return false;
+                    const setter = Object.getOwnPropertyDescriptor(
+                        window.HTMLInputElement.prototype, 'value').set;
+                    setter.call(el, name);
+                    el.dispatchEvent(new Event('input', {bubbles: true}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                    return true;
+                }"""
+                filled = False
+                for frame in page.frames:
+                    if frame == page.main_frame:
+                        continue
+                    try:
+                        if await frame.evaluate(_JS_FILL_ZK, display_name):
+                            filled = True
+                            break
+                    except Exception:
+                        pass
+                if filled:
+                    self.log(f"  ✓ Set link text: {display_name}", "dim")
+                else:
+                    self.log(f"  ⚠ #z_k field not found — link text left as default", "dim")
+
             # Step 6: Wait for "Insert" button (appears after upload completes) and click it
             _JS_CLICK_INSERT = """() => {
                 const btns = Array.from(document.querySelectorAll('button'));
@@ -1003,8 +1034,10 @@ class UnitCollector:
                             if extracted:
                                 result["html"] = extracted
                             else:
+                                fd["corrected_name"] = self._name_matcher(label)
                                 result["file"] = fd
                         else:
+                            fd["corrected_name"] = self._name_matcher(label)
                             result["file"] = fd
                 finally:
                     try:
