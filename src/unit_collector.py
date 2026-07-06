@@ -800,16 +800,20 @@ class UnitCollector:
                 self.log(f"  ⚠ Footer Upload button not clicked for {file_item['filename']}", "warning")
 
             # Step 5a-pre: Fill the link-text field with the corrected name (if we have
-            # one) as soon as it appears. #z_k lives on the same confirmation screen as
-            # the final "Insert" button, so this must run BEFORE any Insert-button click
-            # below — those clicks (error-recovery or the final one) fire on the first
-            # visible Insert button without checking for #z_k, and would otherwise
-            # confirm the screen before this field is ever set.
+            # one) as soon as it appears. This field lives on the same confirmation
+            # screen as the final "Insert" button, so this must run BEFORE any
+            # Insert-button click below — those clicks (error-recovery or the final
+            # one) fire on the first visible Insert button without checking for this
+            # field, and would otherwise confirm the screen before it's ever set.
+            # The field's id/name (e.g. "z_k") is a short auto-generated ASP.NET-style
+            # control id that shifts letter depending on which error/overwrite controls
+            # got inserted earlier in the form, so it is NOT a stable selector — match
+            # on the field's class instead, which is consistent across renders.
             corrected = file_item.get("corrected_name")
             if corrected:
                 display_name = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", corrected)
                 _JS_FILL_ZK = """(name) => {
-                    const el = document.querySelector('#z_k');
+                    const el = document.querySelector('input.rs_skip.d2l-edit-legacy[type="text"]');
                     if (!el) return false;
                     const setter = Object.getOwnPropertyDescriptor(
                         window.HTMLInputElement.prototype, 'value').set;
@@ -835,7 +839,7 @@ class UnitCollector:
                 if filled:
                     self.log(f"  ✓ Set link text: {display_name}", "dim")
                 else:
-                    self.log(f"  ⚠ #z_k field not found — link text left as default", "dim")
+                    self.log(f"  ⚠ Link-text field not found — link text left as default", "dim")
 
             # Step 5a: After clicking Upload in an error state, Brightspace may show
             # an intermediate screen with an "Insert" button before the overwrite dialog.
