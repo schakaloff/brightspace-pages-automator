@@ -799,6 +799,44 @@ class UnitCollector:
             if not uploaded:
                 self.log(f"  ⚠ Footer Upload button not clicked for {file_item['filename']}", "warning")
 
+            # Step 5a-pre: Fill the link-text field with the corrected name (if we have
+            # one) as soon as it appears. #z_k lives on the same confirmation screen as
+            # the final "Insert" button, so this must run BEFORE any Insert-button click
+            # below — those clicks (error-recovery or the final one) fire on the first
+            # visible Insert button without checking for #z_k, and would otherwise
+            # confirm the screen before this field is ever set.
+            corrected = file_item.get("corrected_name")
+            if corrected:
+                display_name = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", corrected)
+                _JS_FILL_ZK = """(name) => {
+                    const el = document.querySelector('#z_k');
+                    if (!el) return false;
+                    const setter = Object.getOwnPropertyDescriptor(
+                        window.HTMLInputElement.prototype, 'value').set;
+                    setter.call(el, name);
+                    el.dispatchEvent(new Event('input', {bubbles: true}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                    return true;
+                }"""
+                filled = False
+                for _ in range(10):
+                    for frame in page.frames:
+                        if frame == page.main_frame:
+                            continue
+                        try:
+                            if await frame.evaluate(_JS_FILL_ZK, display_name):
+                                filled = True
+                                break
+                        except Exception:
+                            pass
+                    if filled:
+                        break
+                    await page.wait_for_timeout(400)
+                if filled:
+                    self.log(f"  ✓ Set link text: {display_name}", "dim")
+                else:
+                    self.log(f"  ⚠ #z_k field not found — link text left as default", "dim")
+
             # Step 5a: After clicking Upload in an error state, Brightspace may show
             # an intermediate screen with an "Insert" button before the overwrite dialog.
             _JS_CLICK_INSERT_ON_ERROR = """() => {
@@ -869,36 +907,6 @@ class UnitCollector:
                 else:
                     continue
                 break
-
-            # Step 5c: Fill the link-text field with the corrected name (if we have one)
-            # so Brightspace shows a readable title instead of the raw file path.
-            corrected = file_item.get("corrected_name")
-            if corrected:
-                display_name = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", corrected)
-                _JS_FILL_ZK = """(name) => {
-                    const el = document.querySelector('#z_k');
-                    if (!el) return false;
-                    const setter = Object.getOwnPropertyDescriptor(
-                        window.HTMLInputElement.prototype, 'value').set;
-                    setter.call(el, name);
-                    el.dispatchEvent(new Event('input', {bubbles: true}));
-                    el.dispatchEvent(new Event('change', {bubbles: true}));
-                    return true;
-                }"""
-                filled = False
-                for frame in page.frames:
-                    if frame == page.main_frame:
-                        continue
-                    try:
-                        if await frame.evaluate(_JS_FILL_ZK, display_name):
-                            filled = True
-                            break
-                    except Exception:
-                        pass
-                if filled:
-                    self.log(f"  ✓ Set link text: {display_name}", "dim")
-                else:
-                    self.log(f"  ⚠ #z_k field not found — link text left as default", "dim")
 
             # Step 6: Wait for "Insert" button (appears after upload completes) and click it
             _JS_CLICK_INSERT = """() => {
