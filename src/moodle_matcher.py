@@ -137,30 +137,36 @@ async def scrape_moodle_names(moodle_course_url: str, log_fn=None) -> list:
         _log("No Moodle session on disk — run ensure_moodle_session first", "warning", log_fn=log_fn)
         return []
 
-    p = await async_playwright().start()
-    browser = await p.chromium.launch(headless=True)
+    p = None
+    browser = None
     try:
-        context = await browser.new_context(storage_state=MOODLE_SESSION_FILE)
-        page = await context.new_page()
+        p = await async_playwright().start()
+        browser = await p.chromium.launch(headless=True)
         try:
-            await page.goto(moodle_course_url, wait_until="networkidle", timeout=30000)
-        except Exception:
-            pass
+            context = await browser.new_context(storage_state=MOODLE_SESSION_FILE)
+            page = await context.new_page()
+            try:
+                await page.goto(moodle_course_url, wait_until="networkidle", timeout=30000)
+            except Exception:
+                pass
 
-        if "mymoodle.okanagan.bc.ca" not in page.url:
-            _log(f"Redirected off Moodle ({page.url[:80]}) — session expired", "warning", log_fn=log_fn)
-            return []
+            if "mymoodle.okanagan.bc.ca" not in page.url:
+                _log(f"Redirected off Moodle ({page.url[:80]}) — session expired", "warning", log_fn=log_fn)
+                return []
 
-        items = await page.evaluate(_JS_MOODLE_ITEMS)
-        names = [i["name"] for i in (items or []) if i.get("type") != "SECTION" and i.get("name")]
-        _log(f"Scraped {len(names)} Moodle item name(s)", "success", log_fn=log_fn)
-        return names
+            items = await page.evaluate(_JS_MOODLE_ITEMS)
+            names = [i["name"] for i in (items or []) if i.get("type") != "SECTION" and i.get("name")]
+            _log(f"Scraped {len(names)} Moodle item name(s)", "success", log_fn=log_fn)
+            return names
+        finally:
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
     except Exception as e:
         _log(f"Moodle scrape failed: {e}", "warning", log_fn=log_fn)
         return []
     finally:
-        try:
-            await browser.close()
-        except Exception:
-            pass
-        await p.stop()
+        if p is not None:
+            await p.stop()
