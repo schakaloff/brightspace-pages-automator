@@ -60,6 +60,9 @@ class UnitCollector:
         bs_password: str = "",
         sso_email: str = "",
         sso_password: str = "",
+        moodle_url: str = "",
+        moodle_username: str = "",
+        moodle_password: str = "",
     ):
         self.unit_url = unit_url
         self.target_url = target_url
@@ -74,10 +77,38 @@ class UnitCollector:
         self.bs_password = bs_password
         self.sso_email = sso_email
         self.sso_password = sso_password
+        self.moodle_url = moodle_url.strip()
+        self.moodle_username = moodle_username
+        self.moodle_password = moodle_password
+        self._name_matcher = lambda label: None
         self._clipboard_lock = asyncio.Lock()
         self._link_lock = asyncio.Lock()
         self._dl_dir = Path(tempfile.gettempdir()) / "brightspace_collector"
         self._dl_dir.mkdir(exist_ok=True)
+
+    async def _build_name_matcher(self) -> None:
+        """Populate self._name_matcher from the Moodle course, if configured.
+        Non-fatal on any failure — falls back to a no-op matcher."""
+        if not self.moodle_url:
+            return
+        try:
+            import os
+            from moodle_matcher import (
+                ensure_moodle_session, scrape_moodle_names, build_name_matcher,
+                MOODLE_SESSION_FILE,
+            )
+            if not os.path.exists(MOODLE_SESSION_FILE):
+                await ensure_moodle_session(
+                    self.moodle_username, self.moodle_password, log_fn=self.log
+                )
+            names = await scrape_moodle_names(self.moodle_url, log_fn=self.log)
+            if not names:
+                self.log("⚠ No Moodle names scraped — using Brightspace labels as-is", "warning")
+                return
+            self._name_matcher = build_name_matcher(names)
+            self.log(f"✓ Moodle name matcher ready ({len(names)} item(s))", "success")
+        except Exception as e:
+            self.log(f"⚠ Moodle matching unavailable: {e} — using Brightspace labels as-is", "warning")
 
     def log(self, msg: str, level: str = "info"):
         if self._log_fn:
@@ -1076,6 +1107,8 @@ class UnitCollector:
                     await asyncio.sleep(0.5)
                 return
 
+            await self._build_name_matcher()
+
             # ── Phase 1: scrape all topics in parallel ────────────────────────
             self.log("─" * 52, "dim")
             self.log(
@@ -1104,8 +1137,10 @@ class UnitCollector:
                     sections.append(f"<h2>{safe}</h2>\n{result['html']}\n<hr/>\n")
                     html_count += 1
                 elif result["link_url"]:
+                    corrected = self._name_matcher(topic["label"])
+                    link_label = (corrected or topic["label"]).replace("<", "&lt;").replace(">", "&gt;")
                     sections.append(
-                        f'<p><strong>{safe}:</strong> '
+                        f'<p><strong>{link_label}:</strong> '
                         f'<a href="{result["link_url"]}">{result["link_url"]}</a></p>\n'
                     )
                     link_count += 1
@@ -1181,6 +1216,9 @@ async def run(
     bs_password: str = "",
     sso_email: str = "",
     sso_password: str = "",
+    moodle_url: str = "",
+    moodle_username: str = "",
+    moodle_password: str = "",
 ) -> None:
     await UnitCollector(
         unit_url=unit_url,
@@ -1196,4 +1234,7 @@ async def run(
         bs_password=bs_password,
         sso_email=sso_email,
         sso_password=sso_password,
+        moodle_url=moodle_url,
+        moodle_username=moodle_username,
+        moodle_password=moodle_password,
     ).run()
