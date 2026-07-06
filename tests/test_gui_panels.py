@@ -83,6 +83,16 @@ def test_collector_panel_builds(qtbot):
     assert panel._continue_btn.isHidden()
 
 
+def test_collector_panel_has_moodle_url_field(qtbot):
+    from unittest.mock import MagicMock
+    from gui_panels import CollectorPanel
+    mw = MagicMock(); mw.chromium_ready = False; mw.load_config.return_value = {}
+    panel = CollectorPanel(mw); qtbot.addWidget(panel)
+    assert panel._moodle_entry.text() == ""
+    panel._moodle_entry.setText("https://mymoodle.okanagan.bc.ca/course/view.php?id=123")
+    assert panel._moodle_entry.text() == "https://mymoodle.okanagan.bc.ca/course/view.php?id=123"
+
+
 def test_restyle_panel_builds(qtbot):
     from unittest.mock import MagicMock
     from gui_panels import RestylePanel
