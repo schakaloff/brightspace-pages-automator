@@ -75,6 +75,42 @@ def _numbers_conflict(a: str, b: str) -> bool:
     return any(int(x) != int(y) for x, y in zip(nums_a, nums_b))
 
 
+_WORD_NUMS = {
+    "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+    "eleven": "11", "twelve": "12", "thirteen": "13", "fourteen": "14",
+    "fifteen": "15", "sixteen": "16", "seventeen": "17", "eighteen": "18",
+    "nineteen": "19", "twenty": "20",
+}
+_WORD_NUMS_RE = re.compile(r'\b(' + '|'.join(_WORD_NUMS) + r')\b', re.IGNORECASE)
+
+
+def _digitize(text: str) -> str:
+    """Spell out numbers -> digits (comparison-only), so 'Chapters Three and Four'
+    lines up with 'Chapter 3'."""
+    return _WORD_NUMS_RE.sub(lambda m: _WORD_NUMS[m.group(0).lower()], text)
+
+
+def _containment_match(name_l: str, candidates) -> Optional[str]:
+    """Catch short Moodle names ('Chapter 3') that are conceptually contained in a
+    longer combined Brightspace title ('Week Two: Chapters Three and Four - ...').
+    difflib's whole-string ratio penalizes this length mismatch too heavily, so this
+    checks number-token overlap plus a shared keyword instead of literal substring."""
+    name_digit = _digitize(name_l)
+    name_nums = set(re.findall(r'\d+', name_digit))
+    name_words = [w for w in re.findall(r'[a-z]+', name_digit) if len(w) >= 4]
+    if not name_nums or not name_words:
+        return None
+    for key in candidates:
+        cand_digit = _digitize(key)
+        if not name_nums & set(re.findall(r'\d+', cand_digit)):
+            continue
+        cand_words = re.findall(r'[a-z]+', cand_digit)
+        if any(cw.startswith(nw) or nw.startswith(cw) for nw in name_words for cw in cand_words):
+            return key
+    return None
+
+
 # ── External tool detection ───────────────────────────────────────────────────
 
 _EXTERNAL_TOOLS = {
@@ -134,7 +170,11 @@ def _compare_items(moodle_items: list, bs_flat: list) -> list:
                     score = int(difflib.SequenceMatcher(None, name_l, close[0]).ratio() * 100)
                     status, matched = "fuzzy", (bs_modules[close[0]], score)
                 else:
-                    status, matched = "missing", None
+                    contained = _containment_match(name_l, bs_modules)
+                    if contained:
+                        status, matched = "fuzzy", (bs_modules[contained], 100)
+                    else:
+                        status, matched = "missing", None
             results.append({**item, "section": "", "status": status, "matched": matched})
             continue
 
@@ -169,6 +209,12 @@ def _compare_items(moodle_items: list, bs_flat: list) -> list:
             score = int(difflib.SequenceMatcher(None, name_l, close[0]).ratio() * 100)
             results.append({**item, "section": current_section,
                              "status": "fuzzy", "matched": bs_all[close[0]], "score": score})
+            continue
+
+        contained = _containment_match(name_l, bs_all)
+        if contained:
+            results.append({**item, "section": current_section,
+                             "status": "fuzzy", "matched": bs_all[contained], "score": 100})
             continue
 
         results.append({**item, "section": current_section,
@@ -243,7 +289,7 @@ _JS_MOODLE_ITEMS = """() => {
         const heading = section.querySelector('.sectionname, h3, h4');
         result.push({
             type: 'SECTION',
-            name: heading ? heading.textContent.trim() : '(unnamed section)',
+            name: (heading && heading.textContent.trim()) || '(unnamed section)',
             href: '',
         });
         section.querySelectorAll('li.activity').forEach(activity => {
