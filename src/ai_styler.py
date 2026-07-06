@@ -20,8 +20,13 @@ def _strip_color_from_style(style: str) -> str:
 def _clean_html(html: str) -> str:
     soup = BeautifulSoup(html, "lxml")
 
-    # strip tags that add no content value
+    # strip tags that add no content value, but preserve Kaltura player scripts
     for tag in soup.find_all(["script", "style", "meta", "link", "head"]):
+        if tag.name == "script":
+            src = tag.get("src", "")
+            text = tag.get_text()
+            if "kaltura" in src.lower() or "KalturaPlayer" in text or "kalturaPlayer" in text:
+                continue
         tag.decompose()
 
     # remove all data-* and aria-* attributes, plus common Brightspace noise
@@ -48,6 +53,8 @@ def _clean_html(html: str) -> str:
 
     # collapse empty tags that carry no content (spans, divs with no text/children)
     for tag in soup.find_all(["span", "div"]):
+        if tag.get("id", "").startswith("kaltura_player_"):
+            continue
         if not tag.get_text(strip=True) and not tag.find(["img", "iframe", "video", "table"]):
             tag.unwrap()
 
