@@ -36,6 +36,8 @@ def build_name_matcher(moodle_names: list) -> Callable[[str], Optional[str]]:
 
 import os
 import sys
+from urllib.parse import urlparse
+
 from playwright.async_api import async_playwright
 
 from kaltura_categorizer import MOODLE_SESSION_FILE
@@ -150,9 +152,18 @@ async def scrape_moodle_names(moodle_course_url: str, log_fn=None) -> list:
             except Exception:
                 pass
 
-            if "mymoodle.okanagan.bc.ca" not in page.url:
+            if urlparse(page.url).hostname != "mymoodle.okanagan.bc.ca":
                 _log(f"Redirected off Moodle ({page.url[:80]}) — session expired", "warning", log_fn=log_fn)
                 return []
+
+            _log(f"Landed on: {page.url}", "dim", log_fn=log_fn)
+            dom_counts = await page.evaluate(
+                """() => ({
+                    sections: document.querySelectorAll('li.section, li.section.main').length,
+                    activities: document.querySelectorAll('li.activity').length,
+                })"""
+            )
+            _log(f"DOM: {dom_counts['sections']} section(s), {dom_counts['activities']} activity/activities", "dim", log_fn=log_fn)
 
             items = await page.evaluate(_JS_MOODLE_ITEMS)
             names = [i["name"] for i in (items or []) if i.get("type") != "SECTION" and i.get("name")]

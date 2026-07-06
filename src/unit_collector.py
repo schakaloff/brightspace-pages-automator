@@ -104,6 +104,12 @@ class UnitCollector:
                 )
             names = await scrape_moodle_names(self.moodle_url, log_fn=self.log)
             if not names:
+                self.log("⚠ No names scraped — Moodle session may be stale, logging in again…", "warning")
+                await ensure_moodle_session(
+                    self.moodle_username, self.moodle_password, log_fn=self.log
+                )
+                names = await scrape_moodle_names(self.moodle_url, log_fn=self.log)
+            if not names:
                 self.log("⚠ No Moodle names scraped — using Brightspace labels as-is", "warning")
                 return
             self._name_matcher = build_name_matcher(names)
