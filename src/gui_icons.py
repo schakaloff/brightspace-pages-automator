@@ -66,6 +66,19 @@ def _kaltura(p, s, c):
     ]))
 
 
+def _h5p(p, s, c):
+    pen = QPen(c, 1.8)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(s * 0.15, s * 0.15, s * 0.7, s * 0.7), 3, 3)
+    bump = s * 0.14
+    path.addEllipse(QRectF(s / 2 - bump / 2, s * 0.15 - bump / 2, bump, bump))
+    p.drawPath(path)
+
+
 def _settings(p, s, c):
     p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(c))
     cx, cy = s / 2, s / 2
@@ -128,7 +141,7 @@ def _running(p, s, c):
 
 _FNS = {
     "checker": _checker, "collect": _collect, "restyle": _restyle,
-    "kaltura": _kaltura,
+    "kaltura": _kaltura, "h5p": _h5p,
     "settings": _settings, "run": _run, "next": _next_arrow,
     "done": _done, "locked": _locked, "running": _running,
 }

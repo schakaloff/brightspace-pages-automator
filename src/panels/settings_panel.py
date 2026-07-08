@@ -307,6 +307,36 @@ class SettingsPanel(QWidget):
         layout.addWidget(_divider())
         layout.addSpacing(20)
 
+        # ── Section 6: KMC (Kaltura) Credentials ─────────────────────────────
+        layout.addWidget(_form_label("KMC CREDENTIALS"))
+        layout.addSpacing(6)
+
+        self._kmc_user_field = QLineEdit()
+        self._kmc_user_field.setPlaceholderText("NFirstname.Lastname@okanagan.bc.ca")
+        self._kmc_user_field.setFixedHeight(40)
+        layout.addWidget(self._kmc_user_field)
+        layout.addSpacing(6)
+
+        self._kmc_pass_field = QLineEdit()
+        self._kmc_pass_field.setPlaceholderText("Password")
+        self._kmc_pass_field.setEchoMode(QLineEdit.EchoMode.Password)
+        self._kmc_pass_field.setFixedHeight(40)
+        layout.addWidget(self._kmc_pass_field)
+        layout.addSpacing(6)
+
+        self._kmc_status = QLabel("")
+        self._kmc_status.setProperty("role", "dim")
+        layout.addWidget(self._kmc_status)
+
+        kmc_save_btn = QPushButton("Save KMC Credentials")
+        kmc_save_btn.setProperty("variant", "secondary")
+        kmc_save_btn.setFixedHeight(36)
+        kmc_save_btn.clicked.connect(self._save_kmc_credentials)
+        layout.addWidget(kmc_save_btn)
+        layout.addSpacing(24)
+        layout.addWidget(_divider())
+        layout.addSpacing(20)
+
         # ── Version footer ────────────────────────────────────────────────────
         ver = QLabel("Brightspace Pages Automator  v0.8.0")
         ver.setProperty("role", "dim")
@@ -371,6 +401,16 @@ class SettingsPanel(QWidget):
         u = self.moodle_username
         return keyring.get_password("BrightspacePagesAutomator_Moodle", u) or "" if u else ""
 
+    @property
+    def kmc_username(self) -> str:
+        return self._mw.load_config().get("kmc_username", "")
+
+    @property
+    def kmc_password(self) -> str:
+        import keyring
+        u = self.kmc_username
+        return keyring.get_password("BrightspacePagesAutomator_KMC", u) or "" if u else ""
+
     # ── Private slots ─────────────────────────────────────────────────────────
 
     def _on_key_changed(self, key: str):
@@ -412,6 +452,13 @@ class SettingsPanel(QWidget):
             if pw:
                 self._moodle_pass_field.setText(pw)
 
+        kmc_user = cfg.get("kmc_username", "")
+        if kmc_user:
+            self._kmc_user_field.setText(kmc_user)
+            pw = keyring.get_password("BrightspacePagesAutomator_KMC", kmc_user)
+            if pw:
+                self._kmc_pass_field.setText(pw)
+
     def _save_bs_credentials(self):
         import keyring
         username = self._bs_user_field.text().strip()
@@ -450,3 +497,16 @@ class SettingsPanel(QWidget):
             keyring.set_password("BrightspacePagesAutomator_Moodle", username, password)
         self._moodle_status.setText("Saved.")
         QTimer.singleShot(3000, lambda: self._moodle_status.setText(""))
+
+    def _save_kmc_credentials(self):
+        import keyring
+        username = self._kmc_user_field.text().strip()
+        password = self._kmc_pass_field.text().strip()
+        if not username:
+            self._kmc_status.setText("Enter a username first.")
+            return
+        self._mw.save_config({"kmc_username": username})
+        if password:
+            keyring.set_password("BrightspacePagesAutomator_KMC", username, password)
+        self._kmc_status.setText("Saved.")
+        QTimer.singleShot(3000, lambda: self._kmc_status.setText(""))

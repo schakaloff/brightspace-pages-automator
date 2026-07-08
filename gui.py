@@ -65,6 +65,7 @@ class MainWindow(QMainWindow):
             (2, "collect", "Collect"),
             (3, "restyle", "Restyle"),
             (4, "kaltura", "Kaltura"),
+            (5, "h5p", "H5P"),
         ])
         self._sidebar.step_clicked.connect(self._on_step)
         self._sidebar.settings_clicked.connect(self._on_settings)
@@ -80,18 +81,20 @@ class MainWindow(QMainWindow):
         from panels.restyle_panel import RestylePanel
         from panels.settings_panel import SettingsPanel
         from panels.kaltura_panel import KalturaPanel
+        from panels.h5p_panel import H5PPanel
 
         self._checker   = CheckerPanel(self)
         self._collector = CollectorPanel(self)
         self._restyle   = RestylePanel(self)
         self._kaltura   = KalturaPanel(self)
+        self._h5p       = H5PPanel(self)
         self._settings  = SettingsPanel(self)
 
-        for panel in (self._checker, self._collector, self._restyle, self._kaltura, self._settings):
-            self._stack.addWidget(panel)  # indices 0-4
+        for panel in (self._checker, self._collector, self._restyle, self._kaltura, self._h5p, self._settings):
+            self._stack.addWidget(panel)  # indices 0-5
 
         # All steps start unlocked — users can navigate freely
-        for n in (1, 2, 3, 4):
+        for n in (1, 2, 3, 4, 5):
             self._sidebar.set_step_state(n, StepButton.PENDING)
 
         # Cross-panel wiring
@@ -186,13 +189,13 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _on_step(self, n: int):
-        idx = {1: 0, 2: 1, 3: 2, 4: 3}.get(n)
+        idx = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4}.get(n)
         if idx is not None:
             self._stack.setCurrentIndex(idx)
             self._sidebar.set_active(n)
 
     def _on_settings(self):
-        self._stack.setCurrentIndex(4)
+        self._stack.setCurrentIndex(5)
         self._sidebar.set_active(None)
 
     # ── Theme ────────────────────────────────────────────────
@@ -202,7 +205,7 @@ class MainWindow(QMainWindow):
         self._sidebar.refresh_theme()
         self._settings.mark_active_theme(name)
         # Refresh log widgets in each panel
-        for panel in (self._checker, self._collector, self._restyle, self._kaltura):
+        for panel in (self._checker, self._collector, self._restyle, self._kaltura, self._h5p):
             for log in panel.findChildren(type(self._checker)):
                 pass  # panels refresh via stylesheet
         from gui_log import LogWidget
@@ -234,6 +237,14 @@ class MainWindow(QMainWindow):
     @property
     def moodle_password(self) -> str:
         return self._settings.moodle_password
+
+    @property
+    def kmc_username(self) -> str:
+        return self._settings.kmc_username
+
+    @property
+    def kmc_password(self) -> str:
+        return self._settings.kmc_password
 
     # ── Claude API key / model ────────────────────────────────
     @property
