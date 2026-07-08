@@ -1017,6 +1017,10 @@ class ContentChecker:
         self.log(f"", "dim")
         self.log(f"⬆ Uploading {len(downloaded)} file(s) to Brightspace…", "step")
 
+        from urllib.parse import urlparse
+        parsed = urlparse(self.bs_url)
+        bs_base = f"{parsed.scheme}://{parsed.netloc}"
+
         # Group files by module so we open one BS tab per module
         by_module: dict = defaultdict(list)
         no_module: list = []
@@ -1033,27 +1037,29 @@ class ContentChecker:
             mod_title = items[0][1].get("bs_module_title", "?")
             self.log(f"  📁 {mod_title} ({len(items)} file(s))", "info")
 
-            for local, fi in items:
-                name = fi["name"]
-
-                # Step 1: upload file bytes to BS course files via API
-                bs_url = await self._upload_file_to_brightspace(bs_page, course_id, local)
-                if not bs_url:
-                    self.log(f"    ✗ {name} — file upload failed", "error")
-                    self._summary["files_failed"].append((name, mod_title))
+            upload_ok = await self._upload_files_to_bs_module_ui(
+                context,
+                bs_base,
+                course_id,
+                mod_id,
+                mod_title,
+                [local for local, _ in items],
+            )
+            if not upload_ok:
+                for _, fi in items:
+                    self.log(f"    ✗ {fi['name']} — browser upload failed", "error")
+                    self._summary["files_failed"].append((fi["name"], mod_title))
                     fail_count += 1
-                    continue
+                continue
 
-                # Step 2: create a module topic pointing to that file
-                ok = await self._create_bs_file_topic(
-                    bs_page, course_id, mod_id, name, bs_url
-                )
-                if ok:
+            for _, fi in items:
+                name = fi["name"]
+                if await self._verify_topic_in_module(bs_page, course_id, mod_id, name):
                     self.log(f"    ✓ {name}", "success")
                     self._summary["files_uploaded"].append((name, mod_title))
                     ok_count += 1
                 else:
-                    self.log(f"    ✗ {name} — topic creation failed", "error")
+                    self.log(f"    ✗ {name} — upload not found in module after browser upload", "error")
                     self._summary["files_failed"].append((name, mod_title))
                     fail_count += 1
 
@@ -1188,6 +1194,90 @@ class ContentChecker:
     #             await tab.close()
     #         except Exception:
     #             pass
+
+    async def _upload_files_to_bs_module_ui(
+        self,
+        context: "BrowserContext",
+        bs_base: str,
+        course_id: str,
+        module_id,
+        module_title: str,
+        file_paths: list,
+    ) -> bool:
+        """
+        Upload files to a Brightspace module through the visible browser UI.
+        This follows the instructor flow instead of posting to D2L APIs directly.
+        """
+        tab = await context.new_page()
+        try:
+            module_url = f"{bs_base}/d2l/le/lessons/{course_id}/units/{module_id}"
+            await tab.goto(module_url, wait_until="domcontentloaded", timeout=30000)
+            await tab.wait_for_timeout(2000)
+
+            add_selector = 'd2l-button[aria-label="Add Existing"], d2l-button.add-existing-btn'
+            add_frame = None
+            for _ in range(20):
+                for frame in tab.frames:
+                    try:
+                        loc = frame.locator(add_selector)
+                        if await loc.count() > 0 and await loc.first.is_visible():
+                            add_frame = frame
+                            break
+                    except Exception:
+                        pass
+                if add_frame:
+                    break
+                await tab.wait_for_timeout(500)
+
+            if not add_frame:
+                self.log(f"    ✗ 'Add Existing' not found in any frame for '{module_title}'", "error")
+                self.log(f"      Frames loaded: {[f.url[:80] for f in tab.frames]}", "dim")
+                return False
+
+            await add_frame.locator(add_selector).first.click(timeout=5000)
+            await tab.wait_for_timeout(1000)
+
+            file_frame = None
+            for _ in range(20):
+                for frame in tab.frames:
+                    try:
+                        if await frame.locator('input[type="file"]').count() > 0:
+                            file_frame = frame
+                            break
+                    except Exception:
+                        pass
+                if file_frame:
+                    break
+                await tab.wait_for_timeout(500)
+
+            if not file_frame:
+                self.log("    ✗ File input not found after opening Add Existing", "error")
+                return False
+
+            try:
+                async with tab.expect_file_chooser(timeout=10000) as fc_info:
+                    await file_frame.locator('input[type="file"]').first.click()
+                fc = await fc_info.value
+                await fc.set_files([str(p) for p in file_paths])
+            except Exception as fc_err:
+                self.log(f"    ✗ File chooser not triggered: {fc_err}", "error")
+                return False
+
+            try:
+                await tab.wait_for_load_state("networkidle", timeout=60000)
+            except Exception:
+                pass
+            await tab.wait_for_timeout(2000)
+            return True
+
+        except Exception as e:
+            self.log(f"    ✗ Browser UI upload error: {e}", "error")
+            return False
+        finally:
+            try:
+                await tab.close()
+            except Exception:
+                pass
 
     async def _create_bs_file_topic(
         self, bs_page: "Page", course_id: str, module_id, title: str, file_url: str
