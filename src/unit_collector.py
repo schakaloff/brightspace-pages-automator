@@ -1139,7 +1139,7 @@ class UnitCollector:
                 return False
 
             from ai_styler import apply_style, DEFAULT_MODEL
-            styled_html = await asyncio.to_thread(
+            styled_html, usage = await asyncio.to_thread(
                 apply_style,
                 source_html=source_html,
                 style_reference_html=self.style_reference_html,

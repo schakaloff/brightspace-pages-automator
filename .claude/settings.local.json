@@ -35,7 +35,8 @@
       "Bash(/home/apelsinchik/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/subagent-driven-development/scripts/review-package 00175e3 *)",
       "Bash(/home/apelsinchik/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/subagent-driven-development/scripts/review-package 153b573 *)",
       "Bash(/home/apelsinchik/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/subagent-driven-development/scripts/review-package 8941990 *)",
-      "Bash(venv/bin/pip show *)"
+      "Bash(venv/bin/pip show *)",
+      "Skill(claude-api)"
     ]
   }
 }

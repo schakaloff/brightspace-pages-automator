@@ -72,6 +72,20 @@ _MAX_TOKENS = 8192
 _MAX_RETRIES = 3
 _RETRY_DELAY = 8  # seconds between retries on overload
 
+# USD per 1M tokens (input, output) — from Anthropic's published pricing.
+_PRICING_USD_PER_MTOK = {
+    "claude-opus-4-5":  (5.00, 25.00),
+    "claude-sonnet-5":  (3.00, 15.00),
+    "claude-haiku-4-5": (1.00, 5.00),
+}
+USD_TO_CAD = 1.38  # approximate — update if the exchange rate shifts meaningfully
+
+
+def _cost_cad(model: str, input_tokens: int, output_tokens: int) -> float:
+    in_rate, out_rate = _PRICING_USD_PER_MTOK.get(model, _PRICING_USD_PER_MTOK[DEFAULT_MODEL])
+    usd = (input_tokens * in_rate + output_tokens * out_rate) / 1_000_000
+    return usd * USD_TO_CAD
+
 
 def _load_prompt(theme_name: str) -> str:
     path = _PROMPTS_DIR / f"{theme_name}.txt"
@@ -88,7 +102,10 @@ def apply_style(
     api_key: str,
     model: str = DEFAULT_MODEL,
     log_callback=None,
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[dict]]:
+    """Returns (styled_html, usage) where usage is
+    {"input_tokens", "output_tokens", "cost_cad"} — or (None, None) on failure.
+    """
     def log(msg, level="info"):
         if log_callback:
             log_callback(msg, level)
@@ -96,10 +113,14 @@ def apply_style(
     prompt_template = _load_prompt(theme_name)
     if not prompt_template:
         log(f"❌ No prompt file for theme '{theme_name}'", "error")
-        return None
+        return None, None
 
     cleaned_html = _clean_html(source_html)
-    log(f"🧹 Cleaned HTML: {len(source_html):,} → {len(cleaned_html):,} chars", "info")
+    log(
+        f"🧹 Cleaned HTML: {len(source_html):,} → {len(cleaned_html):,} chars"
+        f"  ({len(cleaned_html.split()):,} words)",
+        "info",
+    )
 
     prompt = prompt_template.format(
         source_html=cleaned_html,
@@ -124,8 +145,19 @@ def apply_style(
                 end   = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
                 result = "\n".join(lines[start:end]).strip()
 
+            usage = {
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+            }
+            usage["cost_cad"] = _cost_cad(model, usage["input_tokens"], usage["output_tokens"])
+
             log(f"✅ Done ({len(result):,} chars)", "success")
-            return result
+            log(
+                f"🔢 Tokens: {usage['input_tokens']:,} in / {usage['output_tokens']:,} out"
+                f"  —  ${usage['cost_cad']:.4f} CAD",
+                "info",
+            )
+            return result, usage
 
         except anthropic.APIStatusError as e:
             if e.status_code in (429, 529) and attempt < _MAX_RETRIES:
@@ -133,8 +165,8 @@ def apply_style(
                 time.sleep(_RETRY_DELAY)
             else:
                 log(f"❌ Claude unavailable after {attempt} attempts: {e}", "error")
-                return None
+                return None, None
 
         except Exception as e:
             log(f"❌ Claude error: {e}", "error")
-            return None
+            return None, None

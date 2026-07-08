@@ -382,7 +382,7 @@ class PagePreviewer:
 
                 if first_run:
                     # Initial styling via ai_styler (uses theme prompt file)
-                    styled_html = await asyncio.to_thread(
+                    styled_html, _usage = await asyncio.to_thread(
                         apply_style,
                         source_html=source_html,
                         style_reference_html="",
