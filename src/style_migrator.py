@@ -3,7 +3,7 @@ Style Migrator automation:
   1. Navigate to Brightspace URL → Options → Edit → Source Code button
   2. Extract page HTML from source-code textarea (shadow DOM aware)
   3. Open Moodle URL in a new tab → scrape main content → close tab
-  4. Send both to Gemini 2.0 Flash: restyle Brightspace HTML to match Moodle,
+  4. Send both to Claude: restyle Brightspace HTML to match Moodle,
      convert [fa-xxx] codes to emoji, inline CSS only
   5. Replace textarea content → click OK → click Save and Close
 """
@@ -59,7 +59,7 @@ _FA_HINTS = {
 
 
 def _clean_moodle_html(raw: str) -> str:
-    """Strip Moodle/Bootstrap noise from scraped HTML, keeping layout structure for Gemini."""
+    """Strip Moodle/Bootstrap noise from scraped HTML, keeping layout structure for Claude."""
     try:
         from bs4 import BeautifulSoup, Comment
     except ImportError:
@@ -218,17 +218,19 @@ class StyleMigrator:
         brightspace_url: str,
         moodle_url: str,
         primary_color: str,
-        gemini_api_key: str,
+        claude_api_key: str,
         log: Callable[[str, str], None],
         on_complete: Callable = None,
         moodle_ready_event: threading.Event = None,
         on_moodle_waiting: Callable = None,
         on_links_found: Callable = None,
+        claude_model: str = "claude-sonnet-5",
     ):
         self.brightspace_url    = brightspace_url
         self.moodle_url         = moodle_url
         self.primary_color      = primary_color
-        self.gemini_api_key     = gemini_api_key
+        self.claude_api_key     = claude_api_key
+        self.claude_model       = claude_model
         self.log                = log
         self.on_complete        = on_complete
         self.moodle_ready_event = moodle_ready_event
@@ -458,7 +460,7 @@ class StyleMigrator:
                 await tab.close()
                 return items
 
-            # Full HTML scrape (used for Gemini restyling)
+            # Full HTML scrape (used for Claude restyling)
             html = await tab.evaluate("""() => {
                 for (const sel of [
                     '[role="main"]', '#page-content', '.course-content',
@@ -489,22 +491,23 @@ class StyleMigrator:
                 pass
             return None
 
-    def _call_gemini(self, source_html: str, moodle_html: str) -> Optional[str]:
-        from google import genai
+    def _call_claude(self, source_html: str, moodle_html: str) -> Optional[str]:
+        import anthropic
 
-        self.log("🤖 Sending to Gemini AI for restyling...", "info")
+        self.log(f"🤖 Sending to {self.claude_model} for restyling...", "info")
         try:
-            client = genai.Client(api_key=self.gemini_api_key)
+            client = anthropic.Anthropic(api_key=self.claude_api_key)
             prompt = _MIGRATOR_PROMPT.format(
                 source_html=source_html,
                 moodle_html=moodle_html,
                 primary_color=self.primary_color,
             )
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=prompt,
+            response = client.messages.create(
+                model=self.claude_model,
+                max_tokens=8192,
+                messages=[{"role": "user", "content": prompt}],
             )
-            result = response.text.strip()
+            result = next(b.text for b in response.content if b.type == "text").strip()
 
             # Strip markdown fences if model added them
             if result.startswith("```"):
@@ -516,7 +519,7 @@ class StyleMigrator:
             self.log(f"✅ AI restyling complete ({len(result):,} chars)", "success")
             return result
         except Exception as e:
-            self.log(f"❌ Gemini API error: {e}", "error")
+            self.log(f"❌ Claude API error: {e}", "error")
             return None
 
     async def _replace_and_save(self, page: Page, html: str) -> None:
@@ -768,10 +771,10 @@ class StyleMigrator:
                     await asyncio.sleep(0.5)
                 return
 
-            # ── Gemini restyle ────────────────────────────────────────────────
+            # ── Claude restyle ───────────────────────────────────────────────
             self.log("─" * 52, "dim")
             styled_html = await asyncio.to_thread(
-                self._call_gemini, source_html, moodle_html
+                self._call_claude, source_html, moodle_html
             )
             if not styled_html:
                 self.log("✗ AI returned nothing — aborting", "error")

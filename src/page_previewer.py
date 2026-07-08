@@ -3,7 +3,7 @@ Style Preview:
   1. Navigate to a Brightspace topic page (view mode)
   2. Open Options → Edit → Source Code → extract source HTML
   3. Navigate back to the view page
-  4. Send source HTML to Gemini AI for styling
+  4. Send source HTML to Claude AI for styling
   5. Inject styled HTML into the live Brightspace page DOM (preview in real browser)
   6. Wait for user: Apply / Regenerate (with feedback) / Skip
   7. Apply → go through Options → Edit → Source Code → write back → Save and Close
@@ -93,16 +93,15 @@ _JS_INJECT_CONTENT = """(styledHtml) => {
 }"""
 
 
-def _call_gemini_feedback(
+def _call_claude_feedback(
     styled_html: str,
     feedback: str,
     api_key: str,
     log: Callable,
-    model: str = "gemini-2.5-flash",
+    model: str = "claude-sonnet-5",
 ) -> Optional[str]:
     """Re-run AI on already-styled HTML applying user feedback."""
-    from google import genai
-    from google.genai import errors as genai_errors
+    import anthropic
 
     prompt = (
         "You are an expert front-end developer. The HTML below was already styled.\n"
@@ -114,13 +113,17 @@ def _call_gemini_feedback(
         f"{styled_html}"
     )
 
-    client = genai.Client(api_key=api_key)
+    client = anthropic.Anthropic(api_key=api_key)
     MAX_RETRIES = 3
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             log(f"🤖 Applying feedback — attempt {attempt}/{MAX_RETRIES}...", "info")
-            response = client.models.generate_content(model=model, contents=prompt)
-            result = response.text.strip()
+            response = client.messages.create(
+                model=model,
+                max_tokens=8192,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            result = next(b.text for b in response.content if b.type == "text").strip()
             if result.startswith("```"):
                 lines = result.splitlines()
                 start = 1 if lines[0].startswith("```") else 0
@@ -128,8 +131,8 @@ def _call_gemini_feedback(
                 result = "\n".join(lines[start:end]).strip()
             log(f"✅ Feedback applied ({len(result):,} chars)", "success")
             return result
-        except genai_errors.ServerError:
-            if attempt < MAX_RETRIES:
+        except anthropic.APIStatusError as e:
+            if e.status_code in (429, 529) and attempt < MAX_RETRIES:
                 log("⚠ Server busy — retrying in 8s...", "warning")
                 time.sleep(8)
             else:
@@ -147,14 +150,16 @@ class PagePreviewer:
         url: str,
         log: Callable[[str, str], None],
         on_complete: Callable = None,
-        gemini_api_key: str = "",
+        claude_api_key: str = "",
+        claude_model: str = "",
         theme_name: str = "blue",
         on_user_action: Callable = None,
     ):
         self.url             = url
         self.log             = log
         self.on_complete     = on_complete
-        self.gemini_api_key  = gemini_api_key
+        self.claude_api_key  = claude_api_key
+        self.claude_model    = claude_model
         self.theme_name      = theme_name
         # on_user_action() blocks the worker thread until user chooses.
         # Returns ("apply" | "regenerate" | "skip", feedback_text)
@@ -316,7 +321,8 @@ class PagePreviewer:
 
     async def run(self) -> None:
         from browser import launch_browser, wait_for_login
-        from ai_styler import apply_style
+        from ai_styler import apply_style, DEFAULT_MODEL
+        model = self.claude_model or DEFAULT_MODEL
 
         p, browser, context, page = await launch_browser()
         try:
@@ -381,18 +387,20 @@ class PagePreviewer:
                         source_html=source_html,
                         style_reference_html="",
                         theme_name=self.theme_name,
-                        api_key=self.gemini_api_key,
+                        api_key=self.claude_api_key,
+                        model=model,
                         log_callback=self.log,
                     )
                     first_run = False
                 else:
                     # Regenerate: apply feedback on top of the previous styled result
                     styled_html = await asyncio.to_thread(
-                        _call_gemini_feedback,
+                        _call_claude_feedback,
                         styled_html,
                         feedback,
-                        self.gemini_api_key,
+                        self.claude_api_key,
                         self.log,
+                        model,
                     )
 
                 if not styled_html:
@@ -461,7 +469,8 @@ async def run(
     url: str,
     log: Callable[[str, str], None],
     on_complete: Callable = None,
-    gemini_api_key: str = "",
+    claude_api_key: str = "",
+    claude_model: str = "",
     theme_name: str = "blue",
     on_user_action: Callable = None,
 ) -> None:
@@ -469,7 +478,8 @@ async def run(
         url=url,
         log=log,
         on_complete=on_complete,
-        gemini_api_key=gemini_api_key,
+        claude_api_key=claude_api_key,
+        claude_model=claude_model,
         theme_name=theme_name,
         on_user_action=on_user_action,
     ).run()

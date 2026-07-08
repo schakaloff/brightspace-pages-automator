@@ -24,7 +24,8 @@ class PageAutomator:
         url: str,
         log: Callable[[str, str], None],
         on_complete: Callable = None,
-        gemini_api_key: str = "",
+        claude_api_key: str = "",
+        claude_model: str = "",
         style_reference_html: str = "",
         theme_name: str = "blue",
         on_pages_found: Callable = None,
@@ -36,7 +37,8 @@ class PageAutomator:
         self.url = url
         self.log = log
         self.on_complete = on_complete
-        self.gemini_api_key = gemini_api_key
+        self.claude_api_key = claude_api_key
+        self.claude_model = claude_model
         self.style_reference_html = style_reference_html
         self.theme_name = theme_name
         self.on_pages_found = on_pages_found  # fn(pages) -> (start_idx, count)
@@ -362,13 +364,14 @@ class PageAutomator:
             self.log("✗ Could not extract HTML — skipping", "error")
             return False
 
-        from ai_styler import apply_style
+        from ai_styler import apply_style, DEFAULT_MODEL
         styled_html = await asyncio.to_thread(
             apply_style,
             source_html=source_html,
             style_reference_html=self.style_reference_html,
             theme_name=self.theme_name,
-            api_key=self.gemini_api_key,
+            api_key=self.claude_api_key,
+            model=self.claude_model or DEFAULT_MODEL,
             log_callback=self.log,
         )
 
@@ -451,7 +454,8 @@ async def run(
     url: str,
     log: Callable[[str, str], None],
     on_complete: Callable = None,
-    gemini_api_key: str = "",
+    claude_api_key: str = "",
+    claude_model: str = "",
     style_reference_html: str = "",
     theme_name: str = "blue",
     on_pages_found: Callable = None,
@@ -464,7 +468,8 @@ async def run(
         url=url,
         log=log,
         on_complete=on_complete,
-        gemini_api_key=gemini_api_key,
+        claude_api_key=claude_api_key,
+        claude_model=claude_model,
         style_reference_html=style_reference_html,
         theme_name=theme_name,
         on_pages_found=on_pages_found,

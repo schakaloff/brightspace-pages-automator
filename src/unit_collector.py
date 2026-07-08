@@ -803,6 +803,23 @@ class UnitCollector:
 
             # Step 5a: After clicking Upload in an error state, Brightspace may show
             # an intermediate screen with an "Insert" button before the overwrite dialog.
+            # That screen also carries the link-text field, and clicking Insert here can
+            # be the final submission (dialog closes with no overwrite conflict) — so the
+            # field must be filled before this click, not after it, or the corrected name
+            # never makes it in for files that don't hit an overwrite.
+            # D2L ignores synthetic input/change events on this field (Lit property
+            # observers only react to real DOM keyboard events), so it must be set via
+            # a real click + Playwright keyboard.type(), not JS value-setter + dispatchEvent
+            # — and the type must fully land (verified by reading the value back) before
+            # Insert is clicked, or a slow/laggy render can submit the old value.
+            _JS_FIND_ZK_VISIBLE = """() => {
+                const el = document.querySelector('input.rs_skip.d2l-edit-legacy[type="text"]');
+                return !!(el && el.offsetParent !== null);
+            }"""
+            _JS_READ_ZK = """() => {
+                const el = document.querySelector('input.rs_skip.d2l-edit-legacy[type="text"]');
+                return el ? el.value : null;
+            }"""
             _JS_CLICK_INSERT_ON_ERROR = """() => {
                 const footer = document.querySelector('.d2l-dialog-footer');
                 if (!footer) return false;
@@ -813,9 +830,31 @@ class UnitCollector:
                 }
                 return false;
             }"""
+            corrected = file_item.get("corrected_name")
+            display_name = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", corrected) if corrected else ""
             clicked_insert_on_error = False
+            filled_before_error_click = False
             for _ in range(10):
                 await page.wait_for_timeout(500)
+
+                if display_name and not filled_before_error_click:
+                    for frame in page.frames:
+                        if frame == page.main_frame:
+                            continue
+                        try:
+                            if await frame.evaluate(_JS_FIND_ZK_VISIBLE):
+                                loc = frame.locator('input.rs_skip.d2l-edit-legacy[type="text"]').first
+                                await loc.click()
+                                await loc.press("Control+A")
+                                await page.keyboard.type(display_name, delay=20)
+                                await page.wait_for_timeout(200)
+                                if await frame.evaluate(_JS_READ_ZK) == display_name:
+                                    filled_before_error_click = True
+                                    self.log(f"  ✓ Set link text: {display_name}", "dim")
+                                break
+                        except Exception:
+                            pass
+
                 for frame in page.frames:
                     if frame == page.main_frame:
                         continue
@@ -831,7 +870,8 @@ class UnitCollector:
                     break
 
             # If the error-Insert click above already closed the whole dialog, there
-            # was no overwrite conflict and no link-text field to fill — done.
+            # was no overwrite conflict — link text (if any) was already filled before
+            # that click, so this is done.
             if clicked_insert_on_error:
                 try:
                     if await page.locator('iframe[title="Insert Stuff"], iframe.d2l-dialog-frame').count() == 0:
@@ -875,34 +915,25 @@ class UnitCollector:
                     continue
                 break
 
-            # Step 5c: Fill the link-text field with the corrected name, now that the
-            # error/overwrite screens (5a/5b) have resolved — this field only renders
-            # on the final confirmation screen, AFTER those are dismissed, not before.
-            # The field's id/name (e.g. "z_k") is a short auto-generated ASP.NET-style
-            # control id that shifts letter depending on which error/overwrite controls
-            # got inserted earlier in the form, so it is NOT a stable selector — match
-            # on the field's class instead, which is consistent across renders.
-            corrected = file_item.get("corrected_name")
-            if corrected:
-                display_name = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", corrected)
-                _JS_FILL_ZK = """(name) => {
-                    const el = document.querySelector('input.rs_skip.d2l-edit-legacy[type="text"]');
-                    if (!el) return false;
-                    const setter = Object.getOwnPropertyDescriptor(
-                        window.HTMLInputElement.prototype, 'value').set;
-                    setter.call(el, name);
-                    el.dispatchEvent(new Event('input', {bubbles: true}));
-                    el.dispatchEvent(new Event('change', {bubbles: true}));
-                    return true;
-                }"""
+            # Step 5c: Fill the link-text field with the corrected name, if it wasn't
+            # already filled in Step 5a (this field only renders on the overwrite path
+            # once 5a/5b have resolved). Same real-keystroke approach as 5a — synthetic
+            # events don't commit for this field.
+            if display_name and not filled_before_error_click:
                 filled = False
                 for _ in range(10):
                     for frame in page.frames:
                         if frame == page.main_frame:
                             continue
                         try:
-                            if await frame.evaluate(_JS_FILL_ZK, display_name):
-                                filled = True
+                            if await frame.evaluate(_JS_FIND_ZK_VISIBLE):
+                                loc = frame.locator('input.rs_skip.d2l-edit-legacy[type="text"]').first
+                                await loc.click()
+                                await loc.press("Control+A")
+                                await page.keyboard.type(display_name, delay=20)
+                                await page.wait_for_timeout(200)
+                                if await frame.evaluate(_JS_READ_ZK) == display_name:
+                                    filled = True
                                 break
                         except Exception:
                             pass

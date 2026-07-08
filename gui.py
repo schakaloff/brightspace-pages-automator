@@ -31,7 +31,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Brightspace Pages Automator")
         self.setMinimumSize(720, 560)
         self.resize(860, 640)
-        self._gemini_key   = ""
+        self._claude_key   = ""
+        self._claude_model = ""
         self._chromium_ready = False
         self._set_window_icon()
         self._build_ui()
@@ -99,6 +100,7 @@ class MainWindow(QMainWindow):
         self._collector.step_success.connect(lambda: self._sidebar.set_step_state(2, StepButton.DONE))
         self._collector.continue_next.connect(lambda: self._on_step(3))
         self._settings.api_key_changed.connect(self._set_api_key)
+        self._settings.model_changed.connect(self._set_model)
 
         self._on_step(1)
 
@@ -152,28 +154,37 @@ class MainWindow(QMainWindow):
     def moodle_password(self) -> str:
         return self._settings.moodle_password
 
-    # ── Gemini API key ───────────────────────────────────────
+    # ── Claude API key / model ────────────────────────────────
     @property
-    def gemini_api_key(self) -> str:
-        return self._gemini_key
+    def claude_api_key(self) -> str:
+        return self._claude_key
+
+    @property
+    def claude_model(self) -> str:
+        return self._claude_model
 
     def _set_api_key(self, key: str):
-        self._gemini_key = key
+        self._claude_key = key
+
+    def _set_model(self, model: str):
+        self._claude_model = model
 
     def _load_api_key(self):
         key = ""
         try:
-            from api_config import GEMINI_API_KEY as k
+            from api_config import CLAUDE_API_KEY as k
             key = k
         except ImportError:
             pass
+        cfg = self.load_config()
         if not key:
-            try:
-                key = json.loads(_CONFIG_PATH.read_text()).get("gemini_api_key", "")
-            except Exception:
-                pass
-        self._gemini_key = key
+            key = cfg.get("claude_api_key", "")
+        self._claude_key = key
         self._settings.set_api_key(key)
+
+        from ai_styler import DEFAULT_MODEL
+        self._claude_model = cfg.get("claude_model", DEFAULT_MODEL)
+        self._settings.set_model(self._claude_model)
 
     # ── Config helpers ───────────────────────────────────────
     def load_config(self) -> dict:
@@ -285,7 +296,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.save_config({
-            "gemini_api_key": self._gemini_key,
+            "claude_api_key": self._claude_key,
+            "claude_model": self._claude_model,
         })
         event.accept()
         os._exit(0)
