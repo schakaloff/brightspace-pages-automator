@@ -49,6 +49,10 @@ class CollectorPanel(QWidget):
         self._unit_entry = QLineEdit()
         self._unit_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/le/content/…/lessons/…")
         self._unit_entry.setFixedHeight(40)
+        self._unit_entry.setToolTip(
+            "The URL of a Brightspace unit (a collection of topic pages).\n"
+            "Find it by clicking a unit in the course Content table — copy the URL from your browser."
+        )
         layout.addWidget(self._unit_entry)
         layout.addSpacing(12)
 
@@ -57,7 +61,16 @@ class CollectorPanel(QWidget):
         self._target_entry = QLineEdit()
         self._target_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/le/content/…/topics/…/View")
         self._target_entry.setFixedHeight(40)
+        self._target_entry.setToolTip(
+            "A blank HTML Content topic page in Brightspace where the combined output will be written.\n"
+            "Create an empty page in Brightspace first, then paste its URL here."
+        )
         layout.addWidget(self._target_entry)
+        target_hint = QLabel("Create an empty HTML Content topic in Brightspace, then paste its URL above.")
+        target_hint.setProperty("role", "dim")
+        target_hint.setWordWrap(True)
+        layout.addSpacing(4)
+        layout.addWidget(target_hint)
         layout.addSpacing(12)
 
         par_row = QHBoxLayout()
@@ -66,6 +79,10 @@ class CollectorPanel(QWidget):
         self._parallel_spin.setRange(1, 10)
         self._parallel_spin.setValue(3)
         self._parallel_spin.setFixedWidth(60)
+        self._parallel_spin.setToolTip(
+            "Number of topic pages fetched simultaneously.\n"
+            "Higher = faster, but may trigger Brightspace rate limits. Default 3 is safe."
+        )
         par_row.addWidget(self._parallel_spin)
         par_row.addStretch()
         layout.addLayout(par_row)
@@ -73,6 +90,10 @@ class CollectorPanel(QWidget):
 
         self._run_btn = QPushButton("Collect & Assemble")
         self._run_btn.setFixedHeight(42)
+        self._run_btn.setToolTip(
+            "Scrapes all topic pages in the unit, combines them into one collapsible HTML file,\n"
+            "and writes the result to the target page."
+        )
         self._run_btn.clicked.connect(self._start_run)
         layout.addWidget(self._run_btn)
         layout.addSpacing(8)
@@ -86,6 +107,7 @@ class CollectorPanel(QWidget):
         self._continue_btn = QPushButton("Continue to Page Changer")
         self._continue_btn.setProperty("variant", "next-step")
         self._continue_btn.setFixedHeight(38)
+        self._continue_btn.setToolTip("Proceed to Step 3: use Gemini AI to restyle pages with an OC brand theme.")
         self._continue_btn.hide()
         self._continue_btn.clicked.connect(self.continue_next)
         layout.addWidget(self._continue_btn)

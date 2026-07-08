@@ -101,6 +101,87 @@ class MainWindow(QMainWindow):
         self._settings.api_key_changed.connect(self._set_api_key)
 
         self._on_step(1)
+        self._show_welcome_if_needed()
+
+    def _show_welcome_if_needed(self):
+        if self.load_config().get("welcomed"):
+            return
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
+        import webbrowser, os
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Welcome")
+        dlg.setFixedSize(460, 380)
+        dlg.setModal(True)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(32, 28, 32, 24)
+        v.setSpacing(0)
+
+        title = QLabel("Welcome to Brightspace Pages Automator")
+        title.setProperty("role", "header")
+        title.setWordWrap(True)
+        v.addWidget(title)
+        v.addSpacing(10)
+
+        desc = QLabel(
+            "This tool automates migrating Moodle course content into Brightspace — "
+            "checking content, collecting unit pages, and restyling them with OC brand themes."
+        )
+        desc.setProperty("role", "dim")
+        desc.setWordWrap(True)
+        v.addWidget(desc)
+        v.addSpacing(20)
+
+        steps_lbl = QLabel("Quick start:")
+        steps_lbl.setStyleSheet("font-weight:700;font-size:13px;")
+        v.addWidget(steps_lbl)
+        v.addSpacing(8)
+
+        for n, text in [
+            ("1", "Go to Settings → save your Brightspace, SSO, and Moodle credentials"),
+            ("2", "Go to Settings → add your Gemini API key (needed for Collect & Restyle)"),
+            ("3", "Use Checker to compare courses and download missing files"),
+            ("4", "Use Collect → Restyle to scrape and restyle unit pages"),
+        ]:
+            row = QHBoxLayout()
+            row.setSpacing(10)
+            badge = QLabel(n)
+            badge.setFixedSize(22, 22)
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            badge.setStyleSheet(
+                "background:#005F63;color:#fff;border-radius:11px;"
+                "font-size:11px;font-weight:700;"
+            )
+            lbl = QLabel(text)
+            lbl.setWordWrap(True)
+            lbl.setProperty("role", "dim")
+            row.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
+            row.addWidget(lbl, 1)
+            v.addLayout(row)
+            v.addSpacing(6)
+
+        v.addStretch()
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        guide_path = Path(__file__).parent / "WORKFLOW_GUIDE.html"
+        guide_btn = QPushButton("Open Full Guide")
+        guide_btn.setProperty("variant", "secondary")
+        guide_btn.setFixedHeight(38)
+        guide_btn.clicked.connect(
+            lambda: webbrowser.open(f"file:///{str(guide_path).replace(os.sep, '/')}")
+        )
+        btn_row.addWidget(guide_btn)
+
+        start_btn = QPushButton("Get Started")
+        start_btn.setFixedHeight(38)
+        def _dismiss():
+            self.save_config({"welcomed": True})
+            dlg.accept()
+        start_btn.clicked.connect(_dismiss)
+        btn_row.addWidget(start_btn)
+
+        v.addLayout(btn_row)
+        dlg.exec()
 
     def _on_step(self, n: int):
         idx = {1: 0, 2: 1, 3: 2, 4: 3}.get(n)

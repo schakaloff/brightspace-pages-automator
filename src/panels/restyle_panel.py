@@ -51,13 +51,27 @@ class RestylePanel(QWidget):
         self._url_entry = QLineEdit()
         self._url_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/home/…")
         self._url_entry.setFixedHeight(42)
+        self._url_entry.setToolTip(
+            "Paste a single Brightspace page URL, or a section URL to restyle multiple pages at once.\n"
+            "If a section URL is used, a dialog will let you select which pages to include."
+        )
         url_row.addWidget(self._url_entry, 1)
 
         self._run_btn = QPushButton("Start")
         self._run_btn.setFixedSize(110, 42)
+        self._run_btn.setToolTip(
+            "Opens a browser, extracts the page HTML, sends it to Gemini AI for restyling,\n"
+            "and writes the styled HTML back to Brightspace."
+        )
         self._run_btn.clicked.connect(self._start_run)
         url_row.addWidget(self._run_btn)
         layout.addLayout(url_row)
+
+        url_hint = QLabel("Paste a section URL to restyle multiple pages at once — you'll pick which ones to include.")
+        url_hint.setProperty("role", "dim")
+        url_hint.setWordWrap(True)
+        layout.addSpacing(6)
+        layout.addWidget(url_hint)
         layout.addSpacing(12)
 
         layout.addWidget(_form_label("LOG"))

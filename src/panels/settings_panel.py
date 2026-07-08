@@ -63,11 +63,13 @@ class SettingsPanel(QWidget):
         self._btn_dark = QPushButton("Dark")
         self._btn_dark.setProperty("variant", "secondary")
         self._btn_dark.setFixedSize(80, 36)
+        self._btn_dark.setToolTip("Switch to dark theme.")
         self._btn_dark.clicked.connect(lambda: self._mw.set_theme("dark"))
 
         self._btn_light = QPushButton("Light")
         self._btn_light.setProperty("variant", "secondary")
         self._btn_light.setFixedSize(80, 36)
+        self._btn_light.setToolTip("Switch to light theme.")
         self._btn_light.clicked.connect(lambda: self._mw.set_theme("light"))
 
         theme_row.addWidget(self._btn_dark)
@@ -88,12 +90,17 @@ class SettingsPanel(QWidget):
         self._key_field.setPlaceholderText("AIza…")
         self._key_field.setEchoMode(QLineEdit.EchoMode.Password)
         self._key_field.setFixedHeight(40)
+        self._key_field.setToolTip(
+            "Your Google Gemini API key. Required for the Collect and Restyle tabs.\n"
+            "Get one free at aistudio.google.com. Saved automatically."
+        )
         self._key_field.textChanged.connect(self._on_key_changed)
         key_row.addWidget(self._key_field)
 
         show_btn = QPushButton("Show")
         show_btn.setProperty("variant", "secondary")
         show_btn.setFixedSize(72, 40)
+        show_btn.setToolTip("Toggle API key visibility.")
         show_btn.setCheckable(True)
         show_btn.toggled.connect(
             lambda on: self._key_field.setEchoMode(
@@ -129,6 +136,7 @@ class SettingsPanel(QWidget):
         open_btn = QPushButton("Open Folder")
         open_btn.setProperty("variant", "secondary")
         open_btn.setFixedHeight(40)
+        open_btn.setToolTip("Open the downloads folder in your file manager.")
         def _open_folder():
             p = str(downloads_path) if downloads_path.exists() else str(downloads_path.parent)
             if sys.platform == "win32":
@@ -150,6 +158,7 @@ class SettingsPanel(QWidget):
 
         guide_btn = QPushButton("Open Full Visual Guide in Browser")
         guide_btn.setFixedHeight(42)
+        guide_btn.setToolTip("Open the step-by-step workflow guide in your browser. Shareable and printable.")
         guide_path = Path(__file__).parent.parent.parent / "WORKFLOW_GUIDE.html"
         guide_btn.clicked.connect(
             lambda: webbrowser.open(
@@ -168,11 +177,17 @@ class SettingsPanel(QWidget):
 
         # ── Section 3: Brightspace Credentials ───────────────────────────────
         layout.addWidget(_form_label("BRIGHTSPACE CREDENTIALS"))
+        layout.addSpacing(4)
+        bs_hint = QLabel("Used for direct login. If SSO is configured below, SSO takes priority.")
+        bs_hint.setProperty("role", "dim")
+        bs_hint.setWordWrap(True)
+        layout.addWidget(bs_hint)
         layout.addSpacing(6)
 
         self._bs_user_field = QLineEdit()
         self._bs_user_field.setPlaceholderText("n.firstname")
         self._bs_user_field.setFixedHeight(40)
+        self._bs_user_field.setToolTip("Your Brightspace username (e.g. n.firstname).")
         layout.addWidget(self._bs_user_field)
         layout.addSpacing(6)
 
@@ -180,6 +195,7 @@ class SettingsPanel(QWidget):
         self._bs_pass_field.setPlaceholderText("Password")
         self._bs_pass_field.setEchoMode(QLineEdit.EchoMode.Password)
         self._bs_pass_field.setFixedHeight(40)
+        self._bs_pass_field.setToolTip("Your Brightspace password. Stored securely in your system keyring.")
         layout.addWidget(self._bs_pass_field)
         layout.addSpacing(6)
 
@@ -190,6 +206,7 @@ class SettingsPanel(QWidget):
         bs_save_btn = QPushButton("Save Brightspace Credentials")
         bs_save_btn.setProperty("variant", "secondary")
         bs_save_btn.setFixedHeight(36)
+        bs_save_btn.setToolTip("Save username to config and password to your system keyring.")
         bs_save_btn.clicked.connect(self._save_bs_credentials)
         layout.addWidget(bs_save_btn)
         layout.addSpacing(24)
@@ -198,11 +215,17 @@ class SettingsPanel(QWidget):
 
         # ── Section 4: Microsoft SSO Credentials ─────────────────────────────
         layout.addWidget(_form_label("MICROSOFT SSO CREDENTIALS"))
+        layout.addSpacing(4)
+        sso_hint = QLabel("Used for Microsoft single sign-on login. Takes priority over direct Brightspace login.")
+        sso_hint.setProperty("role", "dim")
+        sso_hint.setWordWrap(True)
+        layout.addWidget(sso_hint)
         layout.addSpacing(6)
 
         self._sso_email_field = QLineEdit()
         self._sso_email_field.setPlaceholderText("NFirstname.Lastname@okanagan.bc.ca")
         self._sso_email_field.setFixedHeight(40)
+        self._sso_email_field.setToolTip("Your Microsoft SSO email address (e.g. NFirstname.Lastname@okanagan.bc.ca).")
         layout.addWidget(self._sso_email_field)
         layout.addSpacing(6)
 
@@ -210,6 +233,7 @@ class SettingsPanel(QWidget):
         self._sso_pass_field.setPlaceholderText("Password")
         self._sso_pass_field.setEchoMode(QLineEdit.EchoMode.Password)
         self._sso_pass_field.setFixedHeight(40)
+        self._sso_pass_field.setToolTip("Your Microsoft SSO password. Stored securely in your system keyring.")
         layout.addWidget(self._sso_pass_field)
         layout.addSpacing(6)
 
@@ -220,6 +244,7 @@ class SettingsPanel(QWidget):
         sso_save_btn = QPushButton("Save SSO Credentials")
         sso_save_btn.setProperty("variant", "secondary")
         sso_save_btn.setFixedHeight(36)
+        sso_save_btn.setToolTip("Save SSO email and password to your system keyring.")
         sso_save_btn.clicked.connect(self._save_sso_credentials)
         layout.addWidget(sso_save_btn)
         layout.addSpacing(24)
@@ -228,11 +253,17 @@ class SettingsPanel(QWidget):
 
         # ── Section 5: Moodle Credentials ────────────────────────────────────
         layout.addWidget(_form_label("MOODLE CREDENTIALS"))
+        layout.addSpacing(4)
+        moodle_hint = QLabel("Used by the Checker and Kaltura tabs to access your Moodle course content.")
+        moodle_hint.setProperty("role", "dim")
+        moodle_hint.setWordWrap(True)
+        layout.addWidget(moodle_hint)
         layout.addSpacing(6)
 
         self._moodle_user_field = QLineEdit()
         self._moodle_user_field.setPlaceholderText("n.firstname")
         self._moodle_user_field.setFixedHeight(40)
+        self._moodle_user_field.setToolTip("Your Moodle username.")
         layout.addWidget(self._moodle_user_field)
         layout.addSpacing(6)
 
@@ -240,6 +271,7 @@ class SettingsPanel(QWidget):
         self._moodle_pass_field.setPlaceholderText("Password")
         self._moodle_pass_field.setEchoMode(QLineEdit.EchoMode.Password)
         self._moodle_pass_field.setFixedHeight(40)
+        self._moodle_pass_field.setToolTip("Your Moodle password. Stored securely in your system keyring.")
         layout.addWidget(self._moodle_pass_field)
         layout.addSpacing(6)
 
@@ -250,6 +282,7 @@ class SettingsPanel(QWidget):
         moodle_save_btn = QPushButton("Save Moodle Credentials")
         moodle_save_btn.setProperty("variant", "secondary")
         moodle_save_btn.setFixedHeight(36)
+        moodle_save_btn.setToolTip("Save Moodle username and password to your system keyring.")
         moodle_save_btn.clicked.connect(self._save_moodle_credentials)
         layout.addWidget(moodle_save_btn)
         layout.addSpacing(24)
