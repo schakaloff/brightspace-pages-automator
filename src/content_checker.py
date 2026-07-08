@@ -75,6 +75,42 @@ def _numbers_conflict(a: str, b: str) -> bool:
     return any(int(x) != int(y) for x, y in zip(nums_a, nums_b))
 
 
+_WORD_NUMS = {
+    "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+    "eleven": "11", "twelve": "12", "thirteen": "13", "fourteen": "14",
+    "fifteen": "15", "sixteen": "16", "seventeen": "17", "eighteen": "18",
+    "nineteen": "19", "twenty": "20",
+}
+_WORD_NUMS_RE = re.compile(r'\b(' + '|'.join(_WORD_NUMS) + r')\b', re.IGNORECASE)
+
+
+def _digitize(text: str) -> str:
+    """Spell out numbers -> digits (comparison-only), so 'Chapters Three and Four'
+    lines up with 'Chapter 3'."""
+    return _WORD_NUMS_RE.sub(lambda m: _WORD_NUMS[m.group(0).lower()], text)
+
+
+def _containment_match(name_l: str, candidates) -> Optional[str]:
+    """Catch short Moodle names ('Chapter 3') that are conceptually contained in a
+    longer combined Brightspace title ('Week Two: Chapters Three and Four - ...').
+    difflib's whole-string ratio penalizes this length mismatch too heavily, so this
+    checks number-token overlap plus a shared keyword instead of literal substring."""
+    name_digit = _digitize(name_l)
+    name_nums = set(re.findall(r'\d+', name_digit))
+    name_words = [w for w in re.findall(r'[a-z]+', name_digit) if len(w) >= 4]
+    if not name_nums or not name_words:
+        return None
+    for key in candidates:
+        cand_digit = _digitize(key)
+        if not name_nums & set(re.findall(r'\d+', cand_digit)):
+            continue
+        cand_words = re.findall(r'[a-z]+', cand_digit)
+        if any(cw.startswith(nw) or nw.startswith(cw) for nw in name_words for cw in cand_words):
+            return key
+    return None
+
+
 # ── External tool detection ───────────────────────────────────────────────────
 
 _EXTERNAL_TOOLS = {
@@ -134,7 +170,11 @@ def _compare_items(moodle_items: list, bs_flat: list) -> list:
                     score = int(difflib.SequenceMatcher(None, name_l, close[0]).ratio() * 100)
                     status, matched = "fuzzy", (bs_modules[close[0]], score)
                 else:
-                    status, matched = "missing", None
+                    contained = _containment_match(name_l, bs_modules)
+                    if contained:
+                        status, matched = "fuzzy", (bs_modules[contained], 100)
+                    else:
+                        status, matched = "missing", None
             results.append({**item, "section": "", "status": status, "matched": matched})
             continue
 
@@ -169,6 +209,12 @@ def _compare_items(moodle_items: list, bs_flat: list) -> list:
             score = int(difflib.SequenceMatcher(None, name_l, close[0]).ratio() * 100)
             results.append({**item, "section": current_section,
                              "status": "fuzzy", "matched": bs_all[close[0]], "score": score})
+            continue
+
+        contained = _containment_match(name_l, bs_all)
+        if contained:
+            results.append({**item, "section": current_section,
+                             "status": "fuzzy", "matched": bs_all[contained], "score": 100})
             continue
 
         results.append({**item, "section": current_section,
@@ -243,7 +289,7 @@ _JS_MOODLE_ITEMS = """() => {
         const heading = section.querySelector('.sectionname, h3, h4');
         result.push({
             type: 'SECTION',
-            name: heading ? heading.textContent.trim() : '(unnamed section)',
+            name: (heading && heading.textContent.trim()) || '(unnamed section)',
             href: '',
         });
         section.querySelectorAll('li.activity').forEach(activity => {
@@ -971,6 +1017,10 @@ class ContentChecker:
         self.log(f"", "dim")
         self.log(f"⬆ Uploading {len(downloaded)} file(s) to Brightspace…", "step")
 
+        from urllib.parse import urlparse
+        parsed = urlparse(self.bs_url)
+        bs_base = f"{parsed.scheme}://{parsed.netloc}"
+
         # Group files by module so we open one BS tab per module
         by_module: dict = defaultdict(list)
         no_module: list = []
@@ -987,27 +1037,29 @@ class ContentChecker:
             mod_title = items[0][1].get("bs_module_title", "?")
             self.log(f"  📁 {mod_title} ({len(items)} file(s))", "info")
 
-            for local, fi in items:
-                name = fi["name"]
-
-                # Step 1: upload file bytes to BS course files via API
-                bs_url = await self._upload_file_to_brightspace(bs_page, course_id, local)
-                if not bs_url:
-                    self.log(f"    ✗ {name} — file upload failed", "error")
-                    self._summary["files_failed"].append((name, mod_title))
+            upload_ok = await self._upload_files_to_bs_module_ui(
+                context,
+                bs_base,
+                course_id,
+                mod_id,
+                mod_title,
+                [local for local, _ in items],
+            )
+            if not upload_ok:
+                for _, fi in items:
+                    self.log(f"    ✗ {fi['name']} — browser upload failed", "error")
+                    self._summary["files_failed"].append((fi["name"], mod_title))
                     fail_count += 1
-                    continue
+                continue
 
-                # Step 2: create a module topic pointing to that file
-                ok = await self._create_bs_file_topic(
-                    bs_page, course_id, mod_id, name, bs_url
-                )
-                if ok:
+            for _, fi in items:
+                name = fi["name"]
+                if await self._verify_topic_in_module(bs_page, course_id, mod_id, name):
                     self.log(f"    ✓ {name}", "success")
                     self._summary["files_uploaded"].append((name, mod_title))
                     ok_count += 1
                 else:
-                    self.log(f"    ✗ {name} — topic creation failed", "error")
+                    self.log(f"    ✗ {name} — upload not found in module after browser upload", "error")
                     self._summary["files_failed"].append((name, mod_title))
                     fail_count += 1
 
@@ -1142,6 +1194,90 @@ class ContentChecker:
     #             await tab.close()
     #         except Exception:
     #             pass
+
+    async def _upload_files_to_bs_module_ui(
+        self,
+        context: "BrowserContext",
+        bs_base: str,
+        course_id: str,
+        module_id,
+        module_title: str,
+        file_paths: list,
+    ) -> bool:
+        """
+        Upload files to a Brightspace module through the visible browser UI.
+        This follows the instructor flow instead of posting to D2L APIs directly.
+        """
+        tab = await context.new_page()
+        try:
+            module_url = f"{bs_base}/d2l/le/lessons/{course_id}/units/{module_id}"
+            await tab.goto(module_url, wait_until="domcontentloaded", timeout=30000)
+            await tab.wait_for_timeout(2000)
+
+            add_selector = 'd2l-button[aria-label="Add Existing"], d2l-button.add-existing-btn'
+            add_frame = None
+            for _ in range(20):
+                for frame in tab.frames:
+                    try:
+                        loc = frame.locator(add_selector)
+                        if await loc.count() > 0 and await loc.first.is_visible():
+                            add_frame = frame
+                            break
+                    except Exception:
+                        pass
+                if add_frame:
+                    break
+                await tab.wait_for_timeout(500)
+
+            if not add_frame:
+                self.log(f"    ✗ 'Add Existing' not found in any frame for '{module_title}'", "error")
+                self.log(f"      Frames loaded: {[f.url[:80] for f in tab.frames]}", "dim")
+                return False
+
+            await add_frame.locator(add_selector).first.click(timeout=5000)
+            await tab.wait_for_timeout(1000)
+
+            file_frame = None
+            for _ in range(20):
+                for frame in tab.frames:
+                    try:
+                        if await frame.locator('input[type="file"]').count() > 0:
+                            file_frame = frame
+                            break
+                    except Exception:
+                        pass
+                if file_frame:
+                    break
+                await tab.wait_for_timeout(500)
+
+            if not file_frame:
+                self.log("    ✗ File input not found after opening Add Existing", "error")
+                return False
+
+            try:
+                async with tab.expect_file_chooser(timeout=10000) as fc_info:
+                    await file_frame.locator('input[type="file"]').first.click()
+                fc = await fc_info.value
+                await fc.set_files([str(p) for p in file_paths])
+            except Exception as fc_err:
+                self.log(f"    ✗ File chooser not triggered: {fc_err}", "error")
+                return False
+
+            try:
+                await tab.wait_for_load_state("networkidle", timeout=60000)
+            except Exception:
+                pass
+            await tab.wait_for_timeout(2000)
+            return True
+
+        except Exception as e:
+            self.log(f"    ✗ Browser UI upload error: {e}", "error")
+            return False
+        finally:
+            try:
+                await tab.close()
+            except Exception:
+                pass
 
     async def _create_bs_file_topic(
         self, bs_page: "Page", course_id: str, module_id, title: str, file_url: str
@@ -1508,9 +1644,31 @@ class ContentChecker:
             except Exception:
                 pass
 
+            # Normalise common Moodle URL variants to course/view.php
+            import re as _re
+            _course_url = self.moodle_url or tab.url
+            _id_match = _re.search(r"[?&]id=(\d+)", _course_url)
+            if _id_match and "course/view.php" not in _course_url:
+                _base = _course_url.split("/enrol")[0].split("/course")[0]
+                _course_url = f"{_base}/course/view.php?id={_id_match.group(1)}"
+                self.log(f"  Normalised Moodle URL → {_course_url}", "dim")
+
+            # Auto-navigate to the course page before pausing. A freshly
+            # established post-login session often bounces the FIRST hit to
+            # enrol/index.php; re-navigating to the same URL then opens the course.
+            for _attempt in range(4):
+                if "course/view.php" in tab.url and "enrol" not in tab.url:
+                    break
+                self.log(f"  Navigating to Moodle course page… (try {_attempt + 1})", "dim")
+                try:
+                    await tab.goto(_course_url, wait_until="domcontentloaded", timeout=15000)
+                    await tab.wait_for_timeout(1500)
+                except Exception:
+                    pass
+
             self.log("─" * 52, "dim")
             self.log(f"  Moodle loaded at: {tab.url}", "dim")
-            self.log("  Navigate to the course page, then click", "info")
+            self.log("  Verify this is the correct course, then click", "info")
             self.log("  ✅ Ready — Scrape Now  in the app.", "info")
             self.log("─" * 52, "dim")
 
@@ -1519,13 +1677,6 @@ class ContentChecker:
             if self.moodle_ready_event:
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, self.moodle_ready_event.wait)
-
-            if "course/view.php" not in tab.url:
-                self.log("  Not on a course page — navigating to provided URL…", "dim")
-                try:
-                    await tab.goto(self.moodle_url, wait_until="domcontentloaded", timeout=15000)
-                except Exception:
-                    pass
 
             try:
                 await tab.wait_for_load_state("domcontentloaded", timeout=8000)

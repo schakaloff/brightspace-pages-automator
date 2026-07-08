@@ -49,6 +49,10 @@ class CollectorPanel(QWidget):
         self._unit_entry = QLineEdit()
         self._unit_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/le/content/…/lessons/…")
         self._unit_entry.setFixedHeight(40)
+        self._unit_entry.setToolTip(
+            "The URL of a Brightspace unit (a collection of topic pages).\n"
+            "Find it by clicking a unit in the course Content table — copy the URL from your browser."
+        )
         layout.addWidget(self._unit_entry)
         layout.addSpacing(12)
 
@@ -57,7 +61,24 @@ class CollectorPanel(QWidget):
         self._target_entry = QLineEdit()
         self._target_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/le/content/…/topics/…/View")
         self._target_entry.setFixedHeight(40)
+        self._target_entry.setToolTip(
+            "A blank HTML Content topic page in Brightspace where the combined output will be written.\n"
+            "Create an empty page in Brightspace first, then paste its URL here."
+        )
         layout.addWidget(self._target_entry)
+        target_hint = QLabel("Create an empty HTML Content topic in Brightspace, then paste its URL above.")
+        target_hint.setProperty("role", "dim")
+        target_hint.setWordWrap(True)
+        layout.addSpacing(4)
+        layout.addWidget(target_hint)
+        layout.addSpacing(12)
+
+        layout.addWidget(_form_label("MOODLE COURSE URL  (optional — fixes weird file/link names)"))
+        layout.addSpacing(4)
+        self._moodle_entry = QLineEdit()
+        self._moodle_entry.setPlaceholderText("https://mymoodle.okanagan.bc.ca/course/view.php?id=…")
+        self._moodle_entry.setFixedHeight(40)
+        layout.addWidget(self._moodle_entry)
         layout.addSpacing(12)
 
         par_row = QHBoxLayout()
@@ -66,6 +87,10 @@ class CollectorPanel(QWidget):
         self._parallel_spin.setRange(1, 10)
         self._parallel_spin.setValue(3)
         self._parallel_spin.setFixedWidth(60)
+        self._parallel_spin.setToolTip(
+            "Number of topic pages fetched simultaneously.\n"
+            "Higher = faster, but may trigger Brightspace rate limits. Default 3 is safe."
+        )
         par_row.addWidget(self._parallel_spin)
         par_row.addStretch()
         layout.addLayout(par_row)
@@ -73,6 +98,10 @@ class CollectorPanel(QWidget):
 
         self._run_btn = QPushButton("Collect & Assemble")
         self._run_btn.setFixedHeight(42)
+        self._run_btn.setToolTip(
+            "Scrapes all topic pages in the unit, combines them into one collapsible HTML file,\n"
+            "and writes the result to the target page."
+        )
         self._run_btn.clicked.connect(self._start_run)
         layout.addWidget(self._run_btn)
         layout.addSpacing(8)
@@ -86,6 +115,7 @@ class CollectorPanel(QWidget):
         self._continue_btn = QPushButton("Continue to Page Changer")
         self._continue_btn.setProperty("variant", "next-step")
         self._continue_btn.setFixedHeight(38)
+        self._continue_btn.setToolTip("Proceed to Step 3: use Gemini AI to restyle pages with an OC brand theme.")
         self._continue_btn.hide()
         self._continue_btn.clicked.connect(self.continue_next)
         layout.addWidget(self._continue_btn)
@@ -96,6 +126,7 @@ class CollectorPanel(QWidget):
             return
         unit_url   = self._unit_entry.text().strip()
         target_url = self._target_entry.text().strip()
+        moodle_url = self._moodle_entry.text().strip()
         if not unit_url:
             self._log.append_log("Paste a Brightspace unit URL first.", "warning"); return
         if not target_url:
@@ -130,7 +161,8 @@ class CollectorPanel(QWidget):
                     target_url=target_url,
                     theme_name=theme_name,
                     theme_colors=theme_colors,
-                    gemini_api_key=self._mw.gemini_api_key,
+                    claude_api_key=self._mw.claude_api_key,
+                    claude_model=self._mw.claude_model,
                     style_reference_html=style_reference_html,
                     parallel_pages=parallel,
                     log=lambda msg, tag="info": q.put((msg, tag)),
@@ -139,6 +171,9 @@ class CollectorPanel(QWidget):
                     bs_password=self._mw.bs_password,
                     sso_email=self._mw.sso_email,
                     sso_password=self._mw.sso_password,
+                    moodle_url=moodle_url,
+                    moodle_username=self._mw.moodle_username,
+                    moodle_password=self._mw.moodle_password,
                 ))
             except Exception as e:
                 q.put((f"Error: {e}", "error"))

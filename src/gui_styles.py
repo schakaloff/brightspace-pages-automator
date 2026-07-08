@@ -146,9 +146,11 @@ QToolButton:disabled {{ background-color: {c['BTN_DISABLED_BG']}; color: {c['TEX
 QToolButton::menu-button {{
     border: none; border-left: 1px solid {c['OC_TEAL_MID']};
     border-top-right-radius: 6px; border-bottom-right-radius: 6px;
-    width: 22px;
+    width: 26px;
 }}
-QToolButton::menu-arrow {{ image: none; width: 0px; }}
+QToolButton::menu-arrow {{
+    width: 10px; height: 10px;
+}}
 
 QMenu {{
     background-color: {c['PANEL']}; border: 1px solid {c['BORDER_ACT']};
@@ -161,6 +163,16 @@ QMenu::item:checked:selected {{ color: #ffffff; }}
 QMenu::separator {{ height: 1px; background: {c['BORDER']}; margin: 4px 10px; }}
 
 QFrame[role="divider"] {{ background: {c['BORDER']}; max-height: 1px; border: none; }}
+
+QToolTip {{
+    background-color: {c['PANEL']};
+    color: {c['TEXT_PRI']};
+    border: 1px solid {c['BORDER_ACT']};
+    border-radius: 5px;
+    padding: 5px 10px;
+    font-size: 12px;
+    font-weight: normal;
+}}
 """
 
 
