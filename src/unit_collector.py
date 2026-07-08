@@ -52,7 +52,8 @@ class UnitCollector:
         target_url: str,
         theme_name: str,
         theme_colors: dict,
-        gemini_api_key: str = "",
+        claude_api_key: str = "",
+        claude_model: str = "",
         style_reference_html: str = "",
         parallel_pages: int = 3,
         log: Optional[Callable] = None,
@@ -69,7 +70,8 @@ class UnitCollector:
         self.target_url = target_url
         self.theme_name = theme_name
         self.theme_colors = theme_colors
-        self.gemini_api_key = gemini_api_key
+        self.claude_api_key = claude_api_key
+        self.claude_model = claude_model
         self.style_reference_html = style_reference_html
         self.parallel_pages = max(1, parallel_pages)
         self._log_fn = log
@@ -799,48 +801,6 @@ class UnitCollector:
             if not uploaded:
                 self.log(f"  ⚠ Footer Upload button not clicked for {file_item['filename']}", "warning")
 
-            # Step 5a-pre: Fill the link-text field with the corrected name (if we have
-            # one) as soon as it appears. This field lives on the same confirmation
-            # screen as the final "Insert" button, so this must run BEFORE any
-            # Insert-button click below — those clicks (error-recovery or the final
-            # one) fire on the first visible Insert button without checking for this
-            # field, and would otherwise confirm the screen before it's ever set.
-            # The field's id/name (e.g. "z_k") is a short auto-generated ASP.NET-style
-            # control id that shifts letter depending on which error/overwrite controls
-            # got inserted earlier in the form, so it is NOT a stable selector — match
-            # on the field's class instead, which is consistent across renders.
-            corrected = file_item.get("corrected_name")
-            if corrected:
-                display_name = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", corrected)
-                _JS_FILL_ZK = """(name) => {
-                    const el = document.querySelector('input.rs_skip.d2l-edit-legacy[type="text"]');
-                    if (!el) return false;
-                    const setter = Object.getOwnPropertyDescriptor(
-                        window.HTMLInputElement.prototype, 'value').set;
-                    setter.call(el, name);
-                    el.dispatchEvent(new Event('input', {bubbles: true}));
-                    el.dispatchEvent(new Event('change', {bubbles: true}));
-                    return true;
-                }"""
-                filled = False
-                for _ in range(10):
-                    for frame in page.frames:
-                        if frame == page.main_frame:
-                            continue
-                        try:
-                            if await frame.evaluate(_JS_FILL_ZK, display_name):
-                                filled = True
-                                break
-                        except Exception:
-                            pass
-                    if filled:
-                        break
-                    await page.wait_for_timeout(400)
-                if filled:
-                    self.log(f"  ✓ Set link text: {display_name}", "dim")
-                else:
-                    self.log(f"  ⚠ Link-text field not found — link text left as default", "dim")
-
             # Step 5a: After clicking Upload in an error state, Brightspace may show
             # an intermediate screen with an "Insert" button before the overwrite dialog.
             _JS_CLICK_INSERT_ON_ERROR = """() => {
@@ -853,9 +813,9 @@ class UnitCollector:
                 }
                 return false;
             }"""
+            clicked_insert_on_error = False
             for _ in range(10):
                 await page.wait_for_timeout(500)
-                clicked_insert_on_error = False
                 for frame in page.frames:
                     if frame == page.main_frame:
                         continue
@@ -868,14 +828,17 @@ class UnitCollector:
                         pass
                 if clicked_insert_on_error:
                     await page.wait_for_timeout(1200)
-                    # Check if dialog already closed — if so, insertion is done
-                    try:
-                        if await page.locator('iframe[title="Insert Stuff"], iframe.d2l-dialog-frame').count() == 0:
-                            self.log(f"  ✓ Inserted (via error-Insert): {file_item['filename']}", "success")
-                            return True
-                    except Exception:
-                        pass
                     break
+
+            # If the error-Insert click above already closed the whole dialog, there
+            # was no overwrite conflict and no link-text field to fill — done.
+            if clicked_insert_on_error:
+                try:
+                    if await page.locator('iframe[title="Insert Stuff"], iframe.d2l-dialog-frame').count() == 0:
+                        self.log(f"  ✓ Inserted (via error-Insert): {file_item['filename']}", "success")
+                        return True
+                except Exception:
+                    pass
 
             # Step 5b: Handle overwrite dialog if the file already exists
             _JS_OVERWRITE = """() => {
@@ -911,6 +874,45 @@ class UnitCollector:
                 else:
                     continue
                 break
+
+            # Step 5c: Fill the link-text field with the corrected name, now that the
+            # error/overwrite screens (5a/5b) have resolved — this field only renders
+            # on the final confirmation screen, AFTER those are dismissed, not before.
+            # The field's id/name (e.g. "z_k") is a short auto-generated ASP.NET-style
+            # control id that shifts letter depending on which error/overwrite controls
+            # got inserted earlier in the form, so it is NOT a stable selector — match
+            # on the field's class instead, which is consistent across renders.
+            corrected = file_item.get("corrected_name")
+            if corrected:
+                display_name = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", corrected)
+                _JS_FILL_ZK = """(name) => {
+                    const el = document.querySelector('input.rs_skip.d2l-edit-legacy[type="text"]');
+                    if (!el) return false;
+                    const setter = Object.getOwnPropertyDescriptor(
+                        window.HTMLInputElement.prototype, 'value').set;
+                    setter.call(el, name);
+                    el.dispatchEvent(new Event('input', {bubbles: true}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                    return true;
+                }"""
+                filled = False
+                for _ in range(10):
+                    for frame in page.frames:
+                        if frame == page.main_frame:
+                            continue
+                        try:
+                            if await frame.evaluate(_JS_FILL_ZK, display_name):
+                                filled = True
+                                break
+                        except Exception:
+                            pass
+                    if filled:
+                        break
+                    await page.wait_for_timeout(400)
+                if filled:
+                    self.log(f"  ✓ Set link text: {display_name}", "dim")
+                else:
+                    self.log(f"  ⚠ Link-text field not found — link text left as default", "dim")
 
             # Step 6: Wait for "Insert" button (appears after upload completes) and click it
             _JS_CLICK_INSERT = """() => {
@@ -1083,13 +1085,13 @@ class UnitCollector:
             except Exception:
                 pass
 
-    async def _apply_gemini(self, context) -> bool:
-        if not self.gemini_api_key:
-            self.log("⚠ No Gemini API key — skipping styling step", "warning")
+    async def _apply_claude_style(self, context) -> bool:
+        if not self.claude_api_key:
+            self.log("⚠ No Claude API key — skipping styling step", "warning")
             return False
 
         self.log("─" * 52, "dim")
-        self.log("Applying Gemini styling to assembled page...", "info")
+        self.log("Applying Claude styling to assembled page...", "info")
 
         page = await context.new_page()
         try:
@@ -1105,18 +1107,19 @@ class UnitCollector:
                 self.log("✗ Could not extract assembled HTML", "error")
                 return False
 
-            from ai_styler import apply_style
+            from ai_styler import apply_style, DEFAULT_MODEL
             styled_html = await asyncio.to_thread(
                 apply_style,
                 source_html=source_html,
                 style_reference_html=self.style_reference_html,
                 theme_name=self.theme_name,
-                api_key=self.gemini_api_key,
+                api_key=self.claude_api_key,
+                model=self.claude_model or DEFAULT_MODEL,
                 log_callback=self.log,
             )
 
             if not styled_html:
-                self.log("✗ Gemini returned nothing", "error")
+                self.log("✗ Claude returned nothing", "error")
                 return False
 
             await self._paste_html(page, styled_html)
@@ -1231,8 +1234,8 @@ class UnitCollector:
             self.log("─" * 52, "dim")
             self.log(f"✓ Text done: {html_count} pages, {link_count} links", "success")
 
-            if self.gemini_api_key:
-                await self._apply_gemini(context)
+            if self.claude_api_key:
+                await self._apply_claude_style(context)
 
             self.log("─" * 52, "dim")
             self.log("✓ Done! Close the browser when finished.", "success")
@@ -1258,7 +1261,8 @@ async def run(
     target_url: str,
     theme_name: str,
     theme_colors: dict,
-    gemini_api_key: str = "",
+    claude_api_key: str = "",
+    claude_model: str = "",
     style_reference_html: str = "",
     parallel_pages: int = 3,
     log: Callable = None,
@@ -1276,7 +1280,8 @@ async def run(
         target_url=target_url,
         theme_name=theme_name,
         theme_colors=theme_colors,
-        gemini_api_key=gemini_api_key,
+        claude_api_key=claude_api_key,
+        claude_model=claude_model,
         style_reference_html=style_reference_html,
         parallel_pages=parallel_pages,
         log=log,
