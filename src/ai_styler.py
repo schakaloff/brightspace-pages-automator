@@ -1,8 +1,7 @@
 import re
 import sys
 import time
-from google import genai
-from google.genai import errors as genai_errors
+import anthropic
 from pathlib import Path
 from typing import Optional
 from bs4 import BeautifulSoup
@@ -68,9 +67,10 @@ _PROMPTS_DIR = (
     if getattr(sys, "frozen", False)
     else Path(__file__).parent.parent / "prompts"
 )
-_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "claude-sonnet-5"
+_MAX_TOKENS = 8192
 _MAX_RETRIES = 3
-_RETRY_DELAY = 8  # seconds between retries on 503
+_RETRY_DELAY = 8  # seconds between retries on overload
 
 
 def _load_prompt(theme_name: str) -> str:
@@ -86,6 +86,7 @@ def apply_style(
     style_reference_html: str,
     theme_name: str,
     api_key: str,
+    model: str = DEFAULT_MODEL,
     log_callback=None,
 ) -> Optional[str]:
     def log(msg, level="info"):
@@ -105,13 +106,17 @@ def apply_style(
         style_reference_html=style_reference_html or "",
     )
 
-    client = genai.Client(api_key=api_key)
+    client = anthropic.Anthropic(api_key=api_key)
 
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
-            log(f"🤖 Gemini 3.5 Flash — attempt {attempt}/{_MAX_RETRIES} (theme: {theme_name})", "info")
-            response = client.models.generate_content(model=_MODEL, contents=prompt)
-            result = response.text.strip()
+            log(f"🤖 {model} — attempt {attempt}/{_MAX_RETRIES} (theme: {theme_name})", "info")
+            response = client.messages.create(
+                model=model,
+                max_tokens=_MAX_TOKENS,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            result = next(b.text for b in response.content if b.type == "text").strip()
 
             if result.startswith("```"):
                 lines = result.splitlines()
@@ -122,14 +127,14 @@ def apply_style(
             log(f"✅ Done ({len(result):,} chars)", "success")
             return result
 
-        except genai_errors.ServerError as e:
-            if attempt < _MAX_RETRIES:
-                log(f"⚠ Server busy (503) — retrying in {_RETRY_DELAY}s...", "warning")
+        except anthropic.APIStatusError as e:
+            if e.status_code in (429, 529) and attempt < _MAX_RETRIES:
+                log(f"⚠ Server busy ({e.status_code}) — retrying in {_RETRY_DELAY}s...", "warning")
                 time.sleep(_RETRY_DELAY)
             else:
-                log(f"❌ Gemini unavailable after {_MAX_RETRIES} attempts: {e}", "error")
+                log(f"❌ Claude unavailable after {attempt} attempts: {e}", "error")
                 return None
 
         except Exception as e:
-            log(f"❌ Gemini error: {e}", "error")
+            log(f"❌ Claude error: {e}", "error")
             return None

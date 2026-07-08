@@ -46,6 +46,7 @@ class CheckerPanel(QWidget):
         self._bs_entry = QLineEdit()
         self._bs_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/le/content/<id>/home")
         self._bs_entry.setFixedHeight(40)
+        self._bs_entry.setToolTip("Paste the Brightspace course home URL.\nExample: .../d2l/le/content/<id>/home")
         layout.addWidget(self._bs_entry)
         layout.addSpacing(12)
 
@@ -54,6 +55,7 @@ class CheckerPanel(QWidget):
         self._moodle_entry = QLineEdit()
         self._moodle_entry.setPlaceholderText("https://mymoodle.okanagan.bc.ca/course/view.php?id=…")
         self._moodle_entry.setFixedHeight(40)
+        self._moodle_entry.setToolTip("Paste the Moodle course home URL.\nRequires Teacher-level access to download files and H5P.")
         layout.addWidget(self._moodle_entry)
         layout.addSpacing(14)
 
@@ -64,6 +66,7 @@ class CheckerPanel(QWidget):
         self._run_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         self._run_btn.setFixedHeight(42)
         self._run_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._run_btn.setToolTip("Run the full check: scrapes both courses, compares content,\nand downloads missing files. Use the arrow for more options.")
         self._run_btn.clicked.connect(self._start_run)
 
         run_menu = QMenu(self._run_btn)
@@ -83,28 +86,51 @@ class CheckerPanel(QWidget):
         self._pdf_act.setCheckable(True); self._pdf_act.setChecked(True)
 
         self._h5p_act = run_menu.addAction("Upload H5P")
-        self._h5p_act.setCheckable(True); self._h5p_act.setChecked(False)
+        self._h5p_act.setCheckable(True); self._h5p_act.setChecked(True)
 
         self._run_btn.setMenu(run_menu)
         layout.addWidget(self._run_btn)
         layout.addSpacing(8)
 
         # Pause-point buttons (hidden until needed)
+        self._moodle_hint = QLabel(
+            "A browser window has opened your Moodle course. "
+            "Verify you are logged in and the correct course is shown, then click below."
+        )
+        self._moodle_hint.setProperty("role", "dim")
+        self._moodle_hint.setWordWrap(True)
+        self._moodle_hint.hide()
+        layout.addWidget(self._moodle_hint)
+        layout.addSpacing(4)
+
         self._ready_btn = QPushButton("Ready — Scrape Now")
         self._ready_btn.setProperty("variant", "success")
         self._ready_btn.setFixedHeight(38)
+        self._ready_btn.setToolTip("Click once you can see your Moodle course in the browser and you are logged in.")
         self._ready_btn.hide()
         layout.addWidget(self._ready_btn)
+
+        self._h5p_hint = QLabel(
+            "The tool needs Teacher-level access to download H5P files. "
+            "Switch your Moodle role to Teacher in the browser, then click Ready — or click Skip if H5P is not needed."
+        )
+        self._h5p_hint.setProperty("role", "dim")
+        self._h5p_hint.setWordWrap(True)
+        self._h5p_hint.hide()
+        layout.addWidget(self._h5p_hint)
+        layout.addSpacing(4)
 
         h5p_row = QHBoxLayout(); h5p_row.setSpacing(8)
         self._h5p_ready_btn = QPushButton("Ready — Download H5P")
         self._h5p_ready_btn.setProperty("variant", "success")
         self._h5p_ready_btn.setFixedHeight(38)
+        self._h5p_ready_btn.setToolTip("Click after switching your Moodle role to Teacher. The tool will then download H5P packages.")
         self._h5p_ready_btn.hide()
         self._h5p_skip_btn = QPushButton("Skip H5P")
         self._h5p_skip_btn.setProperty("variant", "secondary")
         self._h5p_skip_btn.setFixedWidth(120)
         self._h5p_skip_btn.setFixedHeight(38)
+        self._h5p_skip_btn.setToolTip("Skip H5P download — these activities will need to be embedded manually later.")
         self._h5p_skip_btn.hide()
         h5p_row.addWidget(self._h5p_ready_btn, 1)
         h5p_row.addWidget(self._h5p_skip_btn)
@@ -129,6 +155,7 @@ class CheckerPanel(QWidget):
         self._continue_btn = QPushButton("Continue to Unit Collector")
         self._continue_btn.setProperty("variant", "next-step")
         self._continue_btn.setFixedHeight(38)
+        self._continue_btn.setToolTip("Proceed to Step 2: scrape and combine unit topic pages.")
         self._continue_btn.hide()
         self._continue_btn.clicked.connect(self.continue_next)
         layout.addWidget(self._continue_btn)
@@ -174,12 +201,20 @@ class CheckerPanel(QWidget):
 
         def confirm(msg: str) -> bool:
             from PySide6.QtWidgets import QMessageBox
+            from PySide6.QtCore import Qt
             result = [False]; ev = _t.Event()
             def ask():
-                result[0] = QMessageBox.question(
-                    self, "Continue?", msg,
+                dlg = QMessageBox(self)
+                dlg.setWindowTitle("Continue?")
+                dlg.setText(msg)
+                dlg.setStandardButtons(
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                ) == QMessageBox.StandardButton.Yes
+                )
+                dlg.setDefaultButton(QMessageBox.StandardButton.No)
+                dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+                dlg.raise_()
+                dlg.activateWindow()
+                result[0] = dlg.exec() == QMessageBox.StandardButton.Yes
                 ev.set()
             QTimer.singleShot(0, ask)
             ev.wait()
@@ -247,7 +282,9 @@ class CheckerPanel(QWidget):
                 msg, tag = self._log_queue.get_nowait()
                 if msg == "__DONE__":
                     self._run_btn.setText("Run Check"); self._run_btn.setEnabled(True)
+                    self._moodle_hint.hide()
                     self._ready_btn.hide()
+                    self._h5p_hint.hide()
                     self._h5p_ready_btn.hide(); self._h5p_skip_btn.hide()
                     dl = Path(__file__).parent.parent.parent / "downloads"
                     self._dl_label.setText(f"Downloads: {dl}")
@@ -262,8 +299,10 @@ class CheckerPanel(QWidget):
                     except RuntimeError:
                         pass
                     self._ready_btn.clicked.connect(self._moodle_ready)
+                    self._moodle_hint.show()
                     self._ready_btn.show()
                 elif msg == "__CHK_H5P_WAITING__":
+                    self._h5p_hint.show()
                     self._h5p_ready_btn.show(); self._h5p_skip_btn.show()
                     try:
                         self._h5p_ready_btn.clicked.disconnect()
@@ -286,16 +325,19 @@ class CheckerPanel(QWidget):
             pass
 
     def _moodle_ready(self):
+        self._moodle_hint.hide()
         self._ready_btn.hide()
         if self._moodle_ready_event:
             self._moodle_ready_event.set()
 
     def _h5p_ready(self):
+        self._h5p_hint.hide()
         self._h5p_ready_btn.hide(); self._h5p_skip_btn.hide()
         if self._h5p_ready_event:
             self._h5p_ready_event.set()
 
     def _h5p_skip(self):
+        self._h5p_hint.hide()
         self._h5p_ready_btn.hide(); self._h5p_skip_btn.hide()
         self._h5p_skip_flag[0] = True
         if self._h5p_ready_event:

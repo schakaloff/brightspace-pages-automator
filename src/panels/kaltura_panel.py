@@ -321,6 +321,8 @@ class KalturaPanel(QWidget):
         self._create_btn.setEnabled(False)
         self._scan_btn.setEnabled(False)
         q = self._log_queue
+        kmc_user = self._mw.kmc_username
+        kmc_pass = self._mw.kmc_password
 
         def worker():
             try:
@@ -330,6 +332,8 @@ class KalturaPanel(QWidget):
                     section_map,
                     bs_url,
                     log_fn=lambda msg, tag="info": q.put((msg, tag)),
+                    kmc_username=kmc_user,
+                    kmc_password=kmc_pass,
                 ))
                 q.put(("__CAT_DONE__", None))
             except Exception as e:

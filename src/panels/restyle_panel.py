@@ -34,7 +34,7 @@ class RestylePanel(QWidget):
         layout.setSpacing(0)
 
         layout.addWidget(_section_header("Page Changer"))
-        sub = QLabel("Pick an OC brand colour theme, paste a Brightspace page or section URL, and let Gemini restyle it.")
+        sub = QLabel("Pick an OC brand colour theme, paste a Brightspace page or section URL, and let Claude restyle it.")
         sub.setProperty("role", "dim"); sub.setWordWrap(True)
         layout.addWidget(sub)
         layout.addSpacing(20)
@@ -51,13 +51,27 @@ class RestylePanel(QWidget):
         self._url_entry = QLineEdit()
         self._url_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/home/…")
         self._url_entry.setFixedHeight(42)
+        self._url_entry.setToolTip(
+            "Paste a single Brightspace page URL, or a section URL to restyle multiple pages at once.\n"
+            "If a section URL is used, a dialog will let you select which pages to include."
+        )
         url_row.addWidget(self._url_entry, 1)
 
         self._run_btn = QPushButton("Start")
         self._run_btn.setFixedSize(110, 42)
+        self._run_btn.setToolTip(
+            "Opens a browser, extracts the page HTML, sends it to Gemini AI for restyling,\n"
+            "and writes the styled HTML back to Brightspace."
+        )
         self._run_btn.clicked.connect(self._start_run)
         url_row.addWidget(self._run_btn)
         layout.addLayout(url_row)
+
+        url_hint = QLabel("Paste a section URL to restyle multiple pages at once — you'll pick which ones to include.")
+        url_hint.setProperty("role", "dim")
+        url_hint.setWordWrap(True)
+        layout.addSpacing(6)
+        layout.addWidget(url_hint)
         layout.addSpacing(12)
 
         layout.addWidget(_form_label("LOG"))
@@ -107,7 +121,8 @@ class RestylePanel(QWidget):
                     url=url,
                     log=lambda msg, tag="info": q.put((msg, tag)),
                     on_complete=on_done,
-                    gemini_api_key=self._mw.gemini_api_key,
+                    claude_api_key=self._mw.claude_api_key,
+                    claude_model=self._mw.claude_model,
                     style_reference_html=style_reference_html,
                     theme_name=self._selected_theme[0],
                     on_pages_found=on_pages_found,

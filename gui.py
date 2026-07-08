@@ -31,7 +31,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Brightspace Pages Automator")
         self.setMinimumSize(720, 560)
         self.resize(860, 640)
-        self._gemini_key   = ""
+        self._claude_key   = ""
+        self._claude_model = ""
         self._chromium_ready = False
         self._set_window_icon()
         self._build_ui()
@@ -64,6 +65,7 @@ class MainWindow(QMainWindow):
             (2, "collect", "Collect"),
             (3, "restyle", "Restyle"),
             (4, "kaltura", "Kaltura"),
+            (5, "h5p", "H5P"),
         ])
         self._sidebar.step_clicked.connect(self._on_step)
         self._sidebar.settings_clicked.connect(self._on_settings)
@@ -79,18 +81,20 @@ class MainWindow(QMainWindow):
         from panels.restyle_panel import RestylePanel
         from panels.settings_panel import SettingsPanel
         from panels.kaltura_panel import KalturaPanel
+        from panels.h5p_panel import H5PPanel
 
         self._checker   = CheckerPanel(self)
         self._collector = CollectorPanel(self)
         self._restyle   = RestylePanel(self)
         self._kaltura   = KalturaPanel(self)
+        self._h5p       = H5PPanel(self)
         self._settings  = SettingsPanel(self)
 
-        for panel in (self._checker, self._collector, self._restyle, self._kaltura, self._settings):
-            self._stack.addWidget(panel)  # indices 0-4
+        for panel in (self._checker, self._collector, self._restyle, self._kaltura, self._h5p, self._settings):
+            self._stack.addWidget(panel)  # indices 0-5
 
         # All steps start unlocked — users can navigate freely
-        for n in (1, 2, 3, 4):
+        for n in (1, 2, 3, 4, 5):
             self._sidebar.set_step_state(n, StepButton.PENDING)
 
         # Cross-panel wiring
@@ -99,17 +103,99 @@ class MainWindow(QMainWindow):
         self._collector.step_success.connect(lambda: self._sidebar.set_step_state(2, StepButton.DONE))
         self._collector.continue_next.connect(lambda: self._on_step(3))
         self._settings.api_key_changed.connect(self._set_api_key)
+        self._settings.model_changed.connect(self._set_model)
 
         self._on_step(1)
+        self._show_welcome_if_needed()
+
+    def _show_welcome_if_needed(self):
+        if self.load_config().get("welcomed"):
+            return
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
+        import webbrowser, os
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Welcome")
+        dlg.setFixedSize(460, 380)
+        dlg.setModal(True)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(32, 28, 32, 24)
+        v.setSpacing(0)
+
+        title = QLabel("Welcome to Brightspace Pages Automator")
+        title.setProperty("role", "header")
+        title.setWordWrap(True)
+        v.addWidget(title)
+        v.addSpacing(10)
+
+        desc = QLabel(
+            "This tool automates migrating Moodle course content into Brightspace — "
+            "checking content, collecting unit pages, and restyling them with OC brand themes."
+        )
+        desc.setProperty("role", "dim")
+        desc.setWordWrap(True)
+        v.addWidget(desc)
+        v.addSpacing(20)
+
+        steps_lbl = QLabel("Quick start:")
+        steps_lbl.setStyleSheet("font-weight:700;font-size:13px;")
+        v.addWidget(steps_lbl)
+        v.addSpacing(8)
+
+        for n, text in [
+            ("1", "Go to Settings → save your Brightspace, SSO, and Moodle credentials"),
+            ("2", "Go to Settings → add your Gemini API key (needed for Collect & Restyle)"),
+            ("3", "Use Checker to compare courses and download missing files"),
+            ("4", "Use Collect → Restyle to scrape and restyle unit pages"),
+        ]:
+            row = QHBoxLayout()
+            row.setSpacing(10)
+            badge = QLabel(n)
+            badge.setFixedSize(22, 22)
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            badge.setStyleSheet(
+                "background:#005F63;color:#fff;border-radius:11px;"
+                "font-size:11px;font-weight:700;"
+            )
+            lbl = QLabel(text)
+            lbl.setWordWrap(True)
+            lbl.setProperty("role", "dim")
+            row.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
+            row.addWidget(lbl, 1)
+            v.addLayout(row)
+            v.addSpacing(6)
+
+        v.addStretch()
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        guide_path = Path(__file__).parent / "WORKFLOW_GUIDE.html"
+        guide_btn = QPushButton("Open Full Guide")
+        guide_btn.setProperty("variant", "secondary")
+        guide_btn.setFixedHeight(38)
+        guide_btn.clicked.connect(
+            lambda: webbrowser.open(f"file:///{str(guide_path).replace(os.sep, '/')}")
+        )
+        btn_row.addWidget(guide_btn)
+
+        start_btn = QPushButton("Get Started")
+        start_btn.setFixedHeight(38)
+        def _dismiss():
+            self.save_config({"welcomed": True})
+            dlg.accept()
+        start_btn.clicked.connect(_dismiss)
+        btn_row.addWidget(start_btn)
+
+        v.addLayout(btn_row)
+        dlg.exec()
 
     def _on_step(self, n: int):
-        idx = {1: 0, 2: 1, 3: 2, 4: 3}.get(n)
+        idx = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4}.get(n)
         if idx is not None:
             self._stack.setCurrentIndex(idx)
             self._sidebar.set_active(n)
 
     def _on_settings(self):
-        self._stack.setCurrentIndex(4)
+        self._stack.setCurrentIndex(5)
         self._sidebar.set_active(None)
 
     # ── Theme ────────────────────────────────────────────────
@@ -119,7 +205,7 @@ class MainWindow(QMainWindow):
         self._sidebar.refresh_theme()
         self._settings.mark_active_theme(name)
         # Refresh log widgets in each panel
-        for panel in (self._checker, self._collector, self._restyle, self._kaltura):
+        for panel in (self._checker, self._collector, self._restyle, self._kaltura, self._h5p):
             for log in panel.findChildren(type(self._checker)):
                 pass  # panels refresh via stylesheet
         from gui_log import LogWidget
@@ -152,28 +238,45 @@ class MainWindow(QMainWindow):
     def moodle_password(self) -> str:
         return self._settings.moodle_password
 
-    # ── Gemini API key ───────────────────────────────────────
     @property
-    def gemini_api_key(self) -> str:
-        return self._gemini_key
+    def kmc_username(self) -> str:
+        return self._settings.kmc_username
+
+    @property
+    def kmc_password(self) -> str:
+        return self._settings.kmc_password
+
+    # ── Claude API key / model ────────────────────────────────
+    @property
+    def claude_api_key(self) -> str:
+        return self._claude_key
+
+    @property
+    def claude_model(self) -> str:
+        return self._claude_model
 
     def _set_api_key(self, key: str):
-        self._gemini_key = key
+        self._claude_key = key
+
+    def _set_model(self, model: str):
+        self._claude_model = model
 
     def _load_api_key(self):
         key = ""
         try:
-            from api_config import GEMINI_API_KEY as k
+            from api_config import CLAUDE_API_KEY as k
             key = k
         except ImportError:
             pass
+        cfg = self.load_config()
         if not key:
-            try:
-                key = json.loads(_CONFIG_PATH.read_text()).get("gemini_api_key", "")
-            except Exception:
-                pass
-        self._gemini_key = key
+            key = cfg.get("claude_api_key", "")
+        self._claude_key = key
         self._settings.set_api_key(key)
+
+        from ai_styler import DEFAULT_MODEL
+        self._claude_model = cfg.get("claude_model", DEFAULT_MODEL)
+        self._settings.set_model(self._claude_model)
 
     # ── Config helpers ───────────────────────────────────────
     def load_config(self) -> dict:
@@ -285,7 +388,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.save_config({
-            "gemini_api_key": self._gemini_key,
+            "claude_api_key": self._claude_key,
+            "claude_model": self._claude_model,
         })
         event.accept()
         os._exit(0)

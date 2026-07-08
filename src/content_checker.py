@@ -1554,9 +1554,31 @@ class ContentChecker:
             except Exception:
                 pass
 
+            # Normalise common Moodle URL variants to course/view.php
+            import re as _re
+            _course_url = self.moodle_url or tab.url
+            _id_match = _re.search(r"[?&]id=(\d+)", _course_url)
+            if _id_match and "course/view.php" not in _course_url:
+                _base = _course_url.split("/enrol")[0].split("/course")[0]
+                _course_url = f"{_base}/course/view.php?id={_id_match.group(1)}"
+                self.log(f"  Normalised Moodle URL → {_course_url}", "dim")
+
+            # Auto-navigate to the course page before pausing. A freshly
+            # established post-login session often bounces the FIRST hit to
+            # enrol/index.php; re-navigating to the same URL then opens the course.
+            for _attempt in range(4):
+                if "course/view.php" in tab.url and "enrol" not in tab.url:
+                    break
+                self.log(f"  Navigating to Moodle course page… (try {_attempt + 1})", "dim")
+                try:
+                    await tab.goto(_course_url, wait_until="domcontentloaded", timeout=15000)
+                    await tab.wait_for_timeout(1500)
+                except Exception:
+                    pass
+
             self.log("─" * 52, "dim")
             self.log(f"  Moodle loaded at: {tab.url}", "dim")
-            self.log("  Navigate to the course page, then click", "info")
+            self.log("  Verify this is the correct course, then click", "info")
             self.log("  ✅ Ready — Scrape Now  in the app.", "info")
             self.log("─" * 52, "dim")
 
@@ -1565,13 +1587,6 @@ class ContentChecker:
             if self.moodle_ready_event:
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, self.moodle_ready_event.wait)
-
-            if "course/view.php" not in tab.url:
-                self.log("  Not on a course page — navigating to provided URL…", "dim")
-                try:
-                    await tab.goto(self.moodle_url, wait_until="domcontentloaded", timeout=15000)
-                except Exception:
-                    pass
 
             try:
                 await tab.wait_for_load_state("domcontentloaded", timeout=8000)

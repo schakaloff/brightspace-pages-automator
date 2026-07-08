@@ -7,6 +7,7 @@ from playwright.async_api import async_playwright
 
 from config import USERDATA_DIR, SESSION_FILE
 from automator import _find_locator_any_frame
+from browser import _do_ms_sso_login
 
 KMC_URL = "https://kmc.cap2.ovp.kaltura.com/index.php/kmcng/content/entries/list"
 KMC_SESSION_FILE = str(USERDATA_DIR / "kmc_session.json")
@@ -622,6 +623,8 @@ class KalturaCategorizer:
         section_map: dict[str, str],
         bs_url: str,
         log_fn,
+        kmc_username: str = "",
+        kmc_password: str = "",
     ) -> None:
         """For each entry: get KMC embed code → create Brightspace page."""
         from content_checker import _extract_course_id
@@ -631,7 +634,9 @@ class KalturaCategorizer:
         base_url = "/".join(bs_url.split("/")[:3])
 
         async with async_playwright() as p:
-            kmc_context, kmc_browser, kmc_page = await self._get_kmc_context(p)
+            kmc_context, kmc_browser, kmc_page = await self._get_kmc_context(
+                p, kmc_username=kmc_username, kmc_password=kmc_password, log_fn=log_fn
+            )
             bs_browser = await p.chromium.launch(headless=False, slow_mo=80)
             try:
                 storage = SESSION_FILE if os.path.exists(SESSION_FILE) else None
@@ -683,13 +688,26 @@ class KalturaCategorizer:
                 await kmc_browser.close()
                 await bs_browser.close()
 
-    async def _get_kmc_context(self, playwright):
+    async def _get_kmc_context(
+        self,
+        playwright,
+        kmc_username: str = "",
+        kmc_password: str = "",
+        log_fn=None,
+    ):
         """Return a logged-in KMC browser context.
 
         Loads kmc_session.json if it exists and is still valid.
-        Otherwise opens a visible browser for manual SSO login, waits
-        for the KMC entries list page to load, then saves the session.
+        Otherwise opens a visible browser for SSO login. If kmc_username/
+        kmc_password are provided, auto-fills the Microsoft SSO form once it
+        appears (KMC uses the same SSO tenant as Moodle/Brightspace);
+        otherwise waits indefinitely for the user to log in manually.
         """
+        def log(msg, tag="dim"):
+            if log_fn:
+                log_fn(msg, tag)
+            print(f"[kmc login] {msg}", file=sys.stderr)
+
         browser = await playwright.chromium.launch(headless=False)
         try:
             storage = KMC_SESSION_FILE if os.path.exists(KMC_SESSION_FILE) else None
@@ -698,9 +716,26 @@ class KalturaCategorizer:
             # wait_until="networkidle" ensures redirects settle before we check URL
             await page.goto(KMC_URL, wait_until="networkidle", timeout=30000)
 
-            # If not on entries list (expired session / SSO redirect), wait indefinitely
             if "kmcng/content/entries/list" not in page.url:
-                await page.wait_for_url("**/kmcng/content/entries/list**", timeout=0)
+                if kmc_username and kmc_password:
+                    log("KMC session expired — attempting SSO auto-login…")
+                    _sso_attempted = False
+                    for i in range(60):
+                        await page.wait_for_timeout(3000)
+                        url = page.url
+                        if "microsoftonline.com" in url:
+                            if not _sso_attempted:
+                                _sso_attempted = True
+                                await _do_ms_sso_login(page, kmc_username, kmc_password)
+                            continue
+                        if "kmcng/content/entries/list" in url:
+                            break
+                    else:
+                        raise RuntimeError("KMC SSO login timed out after 3 minutes")
+                    log("Logged in to KMC.", "success")
+                else:
+                    log("No KMC credentials set in Settings — log in manually in the browser.", "warning")
+                    await page.wait_for_url("**/kmcng/content/entries/list**", timeout=0)
                 await page.wait_for_timeout(2000)
 
             await context.storage_state(path=KMC_SESSION_FILE)
