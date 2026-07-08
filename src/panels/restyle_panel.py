@@ -34,7 +34,7 @@ class RestylePanel(QWidget):
         layout.setSpacing(0)
 
         layout.addWidget(_section_header("Page Changer"))
-        sub = QLabel("Pick an OC brand colour theme, paste a Brightspace page or section URL, and let Gemini restyle it.")
+        sub = QLabel("Pick an OC brand colour theme, paste a Brightspace page or section URL, and let Claude restyle it.")
         sub.setProperty("role", "dim"); sub.setWordWrap(True)
         layout.addWidget(sub)
         layout.addSpacing(20)
@@ -121,7 +121,8 @@ class RestylePanel(QWidget):
                     url=url,
                     log=lambda msg, tag="info": q.put((msg, tag)),
                     on_complete=on_done,
-                    gemini_api_key=self._mw.gemini_api_key,
+                    claude_api_key=self._mw.claude_api_key,
+                    claude_model=self._mw.claude_model,
                     style_reference_html=style_reference_html,
                     theme_name=self._selected_theme[0],
                     on_pages_found=on_pages_found,

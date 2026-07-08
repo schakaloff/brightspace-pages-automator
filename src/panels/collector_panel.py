@@ -73,6 +73,14 @@ class CollectorPanel(QWidget):
         layout.addWidget(target_hint)
         layout.addSpacing(12)
 
+        layout.addWidget(_form_label("MOODLE COURSE URL  (optional — fixes weird file/link names)"))
+        layout.addSpacing(4)
+        self._moodle_entry = QLineEdit()
+        self._moodle_entry.setPlaceholderText("https://mymoodle.okanagan.bc.ca/course/view.php?id=…")
+        self._moodle_entry.setFixedHeight(40)
+        layout.addWidget(self._moodle_entry)
+        layout.addSpacing(12)
+
         par_row = QHBoxLayout()
         par_row.addWidget(_form_label("PARALLEL PAGES"))
         self._parallel_spin = QSpinBox()
@@ -118,6 +126,7 @@ class CollectorPanel(QWidget):
             return
         unit_url   = self._unit_entry.text().strip()
         target_url = self._target_entry.text().strip()
+        moodle_url = self._moodle_entry.text().strip()
         if not unit_url:
             self._log.append_log("Paste a Brightspace unit URL first.", "warning"); return
         if not target_url:
@@ -152,7 +161,8 @@ class CollectorPanel(QWidget):
                     target_url=target_url,
                     theme_name=theme_name,
                     theme_colors=theme_colors,
-                    gemini_api_key=self._mw.gemini_api_key,
+                    claude_api_key=self._mw.claude_api_key,
+                    claude_model=self._mw.claude_model,
                     style_reference_html=style_reference_html,
                     parallel_pages=parallel,
                     log=lambda msg, tag="info": q.put((msg, tag)),
@@ -161,6 +171,9 @@ class CollectorPanel(QWidget):
                     bs_password=self._mw.bs_password,
                     sso_email=self._mw.sso_email,
                     sso_password=self._mw.sso_password,
+                    moodle_url=moodle_url,
+                    moodle_username=self._mw.moodle_username,
+                    moodle_password=self._mw.moodle_password,
                 ))
             except Exception as e:
                 q.put((f"Error: {e}", "error"))

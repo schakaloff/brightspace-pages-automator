@@ -1,4 +1,5 @@
 import asyncio
+import re
 import tempfile
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -51,7 +52,8 @@ class UnitCollector:
         target_url: str,
         theme_name: str,
         theme_colors: dict,
-        gemini_api_key: str = "",
+        claude_api_key: str = "",
+        claude_model: str = "",
         style_reference_html: str = "",
         parallel_pages: int = 3,
         log: Optional[Callable] = None,
@@ -60,12 +62,16 @@ class UnitCollector:
         bs_password: str = "",
         sso_email: str = "",
         sso_password: str = "",
+        moodle_url: str = "",
+        moodle_username: str = "",
+        moodle_password: str = "",
     ):
         self.unit_url = unit_url
         self.target_url = target_url
         self.theme_name = theme_name
         self.theme_colors = theme_colors
-        self.gemini_api_key = gemini_api_key
+        self.claude_api_key = claude_api_key
+        self.claude_model = claude_model
         self.style_reference_html = style_reference_html
         self.parallel_pages = max(1, parallel_pages)
         self._log_fn = log
@@ -74,10 +80,44 @@ class UnitCollector:
         self.bs_password = bs_password
         self.sso_email = sso_email
         self.sso_password = sso_password
+        self.moodle_url = moodle_url.strip()
+        self.moodle_username = moodle_username
+        self.moodle_password = moodle_password
+        self._name_matcher = lambda label: None
         self._clipboard_lock = asyncio.Lock()
         self._link_lock = asyncio.Lock()
         self._dl_dir = Path(tempfile.gettempdir()) / "brightspace_collector"
         self._dl_dir.mkdir(exist_ok=True)
+
+    async def _build_name_matcher(self) -> None:
+        """Populate self._name_matcher from the Moodle course, if configured.
+        Non-fatal on any failure — falls back to a no-op matcher."""
+        if not self.moodle_url:
+            return
+        try:
+            import os
+            from moodle_matcher import (
+                ensure_moodle_session, scrape_moodle_names, build_name_matcher,
+                MOODLE_SESSION_FILE,
+            )
+            if not os.path.exists(MOODLE_SESSION_FILE):
+                await ensure_moodle_session(
+                    self.moodle_username, self.moodle_password, log_fn=self.log
+                )
+            names = await scrape_moodle_names(self.moodle_url, log_fn=self.log)
+            if not names:
+                self.log("⚠ No names scraped — Moodle session may be stale, logging in again…", "warning")
+                await ensure_moodle_session(
+                    self.moodle_username, self.moodle_password, log_fn=self.log
+                )
+                names = await scrape_moodle_names(self.moodle_url, log_fn=self.log)
+            if not names:
+                self.log("⚠ No Moodle names scraped — using Brightspace labels as-is", "warning")
+                return
+            self._name_matcher = build_name_matcher(names)
+            self.log(f"✓ Moodle name matcher ready ({len(names)} item(s))", "success")
+        except Exception as e:
+            self.log(f"⚠ Moodle matching unavailable: {e} — using Brightspace labels as-is", "warning")
 
     def log(self, msg: str, level: str = "info"):
         if self._log_fn:
@@ -763,6 +803,23 @@ class UnitCollector:
 
             # Step 5a: After clicking Upload in an error state, Brightspace may show
             # an intermediate screen with an "Insert" button before the overwrite dialog.
+            # That screen also carries the link-text field, and clicking Insert here can
+            # be the final submission (dialog closes with no overwrite conflict) — so the
+            # field must be filled before this click, not after it, or the corrected name
+            # never makes it in for files that don't hit an overwrite.
+            # D2L ignores synthetic input/change events on this field (Lit property
+            # observers only react to real DOM keyboard events), so it must be set via
+            # a real click + Playwright keyboard.type(), not JS value-setter + dispatchEvent
+            # — and the type must fully land (verified by reading the value back) before
+            # Insert is clicked, or a slow/laggy render can submit the old value.
+            _JS_FIND_ZK_VISIBLE = """() => {
+                const el = document.querySelector('input.rs_skip.d2l-edit-legacy[type="text"]');
+                return !!(el && el.offsetParent !== null);
+            }"""
+            _JS_READ_ZK = """() => {
+                const el = document.querySelector('input.rs_skip.d2l-edit-legacy[type="text"]');
+                return el ? el.value : null;
+            }"""
             _JS_CLICK_INSERT_ON_ERROR = """() => {
                 const footer = document.querySelector('.d2l-dialog-footer');
                 if (!footer) return false;
@@ -773,9 +830,31 @@ class UnitCollector:
                 }
                 return false;
             }"""
+            corrected = file_item.get("corrected_name")
+            display_name = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", corrected) if corrected else ""
+            clicked_insert_on_error = False
+            filled_before_error_click = False
             for _ in range(10):
                 await page.wait_for_timeout(500)
-                clicked_insert_on_error = False
+
+                if display_name and not filled_before_error_click:
+                    for frame in page.frames:
+                        if frame == page.main_frame:
+                            continue
+                        try:
+                            if await frame.evaluate(_JS_FIND_ZK_VISIBLE):
+                                loc = frame.locator('input.rs_skip.d2l-edit-legacy[type="text"]').first
+                                await loc.click()
+                                await loc.press("Control+A")
+                                await page.keyboard.type(display_name, delay=20)
+                                await page.wait_for_timeout(200)
+                                if await frame.evaluate(_JS_READ_ZK) == display_name:
+                                    filled_before_error_click = True
+                                    self.log(f"  ✓ Set link text: {display_name}", "dim")
+                                break
+                        except Exception:
+                            pass
+
                 for frame in page.frames:
                     if frame == page.main_frame:
                         continue
@@ -788,14 +867,18 @@ class UnitCollector:
                         pass
                 if clicked_insert_on_error:
                     await page.wait_for_timeout(1200)
-                    # Check if dialog already closed — if so, insertion is done
-                    try:
-                        if await page.locator('iframe[title="Insert Stuff"], iframe.d2l-dialog-frame').count() == 0:
-                            self.log(f"  ✓ Inserted (via error-Insert): {file_item['filename']}", "success")
-                            return True
-                    except Exception:
-                        pass
                     break
+
+            # If the error-Insert click above already closed the whole dialog, there
+            # was no overwrite conflict — link text (if any) was already filled before
+            # that click, so this is done.
+            if clicked_insert_on_error:
+                try:
+                    if await page.locator('iframe[title="Insert Stuff"], iframe.d2l-dialog-frame').count() == 0:
+                        self.log(f"  ✓ Inserted (via error-Insert): {file_item['filename']}", "success")
+                        return True
+                except Exception:
+                    pass
 
             # Step 5b: Handle overwrite dialog if the file already exists
             _JS_OVERWRITE = """() => {
@@ -831,6 +914,36 @@ class UnitCollector:
                 else:
                     continue
                 break
+
+            # Step 5c: Fill the link-text field with the corrected name, if it wasn't
+            # already filled in Step 5a (this field only renders on the overwrite path
+            # once 5a/5b have resolved). Same real-keystroke approach as 5a — synthetic
+            # events don't commit for this field.
+            if display_name and not filled_before_error_click:
+                filled = False
+                for _ in range(10):
+                    for frame in page.frames:
+                        if frame == page.main_frame:
+                            continue
+                        try:
+                            if await frame.evaluate(_JS_FIND_ZK_VISIBLE):
+                                loc = frame.locator('input.rs_skip.d2l-edit-legacy[type="text"]').first
+                                await loc.click()
+                                await loc.press("Control+A")
+                                await page.keyboard.type(display_name, delay=20)
+                                await page.wait_for_timeout(200)
+                                if await frame.evaluate(_JS_READ_ZK) == display_name:
+                                    filled = True
+                                break
+                        except Exception:
+                            pass
+                    if filled:
+                        break
+                    await page.wait_for_timeout(400)
+                if filled:
+                    self.log(f"  ✓ Set link text: {display_name}", "dim")
+                else:
+                    self.log(f"  ⚠ Link-text field not found — link text left as default", "dim")
 
             # Step 6: Wait for "Insert" button (appears after upload completes) and click it
             _JS_CLICK_INSERT = """() => {
@@ -972,8 +1085,10 @@ class UnitCollector:
                             if extracted:
                                 result["html"] = extracted
                             else:
+                                fd["corrected_name"] = self._name_matcher(label)
                                 result["file"] = fd
                         else:
+                            fd["corrected_name"] = self._name_matcher(label)
                             result["file"] = fd
                 finally:
                     try:
@@ -1001,13 +1116,13 @@ class UnitCollector:
             except Exception:
                 pass
 
-    async def _apply_gemini(self, context) -> bool:
-        if not self.gemini_api_key:
-            self.log("⚠ No Gemini API key — skipping styling step", "warning")
+    async def _apply_claude_style(self, context) -> bool:
+        if not self.claude_api_key:
+            self.log("⚠ No Claude API key — skipping styling step", "warning")
             return False
 
         self.log("─" * 52, "dim")
-        self.log("Applying Gemini styling to assembled page...", "info")
+        self.log("Applying Claude styling to assembled page...", "info")
 
         page = await context.new_page()
         try:
@@ -1023,18 +1138,19 @@ class UnitCollector:
                 self.log("✗ Could not extract assembled HTML", "error")
                 return False
 
-            from ai_styler import apply_style
+            from ai_styler import apply_style, DEFAULT_MODEL
             styled_html = await asyncio.to_thread(
                 apply_style,
                 source_html=source_html,
                 style_reference_html=self.style_reference_html,
                 theme_name=self.theme_name,
-                api_key=self.gemini_api_key,
+                api_key=self.claude_api_key,
+                model=self.claude_model or DEFAULT_MODEL,
                 log_callback=self.log,
             )
 
             if not styled_html:
-                self.log("✗ Gemini returned nothing", "error")
+                self.log("✗ Claude returned nothing", "error")
                 return False
 
             await self._paste_html(page, styled_html)
@@ -1076,6 +1192,8 @@ class UnitCollector:
                     await asyncio.sleep(0.5)
                 return
 
+            await self._build_name_matcher()
+
             # ── Phase 1: scrape all topics in parallel ────────────────────────
             self.log("─" * 52, "dim")
             self.log(
@@ -1104,8 +1222,10 @@ class UnitCollector:
                     sections.append(f"<h2>{safe}</h2>\n{result['html']}\n<hr/>\n")
                     html_count += 1
                 elif result["link_url"]:
+                    corrected = self._name_matcher(topic["label"])
+                    link_label = (corrected or topic["label"]).replace("<", "&lt;").replace(">", "&gt;")
                     sections.append(
-                        f'<p><strong>{safe}:</strong> '
+                        f'<p><strong>{link_label}:</strong> '
                         f'<a href="{result["link_url"]}">{result["link_url"]}</a></p>\n'
                     )
                     link_count += 1
@@ -1145,8 +1265,8 @@ class UnitCollector:
             self.log("─" * 52, "dim")
             self.log(f"✓ Text done: {html_count} pages, {link_count} links", "success")
 
-            if self.gemini_api_key:
-                await self._apply_gemini(context)
+            if self.claude_api_key:
+                await self._apply_claude_style(context)
 
             self.log("─" * 52, "dim")
             self.log("✓ Done! Close the browser when finished.", "success")
@@ -1172,7 +1292,8 @@ async def run(
     target_url: str,
     theme_name: str,
     theme_colors: dict,
-    gemini_api_key: str = "",
+    claude_api_key: str = "",
+    claude_model: str = "",
     style_reference_html: str = "",
     parallel_pages: int = 3,
     log: Callable = None,
@@ -1181,13 +1302,17 @@ async def run(
     bs_password: str = "",
     sso_email: str = "",
     sso_password: str = "",
+    moodle_url: str = "",
+    moodle_username: str = "",
+    moodle_password: str = "",
 ) -> None:
     await UnitCollector(
         unit_url=unit_url,
         target_url=target_url,
         theme_name=theme_name,
         theme_colors=theme_colors,
-        gemini_api_key=gemini_api_key,
+        claude_api_key=claude_api_key,
+        claude_model=claude_model,
         style_reference_html=style_reference_html,
         parallel_pages=parallel_pages,
         log=log,
@@ -1196,4 +1321,7 @@ async def run(
         bs_password=bs_password,
         sso_email=sso_email,
         sso_password=sso_password,
+        moodle_url=moodle_url,
+        moodle_username=moodle_username,
+        moodle_password=moodle_password,
     ).run()

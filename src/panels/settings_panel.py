@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit, QFrame, QScrollArea,
+    QPushButton, QLineEdit, QFrame, QScrollArea, QComboBox,
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 
@@ -16,6 +16,13 @@ class SettingsPanel(QWidget):
     """Scrollable settings panel with API key, downloads folder, and guide."""
 
     api_key_changed = Signal(str)
+    model_changed = Signal(str)
+
+    MODELS = [
+        ("claude-opus-4-5", "Opus 4.5 — highest quality, slower/pricier"),
+        ("claude-sonnet-5", "Sonnet 5 — best quality/cost balance (recommended)"),
+        ("claude-haiku-4-5", "Haiku 4.5 — cheapest/fastest"),
+    ]
 
     def __init__(self, main_window, parent=None):
         super().__init__(parent)
@@ -79,15 +86,15 @@ class SettingsPanel(QWidget):
         layout.addWidget(_divider())
         layout.addSpacing(20)
 
-        # ── Section 1: Gemini API Key ─────────────────────────────────────────
-        layout.addWidget(_form_label("GEMINI API KEY"))
+        # ── Section 1: Claude API Key ─────────────────────────────────────────
+        layout.addWidget(_form_label("CLAUDE API KEY"))
         layout.addSpacing(6)
 
         key_row = QHBoxLayout()
         key_row.setSpacing(8)
 
         self._key_field = QLineEdit()
-        self._key_field.setPlaceholderText("AIza…")
+        self._key_field.setPlaceholderText("sk-ant-…")
         self._key_field.setEchoMode(QLineEdit.EchoMode.Password)
         self._key_field.setFixedHeight(40)
         self._key_field.setToolTip(
@@ -116,6 +123,17 @@ class SettingsPanel(QWidget):
         hint.setWordWrap(True)
         layout.addSpacing(6)
         layout.addWidget(hint)
+        layout.addSpacing(16)
+
+        layout.addWidget(_form_label("MODEL"))
+        layout.addSpacing(6)
+
+        self._model_combo = QComboBox()
+        self._model_combo.setFixedHeight(40)
+        for model_id, label in self.MODELS:
+            self._model_combo.addItem(label, model_id)
+        self._model_combo.currentIndexChanged.connect(self._on_model_changed)
+        layout.addWidget(self._model_combo)
         layout.addSpacing(24)
         layout.addWidget(_divider())
         layout.addSpacing(20)
@@ -314,6 +332,15 @@ class SettingsPanel(QWidget):
         self._key_field.setText(key)
         self._key_field.blockSignals(False)
 
+    def set_model(self, model_id: str):
+        """Set the model dropdown without emitting model_changed."""
+        idx = self._model_combo.findData(model_id)
+        if idx < 0:
+            idx = 0
+        self._model_combo.blockSignals(True)
+        self._model_combo.setCurrentIndex(idx)
+        self._model_combo.blockSignals(False)
+
     @property
     def bs_username(self) -> str:
         return self._mw.load_config().get("bs_username", "")
@@ -352,7 +379,13 @@ class SettingsPanel(QWidget):
 
     def _save_api_key(self):
         if hasattr(self._mw, "save_config"):
-            self._mw.save_config({"gemini_api_key": self._key_field.text().strip()})
+            self._mw.save_config({"claude_api_key": self._key_field.text().strip()})
+
+    def _on_model_changed(self, index: int):
+        model_id = self._model_combo.itemData(index)
+        self.model_changed.emit(model_id)
+        if hasattr(self._mw, "save_config"):
+            self._mw.save_config({"claude_model": model_id})
 
     def _load_credentials(self):
         import keyring
