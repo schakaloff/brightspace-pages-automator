@@ -197,12 +197,6 @@ def _compare_items(moodle_items: list, bs_flat: list) -> list:
             results.append({**item, "status": "embedded"})
             continue
 
-        # Files extracted from Moodle folders → always missing (no file resources in Brightspace to match against)
-        if item["type"] == "FILE" and item.get("parent_topic"):
-            results.append({**item, "section": current_section,
-                             "status": "missing", "matched": None})
-            continue
-
         name_l = _norm(item["name"])
 
         if name_l in bs_all:
@@ -341,10 +335,12 @@ class ContentChecker:
         sso_password:         str               = "",
         moodle_username:      str               = "",
         moodle_password:      str               = "",
+        verbose:              bool              = False,
     ):
         self.bs_url                 = bs_url.strip()
         self.moodle_url             = moodle_url.strip()
-        self.log                    = log
+        self._verbose               = verbose
+        self.log                    = self._make_log_filter(log)
         self.on_complete            = on_complete
         self.moodle_ready_event     = moodle_ready_event
         self.on_moodle_waiting      = on_moodle_waiting
@@ -371,6 +367,14 @@ class ContentChecker:
             verify_topic_in_module=self._verify_topic_in_module,
             summary=self._summary,
         )
+
+    def _make_log_filter(self, log_fn: Callable) -> Callable:
+        """Wrap log function to filter out verbose messages."""
+        def filtered_log(msg: str, tag: str = "info"):
+            if not self._verbose and tag in ("dim", "info"):
+                return
+            log_fn(msg, tag)
+        return filtered_log
 
     async def _confirm(self, msg: str) -> bool:
         if not self.confirm_fn:
