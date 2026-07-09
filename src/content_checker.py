@@ -1253,13 +1253,14 @@ class ContentChecker:
         course_id: str, moodle_links: list
     ) -> None:
         """
-        For every Moodle URL found in Brightspace topic HTML:
-          1. Download the file from Moodle (fresh authenticated tab)
-          2. Upload it to the Brightspace course file store
-          3. Fetch each affected topic's HTML, replace old URL → new URL, PUT back
+        Moodle link re-hosting disabled — requires browser UI refactor (D2L API removed).
+        To re-enable: navigate to topic, open TinyMCE editor, replace URLs manually.
         """
+        self.log("", "dim")
+        self.log("🔗 Re-link step skipped (requires browser UI implementation)", "warning")
         if not moodle_links:
             return
+        self.log(f"  {len(moodle_links)} Moodle link(s) would need manual re-hosting in Brightspace", "dim")
 
         self.log("", "dim")
         self.log("─" * 52, "dim")
