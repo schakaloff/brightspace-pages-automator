@@ -340,6 +340,7 @@ class ContentChecker:
         self.bs_url                 = bs_url.strip()
         self.moodle_url             = moodle_url.strip()
         self._verbose               = verbose
+        self.stop_flag              = [False]
         self.log                    = self._make_log_filter(log)
         self.on_complete            = on_complete
         self.moodle_ready_event     = moodle_ready_event
@@ -2710,10 +2711,22 @@ class ContentChecker:
             elif not getattr(self, "do_pdf_upload", True):
                 self.log("⏭ PDF upload skipped (checkbox off)", "dim")
 
+            if self.stop_flag[0]:
+                self.log("⏸ Stopped by user — skipping remaining phases", "warning")
+                if self.on_complete:
+                    self.on_complete()
+                return
+
             if moodle_links and getattr(self, "do_relink", False):
                 t0 = time.time()
                 await self._relink_moodle_files(context, page, course_id, moodle_links)
                 self._summary["timings"]["Moodle link re-link"] = time.time() - t0
+
+            if self.stop_flag[0]:
+                self.log("⏸ Stopped by user — skipping remaining phases", "warning")
+                if self.on_complete:
+                    self.on_complete()
+                return
 
             if getattr(self, "do_h5p_embed", False) and moodle_items and bs_flat:
                 from urllib.parse import urlparse

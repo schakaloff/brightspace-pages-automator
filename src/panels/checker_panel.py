@@ -25,6 +25,8 @@ class CheckerPanel(QWidget):
         self._h5p_ready_event    = None
         self._file_checklist_event = None
         self._h5p_skip_flag      = [False]
+        self._stop_flag          = [False]
+        self._worker_thread      = None
         self._build()
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_log)
@@ -194,7 +196,13 @@ class CheckerPanel(QWidget):
         self._continue_btn.hide()
         self._dl_label.hide()
 
-        self._run_btn.setText("Running…"); self._run_btn.setEnabled(False)
+        self._stop_flag[0] = False
+        self._run_btn.setText("⏹ Stop"); self._run_btn.setEnabled(True)
+        try:
+            self._run_btn.clicked.disconnect()
+        except RuntimeError:
+            pass
+        self._run_btn.clicked.connect(self._stop_run)
         self._log.clear_log()
 
         q = self._log_queue
@@ -252,6 +260,7 @@ class CheckerPanel(QWidget):
                 checker.do_h5p_embed  = self._h5p_act.isChecked()
                 checker.file_checklist_result = file_result
                 checker.h5p_skip_flag = skip_flag
+                checker.stop_flag = self._stop_flag
                 if phase_b:
                     checker.do_relink = False
                     checker.do_h5p_embed = True
@@ -262,7 +271,8 @@ class CheckerPanel(QWidget):
             finally:
                 on_done()
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._worker_thread = threading.Thread(target=worker, daemon=True)
+        self._worker_thread.start()
 
     def _start_run(self):
         if not self._mw.chromium_ready:
@@ -276,12 +286,23 @@ class CheckerPanel(QWidget):
             return
         self._run_worker(phase_b=True)
 
+    def _stop_run(self):
+        """User clicked Stop — set flag to exit early."""
+        self._stop_flag[0] = True
+        self._log.append_log("Stopping… (finishing current task)", "warning")
+
     def _poll_log(self):
         try:
             while True:
                 msg, tag = self._log_queue.get_nowait()
                 if msg == "__DONE__":
+                    self._stop_flag[0] = False
                     self._run_btn.setText("Run Check"); self._run_btn.setEnabled(True)
+                    try:
+                        self._run_btn.clicked.disconnect()
+                    except RuntimeError:
+                        pass
+                    self._run_btn.clicked.connect(self._start_run)
                     self._moodle_hint.hide()
                     self._ready_btn.hide()
                     self._h5p_hint.hide()
