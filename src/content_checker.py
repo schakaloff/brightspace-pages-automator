@@ -2728,6 +2728,10 @@ class ContentChecker:
             # TODO: Fix async dialog handling — skipped for now
             # await self._prompt_clear_downloads(course_id)
 
+            self.log("", "dim")
+            self.log("✓ Check complete — browsers kept open for your comparison", "success")
+            self.log("  Close the browser windows when done.", "dim")
+
             if self.on_complete:
                 self.on_complete()
             while browser.is_connected():
@@ -2739,6 +2743,7 @@ class ContentChecker:
                 self.on_complete()
             raise
         finally:
-            if browser.is_connected():
-                await browser.close()
+            # Keep browsers open for user comparison — don't auto-close
+            # if browser.is_connected():
+            #     await browser.close()
             await p.stop()
