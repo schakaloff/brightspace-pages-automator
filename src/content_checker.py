@@ -2194,7 +2194,7 @@ class ContentChecker:
                     document.querySelectorAll('a[href*="pluginfile.php"]').forEach(a => {
                         const href = a.href || '';
                         const name = a.textContent.trim() || href.split('/').pop().split('?')[0];
-                        if (href && name) out.push({ type: 'FILE', name, href, embedded: true });
+                        if (href && name) out.push({ type: 'FILE', name, href });
                     });
                     return out;
                 }""")
