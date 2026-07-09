@@ -2720,7 +2720,12 @@ class ContentChecker:
                 parsed  = urlparse(self.bs_url)
                 bs_base = f"{parsed.scheme}://{parsed.netloc}"
                 t0 = time.time()
-                await self._h5p.embed_in_brightspace(context, page, moodle_items, bs_flat, bs_base, course_id)
+                try:
+                    await self._h5p.embed_in_brightspace(context, page, moodle_items, bs_flat, bs_base, course_id)
+                except Exception as e:
+                    self.log(f"✗ H5P embed error: {e}", "error")
+                    import traceback
+                    self.log(f"  Traceback: {traceback.format_exc()}", "dim")
                 self._summary["timings"]["H5P embed (Phase B)"] = time.time() - t0
 
             # ── Final summary + cleanup prompt ────────────────────────────────
