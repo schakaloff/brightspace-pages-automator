@@ -2710,7 +2710,8 @@ class ContentChecker:
 
             # ── Final summary + cleanup prompt ────────────────────────────────
             self._log_final_summary(results)
-            await self._prompt_clear_downloads(course_id)
+            # TODO: Fix async dialog handling — skipped for now
+            # await self._prompt_clear_downloads(course_id)
 
             if self.on_complete:
                 self.on_complete()
