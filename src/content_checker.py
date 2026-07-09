@@ -2688,6 +2688,11 @@ class ContentChecker:
             self._log_report(results)
             self._log_link_report(moodle_links)
 
+            # DEBUG: show file item counts
+            moodle_files = [r for r in results if r.get("type") == "FILE"]
+            missing_files = [r for r in results if r.get("status") == "missing" and r.get("type") == "FILE"]
+            self.log(f"DEBUG: {len(moodle_files)} FILE items in results, {len(missing_files)} marked missing", "dim")
+
             if self.on_file_checklist and getattr(self, "do_pdf_upload", True):
                 t0 = time.time()
                 await self._offer_missing_file_download(context, page, course_id, results, bs_flat)
