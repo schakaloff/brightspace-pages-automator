@@ -197,6 +197,12 @@ def _compare_items(moodle_items: list, bs_flat: list) -> list:
             results.append({**item, "status": "embedded"})
             continue
 
+        # Files extracted from Moodle folders → always missing (no file resources in Brightspace to match against)
+        if item["type"] == "FILE" and item.get("parent_topic"):
+            results.append({**item, "section": current_section,
+                             "status": "missing", "matched": None})
+            continue
+
         name_l = _norm(item["name"])
 
         if name_l in bs_all:
