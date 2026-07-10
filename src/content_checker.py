@@ -329,16 +329,20 @@ class ContentChecker:
         file_checklist_event: threading.Event    = None,
         on_file_checklist:    Callable           = None,
         confirm_fn:           Optional[Callable] = None,
+        notify_fn:            Optional[Callable] = None,
         bs_username:          str               = "",
         bs_password:          str               = "",
         sso_email:            str               = "",
         sso_password:         str               = "",
         moodle_username:      str               = "",
         moodle_password:      str               = "",
+        verbose:              bool              = False,
     ):
         self.bs_url                 = bs_url.strip()
         self.moodle_url             = moodle_url.strip()
-        self.log                    = log
+        self._verbose               = verbose
+        self.stop_flag              = [False]
+        self.log                    = self._make_log_filter(log)
         self.on_complete            = on_complete
         self.moodle_ready_event     = moodle_ready_event
         self.on_moodle_waiting      = on_moodle_waiting
@@ -348,6 +352,7 @@ class ContentChecker:
         self.on_file_checklist      = on_file_checklist
         self.file_checklist_result  = []
         self.confirm_fn             = confirm_fn
+        self.notify_fn              = notify_fn
         self.do_h5p_embed           = False
         self.bs_username            = bs_username
         self.bs_password            = bs_password
@@ -364,7 +369,23 @@ class ContentChecker:
             diagnose=self._diagnose,
             verify_topic_in_module=self._verify_topic_in_module,
             summary=self._summary,
+            notify=self._notify,
+            should_stop=lambda: self.stop_flag[0],
         )
+
+    def _make_log_filter(self, log_fn: Callable) -> Callable:
+        """Wrap log function to filter out verbose messages."""
+        def filtered_log(msg: str, tag: str = "info"):
+            if not self._verbose and tag in ("dim", "info"):
+                return
+            log_fn(msg, tag)
+        return filtered_log
+
+    def _notify(self, title: str, text: str) -> None:
+        """Fire-and-forget popup to the GUI (no answer expected). Thread-safe —
+        the panel's notify_fn just drops a message on the log queue."""
+        if self.notify_fn:
+            self.notify_fn(title, text)
 
     async def _confirm(self, msg: str) -> bool:
         if not self.confirm_fn:
@@ -764,54 +785,6 @@ class ContentChecker:
 
         return found_in_content, moodle_links
 
-    async def _upload_file_to_brightspace(
-        self, bs_page: "Page", course_id: str, local_path: "Path"
-    ) -> Optional[str]:
-        """
-        Upload a local file to the Brightspace course file store via the
-        manage-files API.  Returns the URL string to embed in HTML, or None on failure.
-        Files over 8 MB are skipped (base64 transport limit through CDP).
-        """
-        import base64, mimetypes
-
-        data = local_path.read_bytes()
-        if len(data) > 50 * 1024 * 1024:
-            self.log(f"    ⚠ Skipped (file too large: {len(data)//1024} KB)", "warning")
-            return None
-
-        b64      = base64.b64encode(data).decode()
-        mime     = mimetypes.guess_type(local_path.name)[0] or "application/octet-stream"
-        filename = local_path.name
-
-        result = await bs_page.evaluate("""async ([courseId, b64, filename, mimeType]) => {
-            try {
-                const binary = atob(b64);
-                const bytes  = new Uint8Array(binary.length);
-                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-                const blob = new Blob([bytes], { type: mimeType });
-
-                const form = new FormData();
-                form.append('file', blob, filename);
-
-                const resp = await fetch(
-                    `/d2l/api/le/1.0/${courseId}/managefiles/file/`,
-                    { method: 'POST', body: form, credentials: 'include' }
-                );
-
-                const bodyText = await resp.text().catch(() => '');
-                return { status: resp.status, ok: resp.ok, body: bodyText.slice(0, 500) };
-            } catch (e) {
-                return { status: 0, ok: false, body: String(e) };
-            }
-        }""", [course_id, b64, filename, mime])
-
-        if not result or not result.get("ok"):
-            status = result.get("status", "?") if result else "?"
-            body   = result.get("body", "")   if result else ""
-            self.log(f"    ✗ Upload failed ({status}): {body}", "error")
-            return None
-
-        return f"/content/enforced/{course_id}/{filename}"
 
     # ── Missing file download + upload ────────────────────────────────────────
 
@@ -927,6 +900,9 @@ class ContentChecker:
         # crashed/closed Moodle tab can never affect the BS upload later.
         downloaded: list = []   # list of (local_path, file_info_dict)
         for idx, f in enumerate(files, 1):
+            if self.stop_flag[0]:
+                self.log("⏸ Stopped by user — aborting file downloads", "warning")
+                return
             name  = f["name"]
             href  = f["href"]
             self.log(f"  [{idx}/{len(files)}] {name}", "info")
@@ -1034,6 +1010,9 @@ class ContentChecker:
         ok_count = fail_count = 0
 
         for mod_id, items in by_module.items():
+            if self.stop_flag[0]:
+                self.log("⏸ Stopped by user — aborting file uploads", "warning")
+                return
             mod_title = items[0][1].get("bs_module_title", "?")
             self.log(f"  📁 {mod_title} ({len(items)} file(s))", "info")
 
@@ -1073,10 +1052,130 @@ class ContentChecker:
     # ─────────────────────────────────────────────────────────────────────────
     _DEEP_FIND_JS = DEEP_FIND_JS
 
+    async def _create_missing_units(
+        self, context, bs_base: str, course_id: str, section_names: list
+    ) -> int:
+        """Create Brightspace units for Moodle sections that have no BS module.
+        Lessons page → 'New Unit' (#generate-unit-btn) → 'Create Unit' (#createUnit)
+        → same title+Save editor pattern as page creation. Returns created count."""
+        df = self._DEEP_FIND_JS
+        created = 0
+        for name in section_names:
+            if self.stop_flag[0]:
+                self.log("⏸ Stopped by user — aborting unit creation", "warning")
+                break
+            tab = await context.new_page()
+            try:
+                await tab.goto(
+                    f"{bs_base}/d2l/le/lessons/{course_id}",
+                    wait_until="domcontentloaded", timeout=20000,
+                )
+                await tab.wait_for_timeout(2000)
+
+                # 1) "New Unit" dropdown opener (shadow DOM, lazily rendered — poll)
+                opened = False
+                for _ in range(15):
+                    opened = await self._eval_in_any_frame(tab, f"""() => {{
+                        {df}
+                        var host = deepFind(document, function(e) {{
+                            return (e.id || '') === 'generate-unit-btn';
+                        }});
+                        if (!host) return false;
+                        var sub = host.shadowRoot ? host.shadowRoot.querySelector('d2l-button-subtle') : null;
+                        var target = sub || host;
+                        var inner = target.shadowRoot ? target.shadowRoot.querySelector('button') : null;
+                        (inner || target).click();
+                        return true;
+                    }}""")
+                    if opened:
+                        break
+                    await tab.wait_for_timeout(1000)
+                if not opened:
+                    self.log(f"  ✗ 'New Unit' button not found — cannot create {name!r}", "error")
+                    continue
+                await tab.wait_for_timeout(800)
+
+                # 2) "Create Unit" menu item in the dropdown
+                create_clicked = False
+                for _ in range(5):
+                    create_clicked = await self._eval_in_any_frame(tab, f"""() => {{
+                        {df}
+                        var item = deepFind(document, function(e) {{
+                            return (e.id || '') === 'createUnit';
+                        }});
+                        if (!item) return false;
+                        var inner = item.shadowRoot ? item.shadowRoot.querySelector('div.d2l-menu-item-text') : null;
+                        (inner || item).click();
+                        return true;
+                    }}""")
+                    if create_clicked:
+                        break
+                    await tab.wait_for_timeout(1000)
+                if not create_clicked:
+                    self.log(f"  ✗ 'Create Unit' menu item not found — cannot create {name!r}", "error")
+                    continue
+                try:
+                    await tab.wait_for_load_state("domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
+                await tab.wait_for_timeout(1500)
+
+                # 3) Unit editor — same title + Save pattern as page creation.
+                # Poll: the editor shows a d2l-skeletize skeleton first and the
+                # real input appears late on cold loads (first unit missed it).
+                title_filled = False
+                for _ in range(15):
+                    for sel in ['input.d2l-input[maxlength="150"]', 'input.d2l-input']:
+                        try:
+                            loc = tab.locator(sel).first
+                            if await loc.count() > 0:
+                                await loc.click(click_count=3)
+                                await loc.fill(name)
+                                title_filled = True
+                                break
+                        except Exception:
+                            pass
+                    if title_filled:
+                        break
+                    await tab.wait_for_timeout(1000)
+                if not title_filled:
+                    self.log(f"  ✗ Unit title input not found for {name!r}", "error")
+                    continue
+                await tab.wait_for_timeout(500)
+
+                saved = await tab.evaluate(f"""async () => {{
+                    {df}
+                    var btn = deepFind(document, function(e) {{
+                        return (e.tagName || '').toUpperCase() === 'D2L-BUTTON'
+                            && e.classList && e.classList.contains('d2l-desktop');
+                    }});
+                    if (!btn) return false;
+                    var inner = btn.shadowRoot && btn.shadowRoot.querySelector('button');
+                    (inner || btn).click();
+                    return true;
+                }}""")
+                if not saved:
+                    self.log(f"  ⚠ Save button not found for {name!r}", "warning")
+                    continue
+                await tab.wait_for_timeout(2000)
+                self.log(f"  ✓ Created unit: {name}", "success")
+                created += 1
+            except Exception as e:
+                self.log(f"  ✗ Unit creation failed for {name!r}: {str(e).splitlines()[0]}", "error")
+            finally:
+                try:
+                    await tab.close()
+                except Exception:
+                    pass
+        return created
+
     async def _verify_topic_in_module(
         self, bs_page, course_id: str, module_id, expected_name: str
     ) -> bool:
-        """Return True if a topic matching expected_name exists in the module via D2L API."""
+        """Check via the in-browser D2L API whether a topic with this exact
+        (normalized) title exists in the module. Substring matching is not used —
+        it false-positives on short unrelated titles, which made H5P Phase B
+        skip every insert as "already in Brightspace"."""
         try:
             topics = await bs_page.evaluate(
                 """async ([courseId, moduleId]) => {
@@ -1094,7 +1193,7 @@ class ContentChecker:
             name_norm = re.sub(r'[^\w]', '', expected_name).lower()
             for topic in topics:
                 title_norm = re.sub(r'[^\w]', '', topic.get('Title', '')).lower()
-                if name_norm in title_norm or title_norm in name_norm:
+                if title_norm == name_norm:
                     return True
             return False
         except Exception:
@@ -1322,13 +1421,14 @@ class ContentChecker:
         course_id: str, moodle_links: list
     ) -> None:
         """
-        For every Moodle URL found in Brightspace topic HTML:
-          1. Download the file from Moodle (fresh authenticated tab)
-          2. Upload it to the Brightspace course file store
-          3. Fetch each affected topic's HTML, replace old URL → new URL, PUT back
+        Moodle link re-hosting disabled — requires browser UI refactor (D2L API removed).
+        To re-enable: navigate to topic, open TinyMCE editor, replace URLs manually.
         """
+        self.log("", "dim")
+        self.log("🔗 Re-link step skipped (requires browser UI implementation)", "warning")
         if not moodle_links:
             return
+        self.log(f"  {len(moodle_links)} Moodle link(s) would need manual re-hosting in Brightspace", "dim")
 
         self.log("", "dim")
         self.log("─" * 52, "dim")
@@ -1740,7 +1840,26 @@ class ContentChecker:
                 if _key and _key not in _seen_emb:
                     _seen_emb.add(_key)
                     _deduped_emb.append(_e)
-            items = ordered + _deduped_emb
+
+            # Insert embedded/folder files right after their parent item so they
+            # inherit the parent's section. Appending them at the end misattributes
+            # them all to the last section (the empty "Topic 14" ghost).
+            _by_parent: dict = {}
+            _orphan_emb: list = []
+            for _e in _deduped_emb:
+                _parent = _e.get("parent_topic", "")
+                if _parent:
+                    _by_parent.setdefault(_parent, []).append(_e)
+                else:
+                    _orphan_emb.append(_e)
+            _placed: list = []
+            for _it in ordered:
+                _placed.append(_it)
+                if _it.get("name") in _by_parent:
+                    _placed.extend(_by_parent.pop(_it["name"]))
+            for _leftover in _by_parent.values():
+                _orphan_emb.extend(_leftover)
+            items = _placed + _orphan_emb
             await self._enrich_kaltura_titles(tab.context, _deduped_emb)
 
             # If there are H5P items, pause so the user can check the browser
@@ -2262,7 +2381,7 @@ class ContentChecker:
                     document.querySelectorAll('a[href*="pluginfile.php"]').forEach(a => {
                         const href = a.href || '';
                         const name = a.textContent.trim() || href.split('/').pop().split('?')[0];
-                        if (href && name) out.push({ type: 'FILE', name, href, embedded: true });
+                        if (href && name) out.push({ type: 'FILE', name, href });
                     });
                     return out;
                 }""")
@@ -2729,6 +2848,31 @@ class ContentChecker:
             t0 = time.time()
             results = _compare_items(moodle_items, bs_flat)
 
+            # ── Create missing units ──────────────────────────────────────────
+            missing_secs = [
+                r["name"] for r in results
+                if r.get("type") == "SECTION" and r["status"] == "missing"
+            ]
+            if missing_secs:
+                self.log("─" * 52, "dim")
+                self.log(f"📦 {len(missing_secs)} Moodle section(s) have no Brightspace unit", "step")
+                for n in missing_secs:
+                    self.log(f"   • {n}", "info")
+                if await self._confirm(
+                    f"{len(missing_secs)} Moodle section(s) are missing in Brightspace:\n\n"
+                    + "\n".join(f"• {n}" for n in missing_secs)
+                    + "\n\nCreate them as units?"
+                ):
+                    from urllib.parse import urlparse as _up
+                    _p = _up(self.bs_url)
+                    n_created = await self._create_missing_units(
+                        context, f"{_p.scheme}://{_p.netloc}", course_id, missing_secs
+                    )
+                    self.log(f"📦 Units created: {n_created}/{len(missing_secs)}", "step")
+                    if n_created:
+                        bs_flat = await self._fetch_bs_toc(page, course_id)
+                        results = _compare_items(moodle_items, bs_flat)
+
             missing = [r for r in results if r["status"] == "missing"]
             if missing:
                 self.log("─" * 52, "dim")
@@ -2756,6 +2900,11 @@ class ContentChecker:
             self._log_report(results)
             self._log_link_report(moodle_links)
 
+            # DEBUG: show file item counts
+            moodle_files = [r for r in results if r.get("type") == "FILE"]
+            missing_files = [r for r in results if r.get("status") == "missing" and r.get("type") == "FILE"]
+            self.log(f"DEBUG: {len(moodle_files)} FILE items in results, {len(missing_files)} marked missing", "dim")
+
             if self.on_file_checklist and getattr(self, "do_pdf_upload", True):
                 t0 = time.time()
                 await self._offer_missing_file_download(context, page, course_id, results, bs_flat)
@@ -2763,22 +2912,44 @@ class ContentChecker:
             elif not getattr(self, "do_pdf_upload", True):
                 self.log("⏭ PDF upload skipped (checkbox off)", "dim")
 
+            if self.stop_flag[0]:
+                self.log("⏸ Stopped by user — skipping remaining phases", "warning")
+                if self.on_complete:
+                    self.on_complete()
+                return
+
             if moodle_links and getattr(self, "do_relink", False):
                 t0 = time.time()
                 await self._relink_moodle_files(context, page, course_id, moodle_links)
                 self._summary["timings"]["Moodle link re-link"] = time.time() - t0
+
+            if self.stop_flag[0]:
+                self.log("⏸ Stopped by user — skipping remaining phases", "warning")
+                if self.on_complete:
+                    self.on_complete()
+                return
 
             if getattr(self, "do_h5p_embed", False) and moodle_items and bs_flat:
                 from urllib.parse import urlparse
                 parsed  = urlparse(self.bs_url)
                 bs_base = f"{parsed.scheme}://{parsed.netloc}"
                 t0 = time.time()
-                await self._h5p.embed_in_brightspace(context, page, moodle_items, bs_flat, bs_base, course_id)
+                try:
+                    await self._h5p.embed_in_brightspace(context, page, moodle_items, bs_flat, bs_base, course_id)
+                except Exception as e:
+                    self.log(f"✗ H5P embed error: {e}", "error")
+                    import traceback
+                    self.log(f"  Traceback: {traceback.format_exc()}", "dim")
                 self._summary["timings"]["H5P embed (Phase B)"] = time.time() - t0
 
             # ── Final summary + cleanup prompt ────────────────────────────────
             self._log_final_summary(results)
-            await self._prompt_clear_downloads(course_id)
+            # TODO: Fix async dialog handling — skipped for now
+            # await self._prompt_clear_downloads(course_id)
+
+            self.log("", "dim")
+            self.log("✓ Check complete — browsers kept open for your comparison", "success")
+            self.log("  Close the browser windows when done.", "dim")
 
             if self.on_complete:
                 self.on_complete()
@@ -2791,6 +2962,7 @@ class ContentChecker:
                 self.on_complete()
             raise
         finally:
-            if browser.is_connected():
-                await browser.close()
+            # Keep browsers open for user comparison — don't auto-close
+            # if browser.is_connected():
+            #     await browser.close()
             await p.stop()

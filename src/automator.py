@@ -47,6 +47,7 @@ class PageAutomator:
         self.sso_email = sso_email
         self.sso_password = sso_password
         self._clipboard_lock = asyncio.Lock()  # one tab touches clipboard at a time
+        self._token_usage = {"input_tokens": 0, "output_tokens": 0, "cost_cad": 0.0}
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -365,7 +366,7 @@ class PageAutomator:
             return False
 
         from ai_styler import apply_style, DEFAULT_MODEL
-        styled_html = await asyncio.to_thread(
+        styled_html, usage = await asyncio.to_thread(
             apply_style,
             source_html=source_html,
             style_reference_html=self.style_reference_html,
@@ -378,6 +379,11 @@ class PageAutomator:
         if not styled_html:
             self.log("✗ AI returned nothing — skipping", "error")
             return False
+
+        if usage:
+            self._token_usage["input_tokens"] += usage["input_tokens"]
+            self._token_usage["output_tokens"] += usage["output_tokens"]
+            self._token_usage["cost_cad"] += usage["cost_cad"]
 
         await self.replace_html_in_editor(page, styled_html)
         await page.wait_for_timeout(1500)
@@ -432,6 +438,13 @@ class PageAutomator:
                 await self._process_topic(page, self.url)
 
             self.log("─" * 52, "dim")
+            if self._token_usage["input_tokens"] or self._token_usage["output_tokens"]:
+                u = self._token_usage
+                self.log(
+                    f"🔢 Total tokens: {u['input_tokens']:,} in / {u['output_tokens']:,} out"
+                    f"  —  ${u['cost_cad']:.4f} CAD",
+                    "info",
+                )
             self.log("✓  All done! Close the browser when finished.", "success")
             if self.on_complete:
                 self.on_complete()

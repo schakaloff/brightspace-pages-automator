@@ -10,7 +10,7 @@ POLL_INTERVAL = 1  # seconds
 
 
 def get_mtimes():
-    files = list(WATCH_DIR.glob("*.py")) + list((WATCH_DIR / "src").glob("*.py"))
+    files = list(WATCH_DIR.glob("*.py")) + list((WATCH_DIR / "src").rglob("*.py"))
     return {f: f.stat().st_mtime for f in files}
 
 
