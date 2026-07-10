@@ -2415,6 +2415,28 @@ class ContentChecker:
             }
             return labels.get(status, status.upper())
 
+        def _fuzzy_band(r: dict):
+            """Display-only: split a fuzzy result into a band + (matched_title, score).
+            Handles both score shapes:
+              section fuzzy → matched = (title, score)
+              item fuzzy    → matched = title, score in r["score"]
+            Does NOT change status, counts, or matching.
+            """
+            matched_val = r.get("matched")
+            if isinstance(matched_val, (tuple, list)):
+                title = matched_val[0] if matched_val else ""
+                score = matched_val[1] if len(matched_val) >= 2 else r.get("score")
+            else:
+                title = matched_val
+                score = r.get("score")
+            if isinstance(score, int) and score >= 90:
+                band = "LIKELY"
+            elif isinstance(score, int) and score >= 75:
+                band = "REVIEW"
+            else:
+                band = "FUZZY"   # score missing/unknown — unchanged fallback
+            return band, title, score
+
         def _fmt_folder_child(child: dict, indent: str, is_last: bool = True) -> None:
             """Format a FILE extracted from a folder, showing its match status."""
             status = child.get("status", "missing")
@@ -2423,10 +2445,20 @@ class ContentChecker:
                 "exact": "✅", "fuzzy": "⚠️ ", "missing": "❌",
                 "found_in_search": "🔍", "found_in_content": "📑",
             }
-            s_icon = icons.get(status, "  ")
-            label = _fmt_status_label(status)
             connector = "└─ " if is_last else "├─ "
             tag = "success" if status == "exact" else ("error" if status == "missing" else "warning")
+            if status == "fuzzy":
+                band, matched, score = _fuzzy_band(child)
+                s_icon = "⚠️ " if band == "LIKELY" else "❓"
+                self.log(f"{indent}{connector}{s_icon} {band:<10} {child['name']}", tag)
+                if matched and score is not None:
+                    self.log(f"{indent}    │   matched to: \"{matched}\"", "warning")
+                    self.log(f"{indent}    │   score: {score}%", "warning")
+                elif matched:
+                    self.log(f"{indent}    │   matched to: \"{matched}\"", "warning")
+                return
+            s_icon = icons.get(status, "  ")
+            label = _fmt_status_label(status)
             self.log(f"{indent}{connector}{s_icon} {label:<10} {child['name']}", tag)
 
         def _fmt_embedded(emb: dict, indent: str, is_last: bool = True) -> None:
@@ -2546,20 +2578,14 @@ class ContentChecker:
 
             # Format main item with status label
             if status == "fuzzy":
-                matched_val = r.get("matched")
-                if isinstance(matched_val, (tuple, list)) and len(matched_val) >= 2:
-                    matched, score = matched_val[0], matched_val[1]
-                    self.log(f"   ├─ {status_icon} {status_label:<10} {r['name']}", "warning")
-                    self.log(f"      │   → \"{matched}\" ({score}%)", "dim")
-                elif isinstance(matched_val, (tuple, list)) and len(matched_val) == 1:
-                    matched = matched_val[0]
-                    self.log(f"   ├─ {status_icon} {status_label:<10} {r['name']}", "warning")
-                    self.log(f"      │   → \"{matched}\"", "dim")
-                elif matched_val:
-                    self.log(f"   ├─ {status_icon} {status_label:<10} {r['name']}", "warning")
-                    self.log(f"      │   → {matched_val}", "dim")
-                else:
-                    self.log(f"   ├─ {status_icon} {status_label:<10} {r['name']}", "warning")
+                band, matched, score = _fuzzy_band(r)
+                band_icon = "⚠️ " if band == "LIKELY" else "❓"
+                self.log(f"   ├─ {band_icon} {band:<10} {r['name']}", "warning")
+                if matched and score is not None:
+                    self.log(f"      │   matched to: \"{matched}\"", "warning")
+                    self.log(f"      │   score: {score}%", "warning")
+                elif matched:
+                    self.log(f"      │   matched to: \"{matched}\"", "warning")
             elif status in ("found_in_search", "found_in_content"):
                 desc = "found via search" if status == "found_in_search" else "found inside page"
                 matched_val = r.get("matched", "")
