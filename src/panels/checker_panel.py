@@ -208,25 +208,17 @@ class CheckerPanel(QWidget):
         q = self._log_queue
 
         def confirm(msg: str) -> bool:
-            from PySide6.QtWidgets import QMessageBox
-            from PySide6.QtCore import Qt
+            # Called from a worker thread — QTimer.singleShot never fires there
+            # (no Qt event loop), so route through the log queue like the
+            # file-checklist dialog and let _poll_log show it on the GUI thread.
             result = [False]; ev = _t.Event()
-            def ask():
-                dlg = QMessageBox(self)
-                dlg.setWindowTitle("Continue?")
-                dlg.setText(msg)
-                dlg.setStandardButtons(
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                )
-                dlg.setDefaultButton(QMessageBox.StandardButton.No)
-                dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-                dlg.raise_()
-                dlg.activateWindow()
-                result[0] = dlg.exec() == QMessageBox.StandardButton.Yes
-                ev.set()
-            QTimer.singleShot(0, ask)
+            q.put(("__CHK_CONFIRM__", (msg, result, ev)))
             ev.wait()
             return result[0]
+
+        def notify(title: str, text: str) -> None:
+            # Fire-and-forget popup; worker does not wait for an answer.
+            q.put(("__CHK_NOTIFY__", (title, text)))
 
         def worker():
             done_sent = [False]
@@ -248,6 +240,7 @@ class CheckerPanel(QWidget):
                     file_checklist_event=file_ev,
                     on_file_checklist=lambda d: q.put(("__CHK_FILE_CHECKLIST__", (d, file_result, file_ev))),
                     confirm_fn=confirm,
+                    notify_fn=notify,
                     bs_username=self._mw.bs_username,
                     bs_password=self._mw.bs_password,
                     sso_email=self._mw.sso_email,
@@ -322,6 +315,22 @@ class CheckerPanel(QWidget):
                     self._ready_btn.clicked.connect(self._moodle_ready)
                     self._moodle_hint.show()
                     self._ready_btn.show()
+                    # Front-most popup too — in-app buttons are easy to miss
+                    from PySide6.QtWidgets import QMessageBox
+                    dlg = QMessageBox(self)
+                    dlg.setWindowTitle("Action needed — Moodle")
+                    dlg.setText(
+                        "A browser window has opened your Moodle course.\n\n"
+                        "Verify you are logged in and the correct course is "
+                        "shown, then click Ready."
+                    )
+                    ready = dlg.addButton("Ready — Scrape Now", QMessageBox.ButtonRole.AcceptRole)
+                    dlg.addButton("I'll use the app buttons", QMessageBox.ButtonRole.RejectRole)
+                    dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+                    dlg.raise_(); dlg.activateWindow()
+                    dlg.exec()
+                    if dlg.clickedButton() is ready:
+                        self._moodle_ready()
                 elif msg == "__CHK_H5P_WAITING__":
                     self._h5p_hint.show()
                     self._h5p_ready_btn.show(); self._h5p_skip_btn.show()
@@ -335,6 +344,49 @@ class CheckerPanel(QWidget):
                         pass
                     self._h5p_ready_btn.clicked.connect(self._h5p_ready)
                     self._h5p_skip_btn.clicked.connect(self._h5p_skip)
+                    from PySide6.QtWidgets import QMessageBox
+                    dlg = QMessageBox(self)
+                    dlg.setWindowTitle("Action needed — H5P download")
+                    dlg.setText(
+                        "The tool needs Teacher-level access to download H5P "
+                        "files.\n\nSwitch your Moodle role to Teacher in the "
+                        "browser, then click Ready — or Skip if H5P is not needed."
+                    )
+                    ready = dlg.addButton("Ready — Download H5P", QMessageBox.ButtonRole.AcceptRole)
+                    skip  = dlg.addButton("Skip H5P", QMessageBox.ButtonRole.DestructiveRole)
+                    dlg.addButton("I'll use the app buttons", QMessageBox.ButtonRole.RejectRole)
+                    dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+                    dlg.raise_(); dlg.activateWindow()
+                    dlg.exec()
+                    if dlg.clickedButton() is ready:
+                        self._h5p_ready()
+                    elif dlg.clickedButton() is skip:
+                        self._h5p_skip()
+                elif msg == "__CHK_NOTIFY__":
+                    title, text = tag
+                    from PySide6.QtWidgets import QMessageBox
+                    dlg = QMessageBox(self)
+                    dlg.setWindowTitle(title)
+                    dlg.setText(text)
+                    dlg.setStandardButtons(QMessageBox.StandardButton.Ok)
+                    dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+                    dlg.raise_(); dlg.activateWindow()
+                    dlg.exec()
+                elif msg == "__CHK_CONFIRM__":
+                    conf_msg, result_ref, event = tag
+                    from PySide6.QtWidgets import QMessageBox
+                    dlg = QMessageBox(self)
+                    dlg.setWindowTitle("Continue?")
+                    dlg.setText(conf_msg)
+                    dlg.setStandardButtons(
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    )
+                    dlg.setDefaultButton(QMessageBox.StandardButton.No)
+                    dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+                    dlg.raise_()
+                    dlg.activateWindow()
+                    result_ref[0] = dlg.exec() == QMessageBox.StandardButton.Yes
+                    event.set()
                 elif msg == "__CHK_FILE_CHECKLIST__":
                     data_json, result_list, event = tag
                     from gui_dialogs import FileChecklistDialog

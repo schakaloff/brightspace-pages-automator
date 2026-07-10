@@ -21,6 +21,8 @@ class H5PHandler:
         diagnose: Callable,
         verify_topic_in_module: Callable,
         summary: dict,
+        notify: Optional[Callable] = None,
+        should_stop: Optional[Callable] = None,
     ) -> None:
         self.log = log
         self._eval_in_any_frame = eval_in_any_frame
@@ -29,6 +31,8 @@ class H5PHandler:
         self._diagnose = diagnose
         self._verify_topic_in_module = verify_topic_in_module
         self._summary = summary
+        self._notify = notify
+        self._should_stop = should_stop or (lambda: False)
         self._DEEP_FIND_JS = DEEP_FIND_JS
 
     async def enable_downloads(self, context, items: list) -> None:
@@ -373,8 +377,18 @@ class H5PHandler:
             await tab.wait_for_timeout(1000)
         return None
 
+    async def _recover_list(self, tab, h5p_frame, list_url: str) -> None:
+        """After a failed upload, send the LTI iframe back to the content list
+        so the next item doesn't try to click inside a dead editor page."""
+        try:
+            await h5p_frame.goto(list_url, timeout=15000)
+            await h5p_frame.locator('tr.content-item').first.wait_for(timeout=8000)
+        except Exception:
+            await tab.wait_for_timeout(1000)
+
     async def upload_one(self, tab, h5p_frame, h5p_file, item_name) -> bool:
         """Upload one .h5p to H5P cloud via an already-open content list frame. Returns to list after."""
+        list_url = h5p_frame.url
         try:
             # Check if already exists in cloud content list — skip if found.
             # Re-find the live frame if the stored reference has a stale context.
@@ -396,6 +410,7 @@ class H5PHandler:
                     if not h5p_frame:
                         self.log(f"  ✗ H5P content list frame lost — cannot upload {item_name}", "error")
                         return False
+                    list_url = h5p_frame.url
                     already_exists = await h5p_frame.evaluate(f"""() => {{
                         var key = {name_key!r};
                         var rows = document.querySelectorAll('tr.content-item');
@@ -476,13 +491,8 @@ class H5PHandler:
                         lib_match = re.search(r'missing main library\s+([\w\.\s]+\d+\.\d+)', err, re.IGNORECASE)
                         missing_lib = lib_match.group(1).strip() if lib_match else "unknown library"
                         self.log(f"  ✗ H5P upload failed — missing content type: {missing_lib}", "error")
-                        self.log(f"    Fix: Brightspace Admin → H5P → Content Type Hub → install '{missing_lib}' → re-run Phase A", "dim")
-                        # Try to navigate back to content list
-                        try:
-                            await frame.go_back(timeout=5000)
-                        except Exception:
-                            pass
-                        await tab.wait_for_timeout(2000)
+                        self.log(f"    Fix: Brightspace Admin → H5P → Content Type Hub → install '{missing_lib}' → re-run Phase A", "warning")
+                        await self._recover_list(tab, h5p_frame, list_url)
                         return False
                 except Exception:
                     pass
@@ -531,7 +541,9 @@ class H5PHandler:
             self.log(f"  ✓ Uploaded: {item_name}", "success")
             return True
         except Exception as e:
-            self.log(f"  ✗ Upload failed for {item_name}: {e}", "error")
+            # First line only — full Playwright call logs drown the GUI log
+            self.log(f"  ✗ Upload failed for {item_name}: {str(e).splitlines()[0]}", "error")
+            await self._recover_list(tab, h5p_frame, list_url)
             return False
 
     async def insert_from_list(self, tab, h5p_frame, item_name) -> bool:
@@ -900,33 +912,45 @@ class H5PHandler:
         )
         await tab.wait_for_timeout(2000)
 
-        create_ok = await self._eval_in_any_frame(tab, f"""() => {{
-            {df}
-            var btn = deepFind(document, function(e) {{
-                var tag = (e.tagName || '').toUpperCase();
-                if (tag !== 'D2L-BUTTON') return false;
-                return (e.classList && e.classList.contains('create-new-btn'))
-                    || ((e.getAttribute && e.getAttribute('aria-label') || '').includes('Create New'));
-            }});
-            if (!btn) return false;
-            var inner = btn.shadowRoot ? btn.shadowRoot.querySelector('button') : null;
-            (inner || btn).click(); return true;
-        }}""")
+        # Poll instead of single-shot: D2L renders these lazily and a fixed
+        # 2s sleep intermittently misses them ("Page tile not found").
+        create_ok = False
+        for _ in range(15):
+            create_ok = await self._eval_in_any_frame(tab, f"""() => {{
+                {df}
+                var btn = deepFind(document, function(e) {{
+                    var tag = (e.tagName || '').toUpperCase();
+                    if (tag !== 'D2L-BUTTON') return false;
+                    return (e.classList && e.classList.contains('create-new-btn'))
+                        || ((e.getAttribute && e.getAttribute('aria-label') || '').includes('Create New'));
+                }});
+                if (!btn) return false;
+                var inner = btn.shadowRoot ? btn.shadowRoot.querySelector('button') : null;
+                (inner || btn).click(); return true;
+            }}""")
+            if create_ok:
+                break
+            await tab.wait_for_timeout(1000)
         if not create_ok:
             self.log("  ✗ Create New button not found", "error")
             return None
         await tab.wait_for_timeout(2000)
 
-        tile_ok = await self._eval_in_any_frame(tab, f"""() => {{
-            {df}
-            var el = deepFind(document, function(e) {{
-                return (e.tagName || '').toUpperCase() === 'A'
-                    && e.classList && e.classList.contains('add-material-tile')
-                    && (e.getAttribute('href') || '').includes('loadActivity/file/');
-            }});
-            if (!el) return false;
-            el.click(); return true;
-        }}""")
+        tile_ok = False
+        for _ in range(15):
+            tile_ok = await self._eval_in_any_frame(tab, f"""() => {{
+                {df}
+                var el = deepFind(document, function(e) {{
+                    return (e.tagName || '').toUpperCase() === 'A'
+                        && e.classList && e.classList.contains('add-material-tile')
+                        && (e.getAttribute('href') || '').includes('loadActivity/file/');
+                }});
+                if (!el) return false;
+                el.click(); return true;
+            }}""")
+            if tile_ok:
+                break
+            await tab.wait_for_timeout(1000)
         if not tile_ok:
             self.log("  ✗ Page tile not found", "error")
             return None
@@ -1080,6 +1104,9 @@ class H5PHandler:
                 else:
                     self.log(f"  → {len(to_upload)} file(s) need uploading", "info")
                     for idx, item in enumerate(to_upload, 1):
+                        if self._should_stop():
+                            self.log("⏸ Stopped by user — aborting H5P upload phase", "warning")
+                            return
                         self.log(f"  [{idx}/{len(to_upload)}] Uploading: {item['name']}…", "info")
                         ok = await self.upload_one(upload_tab, h5p_frame, item["file"], item["name"])
                         if not ok:
@@ -1091,7 +1118,12 @@ class H5PHandler:
                 except Exception:
                     pass
 
-            self.log("✓ Phase A complete — all files uploaded to H5P cloud", "success")
+            a_fail = [i for i in this_course if i.get("upload_failed")]
+            a_ok_n = len(this_course) - len(a_fail)
+            if a_fail:
+                self.log(f"Phase A done: {a_ok_n} in cloud, {len(a_fail)} failed", "warning")
+            else:
+                self.log(f"✓ Phase A complete — {a_ok_n} file(s) in H5P cloud", "success")
 
         if not phase_b_only:
             if not await self._confirm("Phase A done. Start Phase B (insert each into BS pages)?"):
@@ -1104,8 +1136,12 @@ class H5PHandler:
         embedded_count = 0
 
         for idx, item in enumerate(matched, 1):
+            if self._should_stop():
+                self.log("⏸ Stopped by user — aborting H5P insert phase", "warning")
+                break
             if item.get("upload_failed"):
                 self.log(f"  [{idx}/{N}] Skipping {item['name']} (upload failed)", "warning")
+                self._summary["h5p_failed"].append((item["name"], item.get("bs_module_title") or "?"))
                 continue
 
             name = item["name"]
@@ -1166,3 +1202,15 @@ class H5PHandler:
 
         self.log("", "dim")
         self.log(f"✅ H5P embed complete: {embedded_count}/{N} inserted", "success")
+
+        if self._notify:
+            inserted = self._summary.get("h5p_inserted", [])
+            failed   = self._summary.get("h5p_failed", [])
+            lines = [f"Inserted into Brightspace: {len(inserted)}"]
+            lines += [f"  ✓ {n}" for n, _ in inserted]
+            if failed:
+                lines.append(f"\nNot inserted: {len(failed)}")
+                lines += [f"  ✗ {n}" for n, _ in failed]
+                lines.append("\nFailed items usually mean a missing content type "
+                             "on H5P.com — see the log for the exact library name.")
+            self._notify("H5P results", "\n".join(lines))
