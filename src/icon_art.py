@@ -3,7 +3,6 @@ Shared icon artwork — a "BP" monogram (Brightspace Pages Automator) on a
 rounded indigo square. Used both for the in-app window icon (gui.py) and the
 static installer icons (tools/build_icon.py) so they can never drift apart.
 """
-from PIL import Image, ImageDraw
 
 _BG = "#4338CA"      # indigo-700
 _LETTER = "#FFFFFF"
@@ -25,7 +24,8 @@ _P_SEGMENTS = [
 ]
 
 
-def draw_app_icon(size: int) -> Image.Image:
+def draw_app_icon(size: int):
+    from PIL import Image, ImageDraw
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     scale = size / 64

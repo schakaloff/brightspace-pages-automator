@@ -24,6 +24,7 @@ from playwright.async_api import BrowserContext, Page
 from config import SESSION_FILE
 from js_helpers import DEEP_FIND_JS
 from h5p_handler import H5PHandler
+from content_matcher import _norm, _numbers_conflict, _digitize, _containment_match, _detect_external_tool, _compare_items, _EXTERNAL_TOOLS, _WORD_NUMS
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -56,171 +57,6 @@ def _flatten_toc(modules: list, parent: str = "") -> list:
             })
         items.extend(_flatten_toc(mod.get("Modules") or [], title))
     return items
-
-
-def _norm(text: str) -> str:
-    """Lowercase + decode HTML entities so &amp; == & in comparisons."""
-    return html_module.unescape(text).lower().strip()
-
-
-def _numbers_conflict(a: str, b: str) -> bool:
-    """Return True if a and b have the same number of numeric tokens but any differ in value.
-    Prevents 'Chapter 6 PowerPoint' fuzzy-matching 'Chapter 9 PowerPoint'."""
-    nums_a = re.findall(r'\d+', a)
-    nums_b = re.findall(r'\d+', b)
-    if not nums_a and not nums_b:
-        return False
-    if len(nums_a) != len(nums_b):
-        return False
-    return any(int(x) != int(y) for x, y in zip(nums_a, nums_b))
-
-
-_WORD_NUMS = {
-    "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
-    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
-    "eleven": "11", "twelve": "12", "thirteen": "13", "fourteen": "14",
-    "fifteen": "15", "sixteen": "16", "seventeen": "17", "eighteen": "18",
-    "nineteen": "19", "twenty": "20",
-}
-_WORD_NUMS_RE = re.compile(r'\b(' + '|'.join(_WORD_NUMS) + r')\b', re.IGNORECASE)
-
-
-def _digitize(text: str) -> str:
-    """Spell out numbers -> digits (comparison-only), so 'Chapters Three and Four'
-    lines up with 'Chapter 3'."""
-    return _WORD_NUMS_RE.sub(lambda m: _WORD_NUMS[m.group(0).lower()], text)
-
-
-def _containment_match(name_l: str, candidates) -> Optional[str]:
-    """Catch short Moodle names ('Chapter 3') that are conceptually contained in a
-    longer combined Brightspace title ('Week Two: Chapters Three and Four - ...').
-    difflib's whole-string ratio penalizes this length mismatch too heavily, so this
-    checks number-token overlap plus a shared keyword instead of literal substring."""
-    name_digit = _digitize(name_l)
-    name_nums = set(re.findall(r'\d+', name_digit))
-    name_words = [w for w in re.findall(r'[a-z]+', name_digit) if len(w) >= 4]
-    if not name_nums or not name_words:
-        return None
-    for key in candidates:
-        cand_digit = _digitize(key)
-        if not name_nums & set(re.findall(r'\d+', cand_digit)):
-            continue
-        cand_words = re.findall(r'[a-z]+', cand_digit)
-        if any(cw.startswith(nw) or nw.startswith(cw) for nw in name_words for cw in cand_words):
-            return key
-    return None
-
-
-# ── External tool detection ───────────────────────────────────────────────────
-
-_EXTERNAL_TOOLS = {
-    "access pearson":   "Access Pearson resource present - will need to be re-linked",
-    "aktiv":            "Aktiv (Top Hat) resource present - will need to be re-linked",
-    "top hat":          "Aktiv (Top Hat) resource present - will need to be re-linked",
-    "cengage":          "Cengage resource present - will need to be re-linked",
-    "electude":         "Electude resource present - will need to be re-linked",
-    "hls":              "HLS videos to be connected during staging",
-    "harris learning":  "HLS videos to be connected during staging",
-    "kaltura":          "Kaltura resource present - will need to be re-linked",
-    "macmillan":        "Macmillan Learning resource present - will need to be re-linked",
-    "mcgraw":           "McGraw Hill resource present - will need to be re-linked",
-    "myokanaganmath":   "MyOkanaganMath resource present - will need to be re-linked",
-    "myokanagan":       "MyOkanaganMath resource present - will need to be re-linked",
-    "stukent":          "Stukent resource present - will need to be re-linked",
-    "wileyplus":        "WileyPlus resource present - will need to be re-linked",
-    "wiris":            "Wiris Quizzes resource present - will need to be re-linked",
-    "zoom":             "Zoom will need to be re-linked",
-    "h5p":              "H5P will need to be manually uploaded by educators",
-    "media collection": "Media collection resource present - will need to be relinked",
-    "turnitin":         "Turnitin resource present - will need to be relinked",
-    "poodll":           "Poodll resource present - will need to be relinked",
-}
-
-def _detect_external_tool(name: str, hint: str = "") -> Optional[tuple]:
-    """Return (tool_label, warning_message) if the name or Moodle module class matches a known tool."""
-    # H5P is identified by its modtype class, not its name
-    if "hvp" in hint or "h5p" in hint:
-        return "H5P", _EXTERNAL_TOOLS["h5p"]
-    name_l = name.lower()
-    for keyword, message in _EXTERNAL_TOOLS.items():
-        if keyword in name_l:
-            return keyword.title(), message
-    return None
-
-
-def _compare_items(moodle_items: list, bs_flat: list) -> list:
-    SKIP = {"LABEL", "FORUM"}
-
-    bs_modules = {_norm(i["title"]): i["title"] for i in bs_flat if i["kind"] == "MODULE"}
-    bs_topics  = {_norm(i["title"]): i["title"] for i in bs_flat if i["kind"] == "TOPIC"}
-    bs_all     = {**bs_modules, **bs_topics}
-
-    results = []
-    current_section = ""
-
-    for item in moodle_items:
-        if item["type"] == "SECTION":
-            current_section = item["name"]
-            name_l = _norm(item["name"])
-            if name_l in bs_modules:
-                status, matched = "exact", bs_modules[name_l]
-            else:
-                close = difflib.get_close_matches(name_l, bs_modules.keys(), n=1, cutoff=0.70)
-                if close and not _numbers_conflict(name_l, close[0]):
-                    score = int(difflib.SequenceMatcher(None, name_l, close[0]).ratio() * 100)
-                    status, matched = "fuzzy", (bs_modules[close[0]], score)
-                else:
-                    contained = _containment_match(name_l, bs_modules)
-                    if contained:
-                        status, matched = "fuzzy", (bs_modules[contained], 100)
-                    else:
-                        status, matched = "missing", None
-            results.append({**item, "section": "", "status": status, "matched": matched})
-            continue
-
-        if item["type"] in SKIP:
-            # Accordion labels carry structure we want to display — pass them through
-            if item["type"] == "LABEL" and item.get("accordion_cards") is not None:
-                results.append({**item, "section": current_section, "status": "label_accordion", "matched": None})
-            continue
-
-        # External tools are flagged separately — don't try to match them in BS
-        if item["type"] == "EXTERNAL":
-            detected = _detect_external_tool(item["name"], item.get("hint", ""))
-            tool_label, warning = detected if detected else ("External Tool", "External tool - will need to be re-linked")
-            results.append({**item, "section": current_section,
-                             "status": "external", "matched": warning, "tool_label": tool_label})
-            continue
-
-        # Embedded items (found inside page bodies) — preserve as-is, no BS comparison
-        if item.get("embedded"):
-            results.append({**item, "status": "embedded"})
-            continue
-
-        name_l = _norm(item["name"])
-
-        if name_l in bs_all:
-            results.append({**item, "section": current_section,
-                             "status": "exact", "matched": bs_all[name_l]})
-            continue
-
-        close = difflib.get_close_matches(name_l, bs_all.keys(), n=1, cutoff=0.75)
-        if close and not _numbers_conflict(name_l, close[0]):
-            score = int(difflib.SequenceMatcher(None, name_l, close[0]).ratio() * 100)
-            results.append({**item, "section": current_section,
-                             "status": "fuzzy", "matched": bs_all[close[0]], "score": score})
-            continue
-
-        contained = _containment_match(name_l, bs_all)
-        if contained:
-            results.append({**item, "section": current_section,
-                             "status": "fuzzy", "matched": bs_all[contained], "score": 100})
-            continue
-
-        results.append({**item, "section": current_section,
-                         "status": "missing", "matched": None})
-
-    return results
 
 
 # ── Moodle structured scraper JS (same logic as style_migrator) ───────────────
@@ -1802,6 +1638,11 @@ class ContentChecker:
             embedded        = await self._scan_moodle_page_bodies(tab, items)
             folder_files    = await self._scan_moodle_folders(tab, items)
 
+            # DEBUG: Show what _scan_moodle_folders returned
+            print(f"\n[DEBUG] After _scan_moodle_folders(): {len(folder_files)} items returned")
+            for ff in folder_files:
+                print(f"[DEBUG]   Item: {ff.get('name', 'N/A')} | parent_topic={ff.get('parent_topic', 'N/A')} | embedded={ff.get('embedded', 'MISSING')}")
+
             # Accordion LABEL items must be inserted after their SECTION item so
             # _compare_items sees them in section order (appending at end misattributes
             # them all to the last section).
@@ -2367,6 +2208,11 @@ class ContentChecker:
             return []
 
         self.log(f"  Scanning {len(folders)} folder(s) for files…", "info")
+        # DEBUG: Log each folder being scanned
+        for folder in folders:
+            print(f"[DEBUG] _scan_moodle_folders: Processing folder '{folder['name']}'")
+            print(f"[DEBUG]   → href: {folder.get('href', 'N/A')}")
+            print(f"[DEBUG]   → section: {section_of.get(folder['href'], 'N/A')}")
         found = []
 
         for folder in folders:
@@ -2388,8 +2234,14 @@ class ContentChecker:
 
                 if files:
                     self.log(f"    📁 {folder['name']}  →  {len(files)} file(s)", "info")
+                    # DEBUG: Log each extracted file with embedded flag
+                    for f in files:
+                        print(f"[DEBUG] _scan_moodle_folders: Extracted file from '{folder['name']}'")
+                        print(f"[DEBUG]   → file: {f.get('name', 'N/A')}")
+                        print(f"[DEBUG]   → href: {f.get('href', 'N/A')[:80]}...")
                 else:
                     self.log(f"    ○ {folder['name']}  (empty or no direct files)", "dim")
+                    print(f"[DEBUG] _scan_moodle_folders: Folder '{folder['name']}' returned 0 files")
 
                 for f in files:
                     f["section"]      = section
@@ -2530,25 +2382,66 @@ class ContentChecker:
         from collections import defaultdict
         embedded_by_parent: dict = defaultdict(list)
         section_desc_by_section: dict = defaultdict(list)
+        folder_names = set()
         for r in results:
             if r.get("embedded"):
+                if r.get("type") == "FOLDER":
+                    folder_names.add(r["name"])
                 pt = r.get("parent_topic", "")
                 if pt == "(section summary)":
                     section_desc_by_section[r.get("section", "")].append(r)
                 else:
                     embedded_by_parent[pt].append(r)
 
-        def _fmt_embedded(emb: dict, indent: str) -> None:
+        # Group extracted FILE items under their folder name (parent_topic).
+        # These are regular compared results (not embedded), so gather them
+        # separately from results — they render nested under the FOLDER row.
+        files_by_parent: dict = defaultdict(list)
+        for r in results:
+            if r.get("embedded"):
+                continue
+            pt = r.get("parent_topic", "")
+            if pt in folder_names:
+                files_by_parent[pt].append(r)
+
+        def _fmt_status_label(status: str) -> str:
+            """Convert status to a short label."""
+            labels = {
+                "exact": "EXACT",
+                "fuzzy": "FUZZY",
+                "found_in_search": "FOUND",
+                "found_in_content": "IN PAGE",
+                "missing": "MISSING",
+            }
+            return labels.get(status, status.upper())
+
+        def _fmt_folder_child(child: dict, indent: str, is_last: bool = True) -> None:
+            """Format a FILE extracted from a folder, showing its match status."""
+            status = child.get("status", "missing")
+            counts[status] = counts.get(status, 0) + 1
+            icons = {
+                "exact": "✅", "fuzzy": "⚠️ ", "missing": "❌",
+                "found_in_search": "🔍", "found_in_content": "📑",
+            }
+            s_icon = icons.get(status, "  ")
+            label = _fmt_status_label(status)
+            connector = "└─ " if is_last else "├─ "
+            tag = "success" if status == "exact" else ("error" if status == "missing" else "warning")
+            self.log(f"{indent}{connector}{s_icon} {label:<10} {child['name']}", tag)
+
+        def _fmt_embedded(emb: dict, indent: str, is_last: bool = True) -> None:
+            """Format an embedded item (file/video inside a folder or page)."""
             href  = emb.get("href", "")
             entry = emb.get("entryId", "")
             icon  = "📄" if emb.get("type") == "FILE" else "🎥"
+            connector = "└─ " if is_last else "├─ "
             if entry:
                 extra = f"  [entryId: {entry}]"
             elif "youtube.com" in href:
                 extra = f"  [{href}]"
             else:
                 extra = ""
-            self.log(f"{indent}{icon} {emb['name']}{extra}", "dim")
+            self.log(f"{indent}{connector}{icon} {emb['name']}{extra}", "dim")
 
         current_section_name = ""
 
@@ -2562,8 +2455,16 @@ class ContentChecker:
                 if r["status"] == "exact":
                     self.log(f"✅ {icon} {r['name']}", "step")
                 elif r["status"] == "fuzzy":
-                    matched, score = r["matched"]
-                    self.log(f"⚠️  {icon} {r['name']}  →  \"{matched}\" ({score}%)", "warning")
+                    matched_val = r.get("matched")
+                    if isinstance(matched_val, (tuple, list)) and len(matched_val) >= 2:
+                        matched, score = matched_val[0], matched_val[1]
+                        self.log(f"⚠️  {icon} {r['name']}  →  \"{matched}\" ({score}%)", "warning")
+                    elif isinstance(matched_val, (tuple, list)) and len(matched_val) == 1:
+                        self.log(f"⚠️  {icon} {r['name']}  →  \"{matched_val[0]}\"", "warning")
+                    elif matched_val:
+                        self.log(f"⚠️  {icon} {r['name']}  →  {matched_val}", "warning")
+                    else:
+                        self.log(f"⚠️  {icon} {r['name']}", "warning")
                 else:
                     self.log(f"❌ {icon} {r['name']}", "error")
                 # Section-description embedded items appear right below the header
@@ -2610,8 +2511,18 @@ class ContentChecker:
                 self.log(f"   🔌 {r['name']}", "warning")
                 continue
 
-            # Embedded items are shown in their own summary block at the bottom
+            # Show FOLDER items as visual containers (don't count them)
             if r.get("embedded"):
+                if r.get("type") == "FOLDER":
+                    folder_children = files_by_parent.get(r["name"], [])
+                    self.log(f"   ├─ 📁 FOLDER  {r['name']}", "step")
+                    for idx, child in enumerate(folder_children):
+                        is_last = (idx == len(folder_children) - 1)
+                        _fmt_folder_child(child, "   │  ", is_last)
+                continue
+
+            # Skip FILE items that are already shown under their FOLDER
+            if r.get("type") == "FILE" and r.get("parent_topic") in folder_names:
                 continue
 
             # Skip items already rendered inside an accordion card
@@ -2621,23 +2532,50 @@ class ContentChecker:
             status = r["status"]
             counts[status] = counts.get(status, 0) + 1
 
-            if status == "exact":
-                self.log(f"   ✅ {icon} {r['name']}", "success")
-            elif status == "fuzzy":
-                self.log(f"   ⚠️  {icon} {r['name']}", "warning")
-                self.log(f"        → \"{r['matched']}\" ({r['score']}%)", "dim")
-            elif status == "found_in_search":
-                self.log(f"   🔍 {icon} {r['name']}", "warning")
-                self.log(f"        found via search: \"{r['matched']}\"", "dim")
-            elif status == "found_in_content":
-                self.log(f"   📑 {icon} {r['name']}", "warning")
-                self.log(f"        found inside page: \"{r['matched']}\"", "dim")
-            else:
-                self.log(f"   ❌ {icon} {r['name']}", "error")
+            # Determine tree connector (├─ or └─) and status label
+            embedded_items = embedded_by_parent.get(r["name"], [])
+            has_children = len(embedded_items) > 0
 
-            # Show any embedded content found inside this activity, indented with arrow
-            for emb in embedded_by_parent.get(r["name"], []):
-                _fmt_embedded(emb, "        └─ ")
+            # Status icon mapping
+            status_icons = {
+                "exact": "✅", "fuzzy": "⚠️ ", "missing": "❌",
+                "found_in_search": "🔍", "found_in_content": "📑"
+            }
+            status_icon = status_icons.get(status, "  ")
+            status_label = _fmt_status_label(status)
+
+            # Format main item with status label
+            if status == "fuzzy":
+                matched_val = r.get("matched")
+                if isinstance(matched_val, (tuple, list)) and len(matched_val) >= 2:
+                    matched, score = matched_val[0], matched_val[1]
+                    self.log(f"   ├─ {status_icon} {status_label:<10} {r['name']}", "warning")
+                    self.log(f"      │   → \"{matched}\" ({score}%)", "dim")
+                elif isinstance(matched_val, (tuple, list)) and len(matched_val) == 1:
+                    matched = matched_val[0]
+                    self.log(f"   ├─ {status_icon} {status_label:<10} {r['name']}", "warning")
+                    self.log(f"      │   → \"{matched}\"", "dim")
+                elif matched_val:
+                    self.log(f"   ├─ {status_icon} {status_label:<10} {r['name']}", "warning")
+                    self.log(f"      │   → {matched_val}", "dim")
+                else:
+                    self.log(f"   ├─ {status_icon} {status_label:<10} {r['name']}", "warning")
+            elif status in ("found_in_search", "found_in_content"):
+                desc = "found via search" if status == "found_in_search" else "found inside page"
+                matched_val = r.get("matched", "")
+                self.log(f"   ├─ {status_icon} {status_label:<10} {r['name']}", "warning")
+                if matched_val:
+                    self.log(f"      │   {desc}: \"{matched_val}\"", "dim")
+            else:
+                connector = "├─" if has_children else "└─"
+                tag = "success" if status == "exact" else ("warning" if status == "found_in_search" else "error")
+                self.log(f"   {connector} {status_icon} {status_label:<10} {r['name']}", tag)
+
+            # Show any embedded content found inside this activity
+            for idx, emb in enumerate(embedded_items):
+                is_last = (idx == len(embedded_items) - 1)
+                indent_prefix = "      " if status in ("fuzzy", "found_in_search", "found_in_content") else "   "
+                _fmt_embedded(emb, indent_prefix, is_last)
 
         total = sum(counts.values())
         self.log("", "dim")
@@ -2845,6 +2783,23 @@ class ContentChecker:
             # ── Compare + scans ───────────────────────────────────────────────
             self.log("─" * 52, "dim")
             self.log("Comparing Moodle items against Brightspace…", "info")
+
+            # Mark FOLDER items as embedded so they're skipped from comparison.
+            # Their extracted FILE items will be compared instead.
+            for item in moodle_items:
+                if item.get("type") == "FOLDER":
+                    item["embedded"] = True
+
+            # DEBUG: Show all items before comparison, focusing on Chapter 2/3 folders
+            print(f"\n[DEBUG] Before _compare_items(): {len(moodle_items)} total items")
+            for item in moodle_items:
+                if "chapter 2" in item.get("name", "").lower() or "chapter 3" in item.get("name", "").lower():
+                    print(f"[DEBUG] CHAPTER ITEM: {item}")
+                elif item.get("parent_topic") and ("chapter 2" in item.get("parent_topic", "").lower() or "chapter 3" in item.get("parent_topic", "").lower()):
+                    print(f"[DEBUG] FROM CHAPTER FOLDER: {item}")
+                elif item.get("type") == "FOLDER":
+                    print(f"[DEBUG] FOLDER: name='{item.get('name')}' | embedded={item.get('embedded', 'MISSING')}")
+
             t0 = time.time()
             results = _compare_items(moodle_items, bs_flat)
 
@@ -2871,6 +2826,17 @@ class ContentChecker:
                     self.log(f"📦 Units created: {n_created}/{len(missing_secs)}", "step")
                     if n_created:
                         bs_flat = await self._fetch_bs_toc(page, course_id)
+                        # Mark FOLDER items as embedded (re-comparison after unit creation)
+                        for item in moodle_items:
+                            if item.get("type") == "FOLDER":
+                                item["embedded"] = True
+                        # DEBUG: Show items before re-comparison
+                        print(f"\n[DEBUG] RE-COMPARING after unit creation: {len(moodle_items)} items")
+                        for item in moodle_items:
+                            if "chapter 2" in item.get("name", "").lower() or "chapter 3" in item.get("name", "").lower():
+                                print(f"[DEBUG] CHAPTER ITEM: {item}")
+                            elif item.get("parent_topic") and ("chapter 2" in item.get("parent_topic", "").lower() or "chapter 3" in item.get("parent_topic", "").lower()):
+                                print(f"[DEBUG] FROM CHAPTER FOLDER: {item}")
                         results = _compare_items(moodle_items, bs_flat)
 
             missing = [r for r in results if r["status"] == "missing"]

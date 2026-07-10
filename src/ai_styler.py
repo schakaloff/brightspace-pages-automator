@@ -1,10 +1,8 @@
 import re
 import sys
 import time
-import anthropic
 from pathlib import Path
 from typing import Optional
-from bs4 import BeautifulSoup
 
 _COLOR_PROP_RE = re.compile(r'(?:^|(?<=;))\s*(?:color|background-color)\s*:[^;]*', re.IGNORECASE)
 
@@ -17,6 +15,7 @@ def _strip_color_from_style(style: str) -> str:
 
 
 def _clean_html(html: str) -> str:
+    from bs4 import BeautifulSoup
     soup = BeautifulSoup(html, "lxml")
 
     # strip tags that add no content value, but preserve Kaltura player scripts
@@ -106,6 +105,8 @@ def apply_style(
     """Returns (styled_html, usage) where usage is
     {"input_tokens", "output_tokens", "cost_cad"} — or (None, None) on failure.
     """
+    import anthropic
+
     def log(msg, level="info"):
         if log_callback:
             log_callback(msg, level)
