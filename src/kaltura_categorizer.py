@@ -439,21 +439,188 @@ class KalturaCategorizer:
                     pass
             return False
 
-        # ── Click "Create New" (in smart-curriculum iframe) ───────────────────
-        # d2l-button has shadowRoot, so js_click clicks its inner <button>
-        if not await js_click('d2l-button[aria-label="Create New"]'):
-            log_fn("  ✗ 'Create New' button not found", "error")
+        # ── Wait for the Lessons page to finish rendering ─────────────────────
+        # Bounded wait so we don't click "Create New" before the smart-curriculum
+        # toolbar has painted. Ready when any of: create-new-btn exists, a host
+        # whose text/aria-label is "Create New", or #content-header exists.
+        _JS_LESSONS_READY = """() => {
+            function deep(root, depth, fn) {
+                if (depth === 0) return false;
+                if (fn(root)) return true;
+                for (const c of root.querySelectorAll('*')) {
+                    if (c.shadowRoot && deep(c.shadowRoot, depth - 1, fn)) return true;
+                }
+                return false;
+            }
+            return deep(document, 10, (r) => {
+                if (r.querySelector('d2l-button.create-new-btn')) return true;
+                if (r.querySelector('#content-header')) return true;
+                for (const el of r.querySelectorAll('d2l-button, button, [role=button]')) {
+                    const t = (el.textContent || '').trim();
+                    const a = el.getAttribute('aria-label') || '';
+                    if (t === 'Create New' || a === 'Create New') return true;
+                }
+                return false;
+            });
+        }"""
+
+        async def _lessons_ready() -> bool:
+            frames = [bs_page, *[f for f in bs_page.frames if f != bs_page.main_frame]]
+            for ctx in frames:
+                try:
+                    if await ctx.evaluate(_JS_LESSONS_READY):
+                        return True
+                except Exception:
+                    pass
             return False
-        await bs_page.wait_for_timeout(1200)
+
+        log_fn("  BS: waiting for Lessons page to render…", "dim")
+        for _ in range(30):  # bounded ~15s wait (30 × 500ms)
+            if await _lessons_ready():
+                break
+            await bs_page.wait_for_timeout(500)
+
+        # ── Click "Create New" — follow the visible UI path ───────────────────
+        # The header is responsive: it shows EITHER a standalone "Create New"
+        # d2l-button (wide layout) OR an "Add ▾" dropdown holding a "Create New"
+        # menu item (narrow layout). The standalone button is present-but-hidden
+        # in the narrow layout, so a querySelector click lands on a display:none
+        # element and silently does nothing. Coordinate clicks only match VISIBLE
+        # elements (getBoundingClientRect width/height > 0), which fixes that.
+        _JS_COORDS = """(selector) => {
+            function deepFind(root, sel, depth) {
+                if (depth === 0) return null;
+                for (const el of root.querySelectorAll(sel)) {
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0)
+                        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+                }
+                for (const c of root.querySelectorAll('*')) {
+                    if (c.shadowRoot) {
+                        const f = deepFind(c.shadowRoot, sel, depth - 1);
+                        if (f) return f;
+                    }
+                }
+                return null;
+            }
+            return deepFind(document, selector, 12);
+        }"""
+
+        # The Lessons toolbar and create menu live inside the smart-curriculum
+        # iframe, not the top document — but the frame's URL is unreliable to
+        # match on, so search every frame for the VISIBLE element and derive that
+        # frame's page offset from its own <iframe> element. Element coords are
+        # relative to the frame's viewport; add the offset before clicking with
+        # the top-level mouse.
+        def _all_frames():
+            return [bs_page.main_frame,
+                    *[f for f in bs_page.frames if f != bs_page.main_frame]]
+
+        async def _frame_offset(frame):
+            if frame == bs_page.main_frame:
+                return {"x": 0, "y": 0}
+            try:
+                fe = await frame.frame_element()
+                box = await fe.bounding_box()
+                if box:
+                    return {"x": box["x"], "y": box["y"]}
+            except Exception:
+                pass
+            return {"x": 0, "y": 0}
+
+        async def _click_visible(selector: str) -> bool:
+            for frame in _all_frames():
+                try:
+                    c = await frame.evaluate(_JS_COORDS, selector)
+                except Exception:
+                    c = None
+                if c:
+                    off = await _frame_offset(frame)
+                    await bs_page.mouse.click(off["x"] + c["x"], off["y"] + c["y"])
+                    return True
+            return False
+
+        _JS_TILES = """() => {
+            function deep(root, depth) {
+                if (depth === 0) return false;
+                for (const el of root.querySelectorAll('.material-tile-text')) {
+                    if ((el.textContent || '').trim() === 'Page') return true;
+                }
+                for (const c of root.querySelectorAll('*')) {
+                    if (c.shadowRoot && deep(c.shadowRoot, depth - 1)) return true;
+                }
+                return false;
+            }
+            return deep(document, 15);
+        }"""
+
+        async def _tiles_present() -> bool:
+            for frame in _all_frames():
+                try:
+                    if await frame.evaluate(_JS_TILES):
+                        return True
+                except Exception:
+                    pass
+            return False
+
+        created = False
+        # Path A: standalone visible "Create New" button (wide layout)
+        if await _click_visible('d2l-button.create-new-btn'):
+            await bs_page.wait_for_timeout(1000)
+            created = await _tiles_present()
+        # Path B: "Add ▾" dropdown → "Create New" menu item (narrow layout)
+        if not created:
+            if await _click_visible('d2l-dropdown-button-subtle[text="Add"]'):
+                await bs_page.wait_for_timeout(700)
+            if await _click_visible('d2l-menu-item#create-new-menu-item'):
+                await bs_page.wait_for_timeout(1000)
+                created = await _tiles_present()
+
+        if not created:
+            # Per-frame visibility of each control so a further failure is
+            # self-explaining (which frame holds what).
+            _JS_VIS = """(sels) => {
+                function deep(root, sel, depth) {
+                    if (depth === 0) return null;
+                    for (const el of root.querySelectorAll(sel)) {
+                        const r = el.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) return 'vis';
+                    }
+                    let hidden = root.querySelector(sel) ? 'hidden' : null;
+                    for (const c of root.querySelectorAll('*')) {
+                        if (c.shadowRoot) {
+                            const f = deep(c.shadowRoot, sel, depth - 1);
+                            if (f === 'vis') return 'vis';
+                            if (f) hidden = f;
+                        }
+                    }
+                    return hidden;
+                }
+                const out = {};
+                for (const s of sels) out[s] = deep(document, s, 12) || 'none';
+                return out;
+            }"""
+            sels = ['d2l-button.create-new-btn',
+                    'd2l-dropdown-button-subtle[text="Add"]',
+                    'd2l-menu-item#create-new-menu-item']
+            for idx, frame in enumerate(_all_frames()):
+                try:
+                    vis = await frame.evaluate(_JS_VIS, sels)
+                    log_fn(f"  CN diag f{idx} url={(frame.url or '')[:55]} {vis}", "dim")
+                except Exception as e:
+                    log_fn(f"  CN diag f{idx} err {e}", "dim")
+            log_fn("  ✗ 'Create New' — could not open the create menu", "error")
+            return False
+        await bs_page.wait_for_timeout(600)
 
         # ── Click "Page" tile ──────────────────────────────────────────────────
         _JS_PAGE_TILE = """() => {
             function deepFind(root, depth) {
                 if (depth === 0) return null;
-                // Primary: a.add-material-tile with child text "Page"
-                for (const a of root.querySelectorAll('a.add-material-tile')) {
-                    const t = a.querySelector('.material-tile-text');
-                    if (t && t.textContent.trim() === 'Page') { a.click(); return true; }
+                // Primary: visible Page tile text inside an add-material tile
+                for (const t of root.querySelectorAll('.add-material-tile-inner .material-tile-text')) {
+                    const a = t.closest('a');
+                    if (a && t.textContent.trim() === 'Page') { a.click(); return true; }
                 }
                 // Fallback: any <a> or <button> whose visible text is exactly "Page"
                 for (const el of root.querySelectorAll('a, button')) {
@@ -472,8 +639,10 @@ class KalturaCategorizer:
         }"""
 
         page_tile_found = False
-        frames = [bs_page, *[f for f in bs_page.frames if f != bs_page.main_frame]]
         for attempt in range(20):
+            # Recompute frames each attempt — the Create-New slide-out loads its
+            # own iframe after the click, so a list captured once would miss it.
+            frames = [bs_page, *[f for f in bs_page.frames if f != bs_page.main_frame]]
             for ctx in frames:
                 try:
                     if await ctx.evaluate(_JS_PAGE_TILE):
@@ -486,6 +655,37 @@ class KalturaCategorizer:
             await bs_page.wait_for_timeout(600)
 
         if not page_tile_found:
+            # Deep diagnostic: distinguish "slide-out never opened" from
+            # "tiles behind a closed shadow root / unhydrated declarative template".
+            _JS_TILE_DIAG = """() => {
+                const out = {lightTiles: 0, deepTiles: 0, slideout: 0,
+                             templates: 0, icons: 0, sample: []};
+                out.lightTiles = document.querySelectorAll('.material-tile-text').length;
+                function walk(root, depth) {
+                    if (depth === 0) return;
+                    for (const el of root.querySelectorAll('*')) {
+                        if (el.classList && el.classList.contains('material-tile-text')) {
+                            out.deepTiles++;
+                            if (out.sample.length < 12) out.sample.push((el.textContent||'').trim());
+                        }
+                        if (el.id && /slideOut/i.test(el.id)) out.slideout++;
+                        if (el.tagName === 'TEMPLATE' && el.getAttribute('shadowrootmode')) out.templates++;
+                        if (el.tagName === 'D2L-ICON-CUSTOM') out.icons++;
+                        if (el.shadowRoot) walk(el.shadowRoot, depth - 1);
+                    }
+                }
+                walk(document, 15);
+                return out;
+            }"""
+            for idx, ctx in enumerate([bs_page, *[f for f in bs_page.frames if f != bs_page.main_frame]]):
+                try:
+                    d = await ctx.evaluate(_JS_TILE_DIAG)
+                    log_fn(f"  Tile diag f{idx}: light={d['lightTiles']} deep={d['deepTiles']} "
+                           f"slideout={d['slideout']} tmpl={d['templates']} icons={d['icons']} "
+                           f"sample={d['sample']}", "dim")
+                except Exception as e:
+                    log_fn(f"  Tile diag f{idx}: err {e}", "dim")
+            log_fn(f"  Page tile diagnostic: url={bs_page.url}, frames={len(bs_page.frames)}", "dim")
             log_fn("  ✗ 'Page' tile not found", "error")
             return False
 
@@ -733,6 +933,9 @@ class KalturaCategorizer:
                     else:
                         raise RuntimeError("KMC SSO login timed out after 3 minutes")
                     log("Logged in to KMC.", "success")
+                    # Persist session immediately on success so fresh cookies are
+                    # saved even if a later step throws before the final save below.
+                    await context.storage_state(path=KMC_SESSION_FILE)
                 else:
                     log("No KMC credentials set in Settings — log in manually in the browser.", "warning")
                     await page.wait_for_url("**/kmcng/content/entries/list**", timeout=0)

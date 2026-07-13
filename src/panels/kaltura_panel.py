@@ -23,6 +23,7 @@ class KalturaPanel(QWidget):
         self._combos: dict[str, QComboBox] = {}   # section_name → QComboBox
         self._bs_modules: list[dict] = []          # [{id, title}] cached after fetch
         self._build()
+        self._load_saved_links()
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_log)
         self._poll_timer.start(100)
@@ -218,6 +219,21 @@ class KalturaPanel(QWidget):
             if combo.currentData() is not None
         }
 
+    def _load_saved_links(self):
+        if not hasattr(self._mw, "load_config"):
+            return
+        cfg = self._mw.load_config()
+        self._moodle_url.setText(cfg.get("kaltura_moodle_url", ""))
+        self._bs_url.setText(cfg.get("kaltura_bs_url", ""))
+
+    def save_state(self):
+        if not hasattr(self._mw, "save_config"):
+            return
+        self._mw.save_config({
+            "kaltura_moodle_url": self._moodle_url.text().strip(),
+            "kaltura_bs_url": self._bs_url.text().strip(),
+        })
+
     # ── Workers ───────────────────────────────────────────────────────────────
 
     def _start_login(self):
@@ -323,6 +339,7 @@ class KalturaPanel(QWidget):
         q = self._log_queue
         kmc_user = self._mw.kmc_username
         kmc_pass = self._mw.kmc_password
+        q.put((f"KMC credentials loaded: username={'yes' if kmc_user else 'no'}, password={'yes' if kmc_pass else 'no'}", "dim"))
 
         def worker():
             try:
