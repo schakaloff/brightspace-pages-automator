@@ -193,6 +193,9 @@ class MainWindow(QMainWindow):
         if idx is not None:
             self._stack.setCurrentIndex(idx)
             self._sidebar.set_active(n)
+            # Pull over URLs saved by the Checker tab when Collector is shown.
+            if n == 2 and hasattr(self._collector, "refresh_carryover"):
+                self._collector.refresh_carryover()
 
     def _on_settings(self):
         self._stack.setCurrentIndex(5)

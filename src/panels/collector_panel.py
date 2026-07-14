@@ -1,11 +1,22 @@
 import asyncio
 import queue
+import re
 import threading
 from pathlib import Path
 
+
+def _normalize_url(u: str) -> str:
+    """Ensure a pasted URL has a scheme. Browsers often show/copy URLs without
+    'https://', which makes Playwright's page.goto() fail silently and breaks
+    URL parsing downstream. Prepend https:// when missing."""
+    u = u.strip()
+    if u and not re.match(r"^https?://", u, re.IGNORECASE):
+        u = "https://" + u
+    return u
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit, QSpinBox,
+    QPushButton, QLineEdit, QSpinBox, QCheckBox,
 )
 from PySide6.QtCore import Signal, QTimer
 
@@ -54,23 +65,41 @@ class CollectorPanel(QWidget):
             "Find it by clicking a unit in the course Content table — copy the URL from your browser."
         )
         layout.addWidget(self._unit_entry)
+        self._bs_course_hint = QLabel()
+        self._bs_course_hint.setProperty("role", "dim")
+        self._bs_course_hint.setWordWrap(True)
+        self._bs_course_hint.hide()
+        layout.addSpacing(4)
+        layout.addWidget(self._bs_course_hint)
         layout.addSpacing(12)
 
-        layout.addWidget(_form_label("TARGET PAGE URL  (empty Brightspace page you created)"))
+        self._auto_create_chk = QCheckBox("Auto-create the target page in this unit (recommended)")
+        self._auto_create_chk.setChecked(True)
+        self._auto_create_chk.setToolTip(
+            "When on, a blank page is created automatically at the end of the unit above,\n"
+            "so you don't have to make one in Brightspace and paste its URL.\n"
+            "Leave the Target Page URL below blank when this is on."
+        )
+        self._auto_create_chk.toggled.connect(self._on_auto_toggle)
+        layout.addWidget(self._auto_create_chk)
+        layout.addSpacing(8)
+
+        layout.addWidget(_form_label("TARGET PAGE URL  (optional — leave blank to auto-create)"))
         layout.addSpacing(4)
         self._target_entry = QLineEdit()
-        self._target_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/le/content/…/topics/…/View")
+        self._target_entry.setPlaceholderText("Leave blank to auto-create, or paste an existing page URL")
         self._target_entry.setFixedHeight(40)
         self._target_entry.setToolTip(
-            "A blank HTML Content topic page in Brightspace where the combined output will be written.\n"
-            "Create an empty page in Brightspace first, then paste its URL here."
+            "Where the combined output is written.\n"
+            "Leave blank (with auto-create on) to have one made for you, or paste the URL\n"
+            "of an existing blank HTML topic to reuse it."
         )
         layout.addWidget(self._target_entry)
-        target_hint = QLabel("Create an empty HTML Content topic in Brightspace, then paste its URL above.")
-        target_hint.setProperty("role", "dim")
-        target_hint.setWordWrap(True)
+        self._target_hint = QLabel("A blank page will be created for you. Paste a URL here only to reuse an existing page.")
+        self._target_hint.setProperty("role", "dim")
+        self._target_hint.setWordWrap(True)
         layout.addSpacing(4)
-        layout.addWidget(target_hint)
+        layout.addWidget(self._target_hint)
         layout.addSpacing(12)
 
         layout.addWidget(_form_label("MOODLE COURSE URL  (optional — fixes weird file/link names)"))
@@ -120,17 +149,51 @@ class CollectorPanel(QWidget):
         self._continue_btn.clicked.connect(self.continue_next)
         layout.addWidget(self._continue_btn)
 
+        # Carry over URLs entered in the Checker tab, and restore the checkbox.
+        cfg = self._mw.load_config() if hasattr(self._mw, "load_config") else {}
+        if cfg.get("chk_moodle_url") and not self._moodle_entry.text().strip():
+            self._moodle_entry.setText(cfg["chk_moodle_url"])
+        if cfg.get("chk_bs_url"):
+            self._bs_course_hint.setText(f"Course carried over from Checker: {cfg['chk_bs_url']}")
+            self._bs_course_hint.show()
+        if "col_auto_create" in cfg:
+            self._auto_create_chk.setChecked(bool(cfg["col_auto_create"]))
+        self._on_auto_toggle(self._auto_create_chk.isChecked())
+
+    def _on_auto_toggle(self, checked: bool):
+        """Reflect the auto-create choice in the Target URL field's hint/placeholder."""
+        if checked:
+            self._target_entry.setPlaceholderText("Leave blank to auto-create, or paste an existing page URL")
+            self._target_hint.setText("A blank page will be created for you. Paste a URL here only to reuse an existing page.")
+        else:
+            self._target_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/le/lessons/…/topics/…")
+            self._target_hint.setText("Auto-create is off — paste the URL of a blank Brightspace page to write into.")
+
+    def refresh_carryover(self):
+        """Re-read Checker's saved URLs (call when this tab becomes visible)."""
+        cfg = self._mw.load_config() if hasattr(self._mw, "load_config") else {}
+        if cfg.get("chk_moodle_url") and not self._moodle_entry.text().strip():
+            self._moodle_entry.setText(cfg["chk_moodle_url"])
+        if cfg.get("chk_bs_url"):
+            self._bs_course_hint.setText(f"Course carried over from Checker: {cfg['chk_bs_url']}")
+            self._bs_course_hint.show()
+
     def _start_run(self):
         if not self._mw.chromium_ready:
             self._log.append_log("Browser engine still installing — please wait.", "warning")
             return
-        unit_url   = self._unit_entry.text().strip()
-        target_url = self._target_entry.text().strip()
-        moodle_url = self._moodle_entry.text().strip()
+        unit_url   = _normalize_url(self._unit_entry.text())
+        target_url = _normalize_url(self._target_entry.text())
+        moodle_url = _normalize_url(self._moodle_entry.text())
+        auto_create = self._auto_create_chk.isChecked()
         if not unit_url:
             self._log.append_log("Paste a Brightspace unit URL first.", "warning"); return
-        if not target_url:
-            self._log.append_log("Paste the target page URL first.", "warning"); return
+        if not target_url and not auto_create:
+            self._log.append_log(
+                "Paste a target page URL, or turn on “Auto-create the target page”.", "warning"
+            ); return
+
+        self._mw.save_config({"col_auto_create": auto_create})
 
         theme_name   = self._selected_theme[0]
         theme_colors = PAGE_THEMES[theme_name]
@@ -165,6 +228,7 @@ class CollectorPanel(QWidget):
                     claude_model=self._mw.claude_model,
                     style_reference_html=style_reference_html,
                     parallel_pages=parallel,
+                    auto_create_target=auto_create,
                     log=lambda msg, tag="info": q.put((msg, tag)),
                     on_complete=on_done,
                     bs_username=self._mw.bs_username,

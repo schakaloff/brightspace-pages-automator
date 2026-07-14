@@ -56,6 +56,7 @@ class UnitCollector:
         claude_model: str = "",
         style_reference_html: str = "",
         parallel_pages: int = 3,
+        auto_create_target: bool = True,
         log: Optional[Callable] = None,
         on_complete: Optional[Callable] = None,
         bs_username: str = "",
@@ -74,6 +75,7 @@ class UnitCollector:
         self.claude_model = claude_model
         self.style_reference_html = style_reference_html
         self.parallel_pages = max(1, parallel_pages)
+        self.auto_create_target = auto_create_target
         self._log_fn = log
         self._on_complete = on_complete
         self.bs_username = bs_username
@@ -1180,6 +1182,28 @@ class UnitCollector:
             except Exception:
                 pass
 
+            # ── Auto-create target page (optional, self-contained feature) ────
+            # If no target URL was given and auto-create is on, make a blank page
+            # in this same unit via the D2L API, then proceed exactly as if the
+            # user had pasted its URL. Everything below is untouched. To remove
+            # this feature, delete this block + src/target_page_creator.py.
+            if not self.target_url:
+                if self.auto_create_target:
+                    from target_page_creator import create_target_page
+                    self.target_url = await create_target_page(
+                        page, self.unit_url, log=self.log
+                    )
+                if not self.target_url:
+                    self.log(
+                        "✗ No target page. Paste a Target Page URL (or enable "
+                        "auto-create) and re-run.", "error"
+                    )
+                    if self._on_complete:
+                        self._on_complete()
+                    while browser.is_connected():
+                        await asyncio.sleep(0.5)
+                    return
+
             topics = await self._scrape_topics(page)
             # Never collect the target page itself
             target_path = self.target_url.rstrip("/")
@@ -1296,6 +1320,7 @@ async def run(
     claude_model: str = "",
     style_reference_html: str = "",
     parallel_pages: int = 3,
+    auto_create_target: bool = True,
     log: Callable = None,
     on_complete: Callable = None,
     bs_username: str = "",
@@ -1315,6 +1340,7 @@ async def run(
         claude_model=claude_model,
         style_reference_html=style_reference_html,
         parallel_pages=parallel_pages,
+        auto_create_target=auto_create_target,
         log=log,
         on_complete=on_complete,
         bs_username=bs_username,
