@@ -33,7 +33,7 @@ class RestylePanel(QWidget):
         layout.setContentsMargins(32, 28, 32, 20)
         layout.setSpacing(0)
 
-        layout.addWidget(_section_header("Page Changer"))
+        layout.addWidget(_section_header("Restyle"))
         sub = QLabel("Pick an OC brand colour theme, paste a Brightspace page or section URL, and let Claude restyle it.")
         sub.setProperty("role", "dim"); sub.setWordWrap(True)
         layout.addWidget(sub)
@@ -60,7 +60,7 @@ class RestylePanel(QWidget):
         self._run_btn = QPushButton("Start")
         self._run_btn.setFixedSize(110, 42)
         self._run_btn.setToolTip(
-            "Opens a browser, extracts the page HTML, sends it to Gemini AI for restyling,\n"
+            "Opens a browser, extracts the page HTML, sends it to Claude AI for restyling,\n"
             "and writes the styled HTML back to Brightspace."
         )
         self._run_btn.clicked.connect(self._start_run)

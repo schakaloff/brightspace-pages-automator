@@ -98,8 +98,8 @@ class SettingsPanel(QWidget):
         self._key_field.setEchoMode(QLineEdit.EchoMode.Password)
         self._key_field.setFixedHeight(40)
         self._key_field.setToolTip(
-            "Your Google Gemini API key. Required for the Collect and Restyle tabs.\n"
-            "Get one free at aistudio.google.com. Saved automatically."
+            "Your Anthropic Claude API key. Required for the Collect and Restyle tabs.\n"
+            "Get one at console.anthropic.com. Saved automatically."
         )
         self._key_field.textChanged.connect(self._on_key_changed)
         key_row.addWidget(self._key_field)

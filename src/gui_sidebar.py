@@ -131,8 +131,9 @@ class Sidebar(QWidget):
         _step_tooltips = {
             1: "Step 1 — Checker: Compare Moodle and Brightspace course content, download missing files.",
             2: "Step 2 — Collect: Scrape all topics from a unit and combine them into one collapsible page.",
-            3: "Step 3 — Restyle: Use Gemini AI to apply an OC brand theme to a Brightspace page.",
+            3: "Step 3 — Restyle: Use Claude AI to apply an OC brand theme to a Brightspace page.",
             4: "Step 4 — Kaltura: Scan Moodle for Kaltura videos and create matching Brightspace pages.",
+            5: "Step 5 — H5P: Download H5P activities from Moodle and paste them into matching Brightspace modules.",
         }
 
         # Step buttons
@@ -155,7 +156,7 @@ class Sidebar(QWidget):
         self._settings_btn = QPushButton("Settings")
         self._settings_btn.setProperty("class", "step-btn")
         self._settings_btn.setFixedHeight(44)
-        self._settings_btn.setToolTip("Configure credentials, Gemini API key, and app appearance.")
+        self._settings_btn.setToolTip("Configure credentials, Claude API key, and app appearance.")
         self._settings_btn.clicked.connect(self.settings_clicked)
         layout.addWidget(self._settings_btn)
         layout.addSpacing(4)

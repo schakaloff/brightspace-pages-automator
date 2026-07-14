@@ -163,7 +163,7 @@ class CollectorPanel(QWidget):
         self._continue_btn = QPushButton("Continue to Page Changer")
         self._continue_btn.setProperty("variant", "next-step")
         self._continue_btn.setFixedHeight(38)
-        self._continue_btn.setToolTip("Proceed to Step 3: use Gemini AI to restyle pages with an OC brand theme.")
+        self._continue_btn.setToolTip("Proceed to Step 3: use Claude AI to restyle pages with an OC brand theme.")
         self._continue_btn.hide()
         self._continue_btn.clicked.connect(self.continue_next)
         layout.addWidget(self._continue_btn)

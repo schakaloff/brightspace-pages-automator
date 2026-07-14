@@ -339,7 +339,6 @@ class KalturaPanel(QWidget):
         q = self._log_queue
         kmc_user = self._mw.kmc_username
         kmc_pass = self._mw.kmc_password
-        q.put((f"KMC credentials loaded: username={'yes' if kmc_user else 'no'}, password={'yes' if kmc_pass else 'no'}", "dim"))
 
         def worker():
             try:
