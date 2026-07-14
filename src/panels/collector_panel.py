@@ -210,12 +210,24 @@ class CollectorPanel(QWidget):
         target_url = _normalize_url(self._target_entry.text())
         moodle_url = _normalize_url(self._moodle_entry.text())
         auto_create = self._auto_create_chk.isChecked()
+        multi_unit  = self._multi_unit_chk.isChecked()
+        auto_continue = self._auto_continue_chk.isChecked()
         if not unit_url:
             self._log.append_log("Paste a Brightspace unit URL first.", "warning"); return
         if not target_url and not auto_create:
             self._log.append_log(
                 "Paste a target page URL, or turn on “Auto-create the target page”.", "warning"
             ); return
+
+        course_id = None
+        if multi_unit:
+            from target_page_creator import _parse_ids
+            course_id, _ = _parse_ids(unit_url)
+            if not course_id:
+                self._log.append_log(
+                    "Couldn't read a course id from that unit URL — multi-unit mode needs one.",
+                    "warning",
+                ); return
 
         self._mw.save_config({"col_auto_create": auto_create})
 
@@ -234,6 +246,21 @@ class CollectorPanel(QWidget):
         self._log.clear_log()
 
         q = self._log_queue
+        shared_kwargs = dict(
+            theme_name=theme_name,
+            theme_colors=theme_colors,
+            claude_api_key=self._mw.claude_api_key,
+            claude_model=self._mw.claude_model,
+            style_reference_html=style_reference_html,
+            parallel_pages=parallel,
+            bs_username=self._mw.bs_username,
+            bs_password=self._mw.bs_password,
+            sso_email=self._mw.sso_email,
+            sso_password=self._mw.sso_password,
+            moodle_url=moodle_url,
+            moodle_username=self._mw.moodle_username,
+            moodle_password=self._mw.moodle_password,
+        )
 
         def worker():
             done_sent = [False]
@@ -243,32 +270,82 @@ class CollectorPanel(QWidget):
                     q.put(("__DONE__", ""))
             try:
                 from unit_collector import run as collector_run
-                asyncio.run(collector_run(
-                    unit_url=unit_url,
-                    target_url=target_url,
-                    theme_name=theme_name,
-                    theme_colors=theme_colors,
-                    claude_api_key=self._mw.claude_api_key,
-                    claude_model=self._mw.claude_model,
-                    style_reference_html=style_reference_html,
-                    parallel_pages=parallel,
-                    auto_create_target=auto_create,
-                    log=lambda msg, tag="info": q.put((msg, tag)),
-                    on_complete=on_done,
-                    bs_username=self._mw.bs_username,
-                    bs_password=self._mw.bs_password,
-                    sso_email=self._mw.sso_email,
-                    sso_password=self._mw.sso_password,
-                    moodle_url=moodle_url,
-                    moodle_username=self._mw.moodle_username,
-                    moodle_password=self._mw.moodle_password,
-                ))
+                if multi_unit:
+                    asyncio.run(self._run_multi_unit(
+                        unit_url, course_id, auto_continue, shared_kwargs, collector_run, q
+                    ))
+                else:
+                    asyncio.run(collector_run(
+                        unit_url=unit_url,
+                        target_url=target_url,
+                        auto_create_target=auto_create,
+                        log=lambda msg, tag="info": q.put((msg, tag)),
+                        on_complete=on_done,
+                        **shared_kwargs,
+                    ))
             except Exception as e:
                 q.put((f"Error: {e}", "error"))
             finally:
                 on_done()
 
         threading.Thread(target=worker, daemon=True).start()
+
+    async def _run_multi_unit(self, first_unit_url, course_id, auto_continue, shared_kwargs, collector_run, q):
+        from browser import launch_browser, wait_for_login
+        from multi_unit_selector import run_multi
+
+        log = lambda msg, tag="info": q.put((msg, tag))
+        base = "/".join(first_unit_url.split("/")[:3])
+
+        p, browser_, context, page = await launch_browser()
+        try:
+            await wait_for_login(
+                page, context,
+                self._mw.bs_username or None, self._mw.bs_password or None,
+                self._mw.sso_email or None, self._mw.sso_password or None,
+            )
+
+            async def run_unit(unit_url: str) -> bool:
+                try:
+                    await collector_run(
+                        unit_url=unit_url,
+                        target_url="",
+                        auto_create_target=True,
+                        log=log,
+                        on_complete=lambda: None,
+                        **shared_kwargs,
+                    )
+                    return True
+                except Exception as e:
+                    log(f"✗ Unit failed: {e}", "error")
+                    return False
+
+            def confirm_fn(message: str) -> bool:
+                if auto_continue:
+                    return True
+                result_ref = [False]
+                event = threading.Event()
+                q.put(("__COL_CONFIRM__", (message, result_ref, event)))
+                event.wait()
+                return result_ref[0]
+
+            summary = await run_multi(
+                page=page,
+                course_id=course_id,
+                base_url=base,
+                run_unit=run_unit,
+                confirm_fn=confirm_fn,
+                log=log,
+            )
+            log(
+                f"─── Multi-unit run finished: {len(summary['processed'])} unit(s) done, "
+                f"stopped because: {summary['stopped_reason']} ───",
+                "info",
+            )
+        finally:
+            if browser_.is_connected():
+                await browser_.close()
+            await p.stop()
 
     def _poll_log(self):
         try:
