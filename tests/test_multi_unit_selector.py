@@ -51,3 +51,30 @@ def test_select_next_unit_returns_none_when_all_done_or_empty():
 
 def test_select_next_unit_empty_list():
     assert select_next_unit([]) is None
+
+
+def test_flatten_modules_matches_live_toc_shape():
+    # Shape captured live from GET /d2l/api/le/1.95/8520/content/toc (2026-07-14)
+    raw = [
+        {
+            "ModuleId": 194381, "Title": "Imported Module", "SortOrder": -50,
+            "Topics": [
+                {"Title": "Question Forum"},
+                {"Title": "Imported Module — Combined"},
+            ],
+        },
+        {
+            "ModuleId": 194430, "Title": "Topic 6", "SortOrder": 326,
+            "Topics": [],
+        },
+    ]
+    flat = _flatten_modules(raw)
+    assert flat[0] == {
+        "module_id": 194381, "title": "Imported Module", "sort_order": -50,
+        "topic_count": 2,
+        "topic_titles": ["Question Forum", "Imported Module — Combined"],
+    }
+    assert flat[1] == {
+        "module_id": 194430, "title": "Topic 6", "sort_order": 326,
+        "topic_count": 0, "topic_titles": [],
+    }
