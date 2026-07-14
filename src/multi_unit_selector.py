@@ -56,3 +56,35 @@ def select_next_unit(modules: list, combined_suffix: str = "— Combined") -> Op
             continue
         return m
     return None
+
+
+_JS_FETCH_TOC = r"""async ([courseId]) => {
+    try {
+        const r = await fetch(
+            `/d2l/api/le/1.95/${courseId}/content/toc`,
+            { credentials: 'include', headers: { 'Accept': 'application/json' } });
+        if (!r.ok) return { ok: false, reason: 'http-' + r.status };
+        const data = await r.json();
+        return { ok: true, modules: data.Modules || [] };
+    } catch (e) { return { ok: false, reason: 'fetch-failed: ' + e }; }
+}"""
+
+
+async def fetch_toc(page: Page, course_id: str, log: Optional[Callable] = None) -> list:
+    """Fetch and flatten this course's top-level modules. Never raises —
+    returns [] on any failure so the caller can stop the multi-unit run."""
+    def _log(msg: str, level: str = "info"):
+        if log:
+            log(msg, level)
+
+    try:
+        result = await page.evaluate(_JS_FETCH_TOC, [course_id])
+    except Exception as e:
+        _log(f"✗ Could not fetch course structure: {e}", "error")
+        return []
+
+    if not result or not result.get("ok"):
+        _log(f"✗ Course structure fetch failed ({(result or {}).get('reason', 'unknown')})", "error")
+        return []
+
+    return _flatten_modules(result["modules"])

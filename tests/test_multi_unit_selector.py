@@ -78,3 +78,53 @@ def test_flatten_modules_matches_live_toc_shape():
         "module_id": 194430, "title": "Topic 6", "sort_order": 326,
         "topic_count": 0, "topic_titles": [],
     }
+
+
+import asyncio
+from multi_unit_selector import fetch_toc
+
+
+class _FakePage:
+    def __init__(self, result):
+        self._result = result
+        self.calls = []
+
+    async def evaluate(self, js, args):
+        self.calls.append(args)
+        return self._result
+
+
+def test_fetch_toc_flattens_successful_response():
+    page = _FakePage({"ok": True, "modules": [
+        {"ModuleId": 1, "Title": "Topic 1", "SortOrder": 4, "Topics": [{"Title": "Welcome"}]},
+    ]})
+
+    async def _run():
+        return await fetch_toc(page, "8520")
+
+    result = asyncio.run(_run())
+    assert result == [{
+        "module_id": 1, "title": "Topic 1", "sort_order": 4,
+        "topic_count": 1, "topic_titles": ["Welcome"],
+    }]
+    assert page.calls == [["8520"]]
+
+
+def test_fetch_toc_returns_empty_list_on_failure():
+    page = _FakePage({"ok": False, "reason": "http-404"})
+
+    async def _run():
+        return await fetch_toc(page, "8520")
+
+    assert asyncio.run(_run()) == []
+
+
+def test_fetch_toc_returns_empty_list_on_exception():
+    class _RaisingPage:
+        async def evaluate(self, js, args):
+            raise RuntimeError("boom")
+
+    async def _run():
+        return await fetch_toc(_RaisingPage(), "8520")
+
+    assert asyncio.run(_run()) == []
