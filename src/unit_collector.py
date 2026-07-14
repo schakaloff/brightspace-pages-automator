@@ -805,23 +805,51 @@ class UnitCollector:
 
             # Step 5a: After clicking Upload in an error state, Brightspace may show
             # an intermediate screen with an "Insert" button before the overwrite dialog.
-            # That screen also carries the link-text field, and clicking Insert here can
-            # be the final submission (dialog closes with no overwrite conflict) — so the
-            # field must be filled before this click, not after it, or the corrected name
-            # never makes it in for files that don't hit an overwrite.
-            # D2L ignores synthetic input/change events on this field (Lit property
-            # observers only react to real DOM keyboard events), so it must be set via
+            # That screen also carries the Link Text / Alternate Text fields, and clicking
+            # Insert here can be the final submission (dialog closes with no overwrite
+            # conflict) — so both fields must be filled before this click, not after, or
+            # they never make it in for files that don't hit an overwrite. Brightspace now
+            # requires both — leaving Alternate Text blank fails validation with "Specify a
+            # text alternative for non-decorative items", which leaves this dialog open and
+            # its backdrop shim blocking every click after it (including Save and Close).
+            # D2L ignores synthetic input/change events on these fields (Lit property
+            # observers only react to real DOM keyboard events), so each must be set via
             # a real click + Playwright keyboard.type(), not JS value-setter + dispatchEvent
             # — and the type must fully land (verified by reading the value back) before
             # Insert is clicked, or a slow/laggy render can submit the old value.
-            _JS_FIND_ZK_VISIBLE = """() => {
-                const el = document.querySelector('input.rs_skip.d2l-edit-legacy[type="text"]');
-                return !!(el && el.offsetParent !== null);
+            #
+            # Fields are located by their <label for="..."> text ("Link Text", "Alternate
+            # Text"), not a hard-coded id — both fields share the exact same class/type, so
+            # an id-less selector matches both and silently fills only the first (this was
+            # the actual bug: link text got set, alt text never did). Label text is what a
+            # person reads and stays stable even if Brightspace's generated ids shift.
+            _JS_RESOLVE_FIELD = """(labelText) => {
+                for (const label of document.querySelectorAll('label')) {
+                    if (label.textContent.trim() === labelText) {
+                        const id = label.getAttribute('for');
+                        const el = id ? document.getElementById(id) : null;
+                        if (!el) return null;
+                        return { id, visible: el.offsetParent !== null, value: el.value };
+                    }
+                }
+                return null;
             }"""
-            _JS_READ_ZK = """() => {
-                const el = document.querySelector('input.rs_skip.d2l-edit-legacy[type="text"]');
-                return el ? el.value : null;
-            }"""
+
+            async def _fill_labeled_field(frame, label_text: str, value: str) -> bool:
+                try:
+                    info = await frame.evaluate(_JS_RESOLVE_FIELD, label_text)
+                except Exception:
+                    return False
+                if not info or not info.get("visible") or not info.get("id"):
+                    return False
+                loc = frame.locator(f'#{info["id"]}')
+                await loc.click()
+                await loc.press("Control+A")
+                await page.keyboard.type(value, delay=20)
+                await page.wait_for_timeout(200)
+                after = await frame.evaluate(_JS_RESOLVE_FIELD, label_text)
+                return bool(after and after.get("value") == value)
+
             _JS_CLICK_INSERT_ON_ERROR = """() => {
                 const footer = document.querySelector('.d2l-dialog-footer');
                 if (!footer) return false;
@@ -833,26 +861,23 @@ class UnitCollector:
                 return false;
             }"""
             corrected = file_item.get("corrected_name")
-            display_name = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", corrected) if corrected else ""
+            raw_name = corrected or file_item["filename"]
+            display_name = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", raw_name)
             clicked_insert_on_error = False
             filled_before_error_click = False
             for _ in range(10):
                 await page.wait_for_timeout(500)
 
-                if display_name and not filled_before_error_click:
+                if not filled_before_error_click:
                     for frame in page.frames:
                         if frame == page.main_frame:
                             continue
                         try:
-                            if await frame.evaluate(_JS_FIND_ZK_VISIBLE):
-                                loc = frame.locator('input.rs_skip.d2l-edit-legacy[type="text"]').first
-                                await loc.click()
-                                await loc.press("Control+A")
-                                await page.keyboard.type(display_name, delay=20)
-                                await page.wait_for_timeout(200)
-                                if await frame.evaluate(_JS_READ_ZK) == display_name:
-                                    filled_before_error_click = True
-                                    self.log(f"  ✓ Set link text: {display_name}", "dim")
+                            link_ok = await _fill_labeled_field(frame, "Link Text", display_name)
+                            alt_ok = await _fill_labeled_field(frame, "Alternate Text", display_name)
+                            if link_ok and alt_ok:
+                                filled_before_error_click = True
+                                self.log(f"  ✓ Set link text + alt text: {display_name}", "dim")
                                 break
                         except Exception:
                             pass
@@ -917,25 +942,21 @@ class UnitCollector:
                     continue
                 break
 
-            # Step 5c: Fill the link-text field with the corrected name, if it wasn't
-            # already filled in Step 5a (this field only renders on the overwrite path
-            # once 5a/5b have resolved). Same real-keystroke approach as 5a — synthetic
-            # events don't commit for this field.
-            if display_name and not filled_before_error_click:
+            # Step 5c: Fill Link Text + Alternate Text if they weren't already filled in
+            # Step 5a (these fields only render on the overwrite path once 5a/5b have
+            # resolved). Same real-keystroke approach as 5a — synthetic events don't
+            # commit for these fields.
+            if not filled_before_error_click:
                 filled = False
                 for _ in range(10):
                     for frame in page.frames:
                         if frame == page.main_frame:
                             continue
                         try:
-                            if await frame.evaluate(_JS_FIND_ZK_VISIBLE):
-                                loc = frame.locator('input.rs_skip.d2l-edit-legacy[type="text"]').first
-                                await loc.click()
-                                await loc.press("Control+A")
-                                await page.keyboard.type(display_name, delay=20)
-                                await page.wait_for_timeout(200)
-                                if await frame.evaluate(_JS_READ_ZK) == display_name:
-                                    filled = True
+                            link_ok = await _fill_labeled_field(frame, "Link Text", display_name)
+                            alt_ok = await _fill_labeled_field(frame, "Alternate Text", display_name)
+                            if link_ok and alt_ok:
+                                filled = True
                                 break
                         except Exception:
                             pass
@@ -943,9 +964,9 @@ class UnitCollector:
                         break
                     await page.wait_for_timeout(400)
                 if filled:
-                    self.log(f"  ✓ Set link text: {display_name}", "dim")
+                    self.log(f"  ✓ Set link text + alt text: {display_name}", "dim")
                 else:
-                    self.log(f"  ⚠ Link-text field not found — link text left as default", "dim")
+                    self.log(f"  ⚠ Link/alt text fields not found — left as default", "dim")
 
             # Step 6: Wait for "Insert" button (appears after upload completes) and click it
             _JS_CLICK_INSERT = """() => {
