@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from playwright.async_api import Page
+from playwright.async_api import BrowserContext, Page
 
 
 
@@ -1164,12 +1164,31 @@ class UnitCollector:
 
     # ── Main run ──────────────────────────────────────────────────────────────
 
-    async def run(self) -> None:
+    async def run(self, context: Optional[BrowserContext] = None, page: Optional[Page] = None) -> bool:
+        """Run this unit. Returns True on a normal finish, False for the two
+        known dead-ends (no target page, no topics found).
+
+        If context/page are omitted, launches and owns its own browser exactly
+        as before: logs in, and — on every non-exception exit — waits for the
+        human to manually close that browser window before returning (that
+        pause is deliberate single-run review UX, see the hang loops below).
+
+        If context/page ARE supplied, this call is a participant in someone
+        else's browser session: it skips launching, logging in, the
+        wait-for-close pauses, and closing the browser/stopping Playwright —
+        the caller owns all of that, once, for as many run() calls as it makes.
+        """
         from browser import launch_browser, wait_for_login
 
-        p, browser, context, page = await launch_browser()
+        external = context is not None and page is not None
+        if external:
+            p = None
+            browser = None
+        else:
+            p, browser, context, page = await launch_browser()
         try:
-            await wait_for_login(page, context, self.bs_username or None, self.bs_password or None, self.sso_email or None, self.sso_password or None)
+            if not external:
+                await wait_for_login(page, context, self.bs_username or None, self.bs_password or None, self.sso_email or None, self.sso_password or None)
             self.log("─" * 52, "dim")
             self.log(f"Navigating to unit: {self.unit_url}", "info")
 
@@ -1200,9 +1219,10 @@ class UnitCollector:
                     )
                     if self._on_complete:
                         self._on_complete()
-                    while browser.is_connected():
-                        await asyncio.sleep(0.5)
-                    return
+                    if not external:
+                        while browser.is_connected():
+                            await asyncio.sleep(0.5)
+                    return False
 
             topics = await self._scrape_topics(page)
             # Never collect the target page itself
@@ -1212,9 +1232,10 @@ class UnitCollector:
                 self.log("✗ No topics found — nothing to collect", "error")
                 if self._on_complete:
                     self._on_complete()
-                while browser.is_connected():
-                    await asyncio.sleep(0.5)
-                return
+                if not external:
+                    while browser.is_connected():
+                        await asyncio.sleep(0.5)
+                return False
 
             await self._build_name_matcher()
 
@@ -1298,17 +1319,21 @@ class UnitCollector:
             if self._on_complete:
                 self._on_complete()
 
-            while browser.is_connected():
-                await asyncio.sleep(0.5)
+            if not external:
+                while browser.is_connected():
+                    await asyncio.sleep(0.5)
+
+            return True
 
         except Exception:
             if self._on_complete:
                 self._on_complete()
             raise
         finally:
-            if browser.is_connected():
-                await browser.close()
-            await p.stop()
+            if not external:
+                if browser.is_connected():
+                    await browser.close()
+                await p.stop()
 
 
 async def run(
@@ -1330,8 +1355,10 @@ async def run(
     moodle_url: str = "",
     moodle_username: str = "",
     moodle_password: str = "",
-) -> None:
-    await UnitCollector(
+    context: Optional[BrowserContext] = None,
+    page: Optional[Page] = None,
+) -> bool:
+    return await UnitCollector(
         unit_url=unit_url,
         target_url=target_url,
         theme_name=theme_name,
@@ -1350,4 +1377,4 @@ async def run(
         moodle_url=moodle_url,
         moodle_username=moodle_username,
         moodle_password=moodle_password,
-    ).run()
+    ).run(context=context, page=page)
