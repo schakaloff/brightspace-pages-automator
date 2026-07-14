@@ -24,14 +24,14 @@ and `target_page_creator.py` stay unchanged.
   and stop → build unit URL from `module_id` → call existing
   `unit_collector.run()` unchanged (`target_url=""`, `auto_create_target=True`)
   → on success, ask `confirm_fn` before continuing (unless auto-continue is
-  on) → on failure, log it, add `module_id` to an in-memory skip-set for this
-  run only, continue to next unit. Stop after 10 units (safety cap).
+  on) → **on failure, log the failed module's title and `module_id`, stop the
+  whole multi-unit run immediately** (no skip, no continue — user decides
+  what to do next). Stop after 10 units (safety cap).
 
 ## Resume behavior
 No progress file. `select_next_unit`'s "already has a Combined page" check
-reads live Brightspace state, so re-running after hitting the cap (or a
-crash) naturally skips finished units and picks up where it left off. The
-in-memory failure skip-set only prevents retry-looping within one run.
+reads live Brightspace state, so re-running after a stop (cap hit, failure,
+or crash) naturally skips finished units and picks up where it left off.
 
 ## GUI wiring (`collector_panel.py`)
 - New checkbox: "Continue to next unit automatically" — enables multi-unit
