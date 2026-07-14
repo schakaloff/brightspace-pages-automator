@@ -88,3 +88,72 @@ async def fetch_toc(page: Page, course_id: str, log: Optional[Callable] = None) 
         return []
 
     return _flatten_modules(result["modules"])
+
+
+async def run_multi(
+    page: Page,
+    course_id: str,
+    base_url: str,
+    run_unit: Callable[[str], Awaitable[bool]],
+    confirm_fn: Callable[[str], bool],
+    log: Optional[Callable] = None,
+    max_units: int = 10,
+    combined_suffix: str = "— Combined",
+    fetch_toc_fn: Optional[Callable] = None,
+) -> dict:
+    """Loop: fetch the course TOC, pick the next unit, run it, ask to
+    continue. Stops immediately on any unit failure (v1: no skip-and-continue
+    — the failed module is reported so the user can decide what to do next).
+    No progress file: re-calling this after any stop naturally resumes,
+    because select_next_unit re-derives "next" from live Brightspace state.
+    """
+    def _log(msg: str, level: str = "info"):
+        if log:
+            log(msg, level)
+
+    fetch = fetch_toc_fn or fetch_toc
+    processed: list = []
+    failed_unit = None
+    stopped_reason = "complete"
+
+    while True:
+        modules = await fetch(page, course_id)
+        next_unit = select_next_unit(modules, combined_suffix)
+
+        if next_unit is None:
+            stopped_reason = "complete"
+            _log("✓ No more units to process — course complete", "success")
+            break
+
+        unit_url = f"{base_url}/d2l/le/lessons/{course_id}/units/{next_unit['module_id']}"
+        _log(f"─── Next unit: {next_unit['title']} ───", "info")
+
+        try:
+            ok = await run_unit(unit_url)
+        except Exception as e:
+            ok = False
+            _log(f"✗ Unit '{next_unit['title']}' raised an error: {e}", "error")
+
+        if not ok:
+            failed_unit = next_unit
+            stopped_reason = "failure"
+            _log(
+                f"✗ Stopped: unit '{next_unit['title']}' "
+                f"(module {next_unit['module_id']}) failed", "error",
+            )
+            break
+
+        processed.append(next_unit)
+        _log(f"✓ Unit '{next_unit['title']}' done ({len(processed)}/{max_units})", "success")
+
+        if len(processed) >= max_units:
+            stopped_reason = "cap"
+            _log(f"⚠ Reached the {max_units}-unit safety cap — stopping", "warning")
+            break
+
+        if not confirm_fn(f"Unit '{next_unit['title']}' done. Continue to the next unit?"):
+            stopped_reason = "declined"
+            _log("Stopped — you chose not to continue", "info")
+            break
+
+    return {"processed": processed, "stopped_reason": stopped_reason, "failed_unit": failed_unit}

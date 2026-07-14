@@ -128,3 +128,124 @@ def test_fetch_toc_returns_empty_list_on_exception():
         return await fetch_toc(_RaisingPage(), "8520")
 
     assert asyncio.run(_run()) == []
+
+
+from multi_unit_selector import run_multi
+
+
+def _make_fetch_toc_fn(snapshots):
+    """Returns a fetch_toc_fn that yields each snapshot in order, then repeats the last one."""
+    calls = {"n": 0}
+
+    async def _fetch(page, course_id):
+        i = min(calls["n"], len(snapshots) - 1)
+        calls["n"] += 1
+        return snapshots[i]
+
+    return _fetch
+
+
+def test_run_multi_stops_when_course_complete():
+    snapshots = [[]]  # no modules at all -> select_next_unit is always None
+    fetch_toc_fn = _make_fetch_toc_fn(snapshots)
+
+    async def run_unit(unit_url):
+        raise AssertionError("should never be called")
+
+    async def _run():
+        return await run_multi(
+            page=None, course_id="8520", base_url="https://learn.okanagancollege.ca",
+            run_unit=run_unit, confirm_fn=lambda msg: True,
+            fetch_toc_fn=fetch_toc_fn,
+        )
+
+    summary = asyncio.run(_run())
+    assert summary == {"processed": [], "stopped_reason": "complete", "failed_unit": None}
+
+
+def test_run_multi_stops_on_unit_failure_and_reports_it():
+    mod = {"module_id": 2, "title": "Topic 1", "sort_order": 4,
+           "topic_count": 1, "topic_titles": ["Welcome"]}
+    fetch_toc_fn = _make_fetch_toc_fn([[mod]])  # never becomes "combined" -> would loop forever if not stopped
+
+    async def run_unit(unit_url):
+        return False
+
+    async def _run():
+        return await run_multi(
+            page=None, course_id="8520", base_url="https://learn.okanagancollege.ca",
+            run_unit=run_unit, confirm_fn=lambda msg: True,
+            fetch_toc_fn=fetch_toc_fn,
+        )
+
+    summary = asyncio.run(_run())
+    assert summary["stopped_reason"] == "failure"
+    assert summary["failed_unit"]["module_id"] == 2
+    assert summary["processed"] == []
+
+
+def test_run_multi_stops_when_run_unit_raises():
+    mod = {"module_id": 2, "title": "Topic 1", "sort_order": 4,
+           "topic_count": 1, "topic_titles": ["Welcome"]}
+    fetch_toc_fn = _make_fetch_toc_fn([[mod]])
+
+    async def run_unit(unit_url):
+        raise RuntimeError("browser crashed")
+
+    async def _run():
+        return await run_multi(
+            page=None, course_id="8520", base_url="https://learn.okanagancollege.ca",
+            run_unit=run_unit, confirm_fn=lambda msg: True,
+            fetch_toc_fn=fetch_toc_fn,
+        )
+
+    summary = asyncio.run(_run())
+    assert summary["stopped_reason"] == "failure"
+    assert summary["failed_unit"]["module_id"] == 2
+
+
+def test_run_multi_stops_when_user_declines_to_continue():
+    mod1 = {"module_id": 1, "title": "Topic 1", "sort_order": 4,
+            "topic_count": 1, "topic_titles": ["Welcome"]}
+    mod1_done = {**mod1, "topic_titles": ["Welcome", "Topic 1 — Combined"]}
+    mod2 = {"module_id": 2, "title": "Topic 2", "sort_order": 58,
+            "topic_count": 1, "topic_titles": ["Watch This"]}
+    # First fetch sees mod1 + mod2, both undone. After mod1's run_unit
+    # "succeeds", the second fetch reflects mod1 now being combined.
+    fetch_toc_fn = _make_fetch_toc_fn([[mod1, mod2], [mod1_done, mod2]])
+
+    async def run_unit(unit_url):
+        return True
+
+    async def _run():
+        return await run_multi(
+            page=None, course_id="8520", base_url="https://learn.okanagancollege.ca",
+            run_unit=run_unit, confirm_fn=lambda msg: False,
+            fetch_toc_fn=fetch_toc_fn,
+        )
+
+    summary = asyncio.run(_run())
+    assert summary["stopped_reason"] == "declined"
+    assert [m["module_id"] for m in summary["processed"]] == [1]
+
+
+def test_run_multi_stops_at_safety_cap():
+    # A single unit that is never marked "combined" between fetches, so
+    # select_next_unit would keep re-selecting it forever without the cap.
+    mod = {"module_id": 1, "title": "Topic 1", "sort_order": 4,
+           "topic_count": 1, "topic_titles": ["Welcome"]}
+    fetch_toc_fn = _make_fetch_toc_fn([[mod]])
+
+    async def run_unit(unit_url):
+        return True
+
+    async def _run():
+        return await run_multi(
+            page=None, course_id="8520", base_url="https://learn.okanagancollege.ca",
+            run_unit=run_unit, confirm_fn=lambda msg: True,
+            fetch_toc_fn=fetch_toc_fn, max_units=3,
+        )
+
+    summary = asyncio.run(_run())
+    assert summary["stopped_reason"] == "cap"
+    assert len(summary["processed"]) == 3
