@@ -10,7 +10,9 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, QTimer
 
 from gui_log import LogWidget
-from panels._shared import _divider, _form_label, _section_header, PAGE_THEMES, _build_theme_swatches
+from panels._shared import (
+    _divider, _form_label, _section_header, PAGE_THEMES, _build_theme_swatches, friendly_error,
+)
 
 
 class RestylePanel(QWidget):
@@ -132,7 +134,10 @@ class RestylePanel(QWidget):
                     sso_password=self._mw.sso_password,
                 ))
             except Exception as e:
-                q.put((f"Error: {e}", "error"))
+                msg, detail = friendly_error(e)
+                q.put((f"Error: {msg}", "error"))
+                if detail != msg:
+                    q.put((detail, "detail"))
             finally:
                 on_done()
 

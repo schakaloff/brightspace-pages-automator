@@ -1,5 +1,5 @@
 # src/gui_log.py
-from PySide6.QtWidgets import QTextEdit, QLabel
+from PySide6.QtWidgets import QTextEdit, QLabel, QPushButton
 from PySide6.QtGui import QTextCharFormat, QColor, QFont, QFontDatabase, QKeySequence
 from PySide6.QtCore import Qt, QTimer
 
@@ -14,6 +14,7 @@ _TAG_KEYS = {
     "warning": "LOG_WARNING",
     "step":    "LOG_STEP",
     "dim":     "LOG_DIM",
+    "detail":  "LOG_DIM",
 }
 
 
@@ -23,8 +24,11 @@ class LogWidget(QTextEdit):
         self.setReadOnly(True)
         self._setup_font()
         self._at_bottom = True
+        self._mode = "simple"
+        self._entries: list[tuple[str, str]] = []
         self.verticalScrollBar().valueChanged.connect(self._track_scroll)
         self._setup_zoom_badge()
+        self._setup_mode_toggle()
 
     def _setup_font(self):
         available = QFontDatabase.families()
@@ -47,12 +51,35 @@ class LogWidget(QTextEdit):
             "padding:2px 6px;border-radius:3px;font-size:10px;"
         )
 
+    def _setup_mode_toggle(self):
+        self._mode_btn = QPushButton("Details", self)
+        self._mode_btn.setCheckable(True)
+        self._mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mode_btn.setFixedHeight(20)
+        self._apply_mode_btn_style()
+        self._mode_btn.toggled.connect(self._toggle_mode)
+
+    def _apply_mode_btn_style(self):
+        c = gui_styles.current
+        self._mode_btn.setStyleSheet(
+            f"QPushButton {{color:{c['TEXT_SEC']};background:{c['PANEL']}CC;"
+            "padding:2px 8px;border-radius:3px;font-size:10px;border:none;}"
+            f"QPushButton:checked {{color:{c['TEXT_PRI']};background:{c['PANEL']}EE;}}"
+        )
+
+    def _toggle_mode(self, checked: bool):
+        self._mode = "details" if checked else "simple"
+        self._mode_btn.setText("Simple" if checked else "Details")
+        self._rerender()
+
     def refresh_theme(self):
         self._apply_zoom_badge_style()
+        self._apply_mode_btn_style()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._reposition_badge()
+        self._reposition_mode_btn()
 
     def _reposition_badge(self):
         self._zoom_badge.adjustSize()
@@ -60,6 +87,10 @@ class LogWidget(QTextEdit):
             self.width() - self._zoom_badge.width() - 10,
             self.height() - self._zoom_badge.height() - 10,
         )
+
+    def _reposition_mode_btn(self):
+        self._mode_btn.adjustSize()
+        self._mode_btn.move(10, self.height() - self._mode_btn.height() - 10)
 
     def _show_zoom_badge(self):
         self._zoom_badge.setText(f"{self._zoom_level}%")
@@ -96,16 +127,29 @@ class LogWidget(QTextEdit):
     def _track_scroll(self, value):
         self._at_bottom = value >= self.verticalScrollBar().maximum() - 5
 
-    def append_log(self, text: str, tag: str = "info"):
+    def _insert_line(self, text: str, tag: str):
         fmt = QTextCharFormat()
         key = _TAG_KEYS.get(tag, "LOG_INFO")
         fmt.setForeground(QColor(gui_styles.current[key]))
         cursor = self.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         cursor.insertText(text + "\n", fmt)
-        if self._at_bottom:
-            self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
+
+    def append_log(self, text: str, tag: str = "info"):
+        self._entries.append((text, tag))
+        if tag != "detail" or self._mode == "details":
+            self._insert_line(text, tag)
+            if self._at_bottom:
+                self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
+
+    def _rerender(self):
+        self.clear()
+        for text, tag in self._entries:
+            if tag != "detail" or self._mode == "details":
+                self._insert_line(text, tag)
+        self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
 
     def clear_log(self):
         self.clear()
+        self._entries.clear()
         self._at_bottom = True

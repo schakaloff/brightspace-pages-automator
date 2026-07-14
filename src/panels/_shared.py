@@ -1,5 +1,28 @@
+import re
+
 from PySide6.QtWidgets import QFrame, QLabel, QWidget, QHBoxLayout, QVBoxLayout, QPushButton
 from PySide6.QtCore import Qt
+
+
+_ERROR_PATTERNS = [
+    (r"Timeout \d+ms exceeded|TimeoutError",
+     "The website took too long to respond. Check your connection and try again."),
+    (r"NoneType.*has no attribute|Locator not found|waiting for .* to be visible",
+     "Couldn't find an expected button or field on the page — Brightspace may have "
+     "changed, or the page didn't finish loading. Try again."),
+    (r"net::ERR_|ConnectionError|ClientConnectorError|Name or service not known",
+     "Couldn't reach the server — check your internet connection."),
+]
+
+
+def friendly_error(e: Exception) -> tuple[str, str]:
+    """Return (plain_message, raw_detail). raw_detail is the full str(e)."""
+    raw = str(e).strip()
+    first_line = raw.splitlines()[0] if raw else "Something went wrong."
+    for pattern, friendly in _ERROR_PATTERNS:
+        if re.search(pattern, raw, re.IGNORECASE):
+            return friendly, raw
+    return first_line, raw
 
 
 def _divider() -> QFrame:

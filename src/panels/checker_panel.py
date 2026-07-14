@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QTimer
 
 from gui_log import LogWidget
-from panels._shared import _divider, _form_label, _section_header
+from panels._shared import _divider, _form_label, _section_header, friendly_error
 
 
 class CheckerPanel(QWidget):
@@ -260,7 +260,10 @@ class CheckerPanel(QWidget):
                     checker.h5p_phase_b_only = True
                 asyncio.run(checker.run())
             except Exception as e:
-                q.put((f"Error: {e}", "error"))
+                msg, detail = friendly_error(e)
+                q.put((f"Error: {msg}", "error"))
+                if detail != msg:
+                    q.put((detail, "detail"))
             finally:
                 on_done()
 

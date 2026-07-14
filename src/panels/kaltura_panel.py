@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QTimer
 
 from gui_log import LogWidget
-from panels._shared import _form_label, _section_header
+from panels._shared import _form_label, _section_header, friendly_error
 
 
 class KalturaPanel(QWidget):
@@ -257,7 +257,10 @@ class KalturaPanel(QWidget):
                 ))
                 q.put(("__LOGIN_DONE__", None))
             except Exception as e:
-                q.put((f"Login error: {e}", "error"))
+                msg, detail = friendly_error(e)
+                q.put((f"Login error: {msg}", "error"))
+                if detail != msg:
+                    q.put((detail, "detail"))
                 q.put(("__LOGIN_DONE__", None))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -283,7 +286,10 @@ class KalturaPanel(QWidget):
                 ))
                 q.put(("__SCAN_DONE__", entries))
             except Exception as e:
-                q.put((f"Scan error: {e}", "error"))
+                msg, detail = friendly_error(e)
+                q.put((f"Scan error: {msg}", "error"))
+                if detail != msg:
+                    q.put((detail, "detail"))
                 q.put(("__SCAN_FAIL__", None))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -315,7 +321,10 @@ class KalturaPanel(QWidget):
                 ))
                 q.put(("__MODULES_DONE__", modules))
             except Exception as e:
-                q.put((f"Fetch modules error: {e}", "error"))
+                msg, detail = friendly_error(e)
+                q.put((f"Fetch modules error: {msg}", "error"))
+                if detail != msg:
+                    q.put((detail, "detail"))
                 q.put(("__MODULES_FAIL__", None))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -353,7 +362,10 @@ class KalturaPanel(QWidget):
                 ))
                 q.put(("__CAT_DONE__", None))
             except Exception as e:
-                q.put((f"Error: {e}", "error"))
+                msg, detail = friendly_error(e)
+                q.put((f"Error: {msg}", "error"))
+                if detail != msg:
+                    q.put((detail, "detail"))
                 q.put(("__CAT_DONE__", None))
 
         threading.Thread(target=worker, daemon=True).start()

@@ -21,7 +21,9 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QTimer
 
 from gui_log import LogWidget
-from panels._shared import _divider, _form_label, _section_header, PAGE_THEMES, _build_theme_swatches
+from panels._shared import (
+    _divider, _form_label, _section_header, PAGE_THEMES, _build_theme_swatches, friendly_error,
+)
 
 
 class CollectorPanel(QWidget):
@@ -284,7 +286,10 @@ class CollectorPanel(QWidget):
                         **shared_kwargs,
                     ))
             except Exception as e:
-                q.put((f"Error: {e}", "error"))
+                msg, detail = friendly_error(e)
+                q.put((f"Error: {msg}", "error"))
+                if detail != msg:
+                    q.put((detail, "detail"))
             finally:
                 on_done()
 
@@ -318,7 +323,10 @@ class CollectorPanel(QWidget):
                         **shared_kwargs,
                     )
                 except Exception as e:
-                    log(f"✗ Unit failed: {e}", "error")
+                    msg, detail = friendly_error(e)
+                    log(f"✗ Unit failed: {msg}", "error")
+                    if detail != msg:
+                        log(detail, "detail")
                     return False
 
             def confirm_fn(message: str) -> bool:

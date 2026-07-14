@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, QTimer
 
 from gui_log import LogWidget
-from panels._shared import _form_label, _section_header
+from panels._shared import _form_label, _section_header, friendly_error
 
 
 class H5PPanel(QWidget):
@@ -158,7 +158,10 @@ class H5PPanel(QWidget):
                     moodle_password=self._mw.moodle_password,
                 ))
             except Exception as e:
-                q.put((f"Error: {e}", "error"))
+                msg, detail = friendly_error(e)
+                q.put((f"Error: {msg}", "error"))
+                if detail != msg:
+                    q.put((detail, "detail"))
             finally:
                 on_done()
 
