@@ -84,6 +84,25 @@ class CollectorPanel(QWidget):
         layout.addWidget(self._auto_create_chk)
         layout.addSpacing(8)
 
+        self._multi_unit_chk = QCheckBox("Continue to next unit automatically")
+        self._multi_unit_chk.setToolTip(
+            "After this unit finishes, find the next unit in the course\n"
+            "(skipping empty units and units that already have a combined\n"
+            "page) and run it too. You'll be asked to confirm before each\n"
+            "additional unit unless “Don't ask before each unit” is also checked."
+        )
+        self._multi_unit_chk.toggled.connect(self._on_multi_unit_toggle)
+        layout.addWidget(self._multi_unit_chk)
+
+        self._auto_continue_chk = QCheckBox("Don't ask before each unit")
+        self._auto_continue_chk.setEnabled(False)
+        self._auto_continue_chk.setToolTip(
+            "Runs straight through additional units without pausing to\n"
+            "confirm. Only used when “Continue to next unit automatically” is on."
+        )
+        layout.addWidget(self._auto_continue_chk)
+        layout.addSpacing(8)
+
         layout.addWidget(_form_label("TARGET PAGE URL  (optional — leave blank to auto-create)"))
         layout.addSpacing(4)
         self._target_entry = QLineEdit()
@@ -168,6 +187,11 @@ class CollectorPanel(QWidget):
         else:
             self._target_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/le/lessons/…/topics/…")
             self._target_hint.setText("Auto-create is off — paste the URL of a blank Brightspace page to write into.")
+
+    def _on_multi_unit_toggle(self, checked: bool):
+        self._auto_continue_chk.setEnabled(checked)
+        if not checked:
+            self._auto_continue_chk.setChecked(False)
 
     def refresh_carryover(self):
         """Re-read Checker's saved URLs (call when this tab becomes visible)."""

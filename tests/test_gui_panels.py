@@ -99,3 +99,25 @@ def test_restyle_panel_builds(qtbot):
     mw = MagicMock(); mw.chromium_ready = False; mw.load_config.return_value = {}
     panel = RestylePanel(mw); qtbot.addWidget(panel)
     assert panel._run_btn.text() == "Start"
+
+
+def test_collector_panel_has_multi_unit_checkboxes(qtbot):
+    from unittest.mock import MagicMock
+    from gui_panels import CollectorPanel
+    mw = MagicMock(); mw.chromium_ready = False; mw.load_config.return_value = {}
+    panel = CollectorPanel(mw); qtbot.addWidget(panel)
+    assert panel._multi_unit_chk.isChecked() is False
+    assert panel._auto_continue_chk.isChecked() is False
+    assert panel._auto_continue_chk.isEnabled() is False
+
+
+def test_multi_unit_toggle_enables_auto_continue_checkbox(qtbot):
+    from unittest.mock import MagicMock
+    from gui_panels import CollectorPanel
+    mw = MagicMock(); mw.chromium_ready = False; mw.load_config.return_value = {}
+    panel = CollectorPanel(mw); qtbot.addWidget(panel)
+    panel._multi_unit_chk.setChecked(True)
+    assert panel._auto_continue_chk.isEnabled() is True
+    panel._multi_unit_chk.setChecked(False)
+    assert panel._auto_continue_chk.isEnabled() is False
+    assert panel._auto_continue_chk.isChecked() is False
