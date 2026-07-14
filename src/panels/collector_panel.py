@@ -307,15 +307,16 @@ class CollectorPanel(QWidget):
 
             async def run_unit(unit_url: str) -> bool:
                 try:
-                    await collector_run(
+                    return await collector_run(
                         unit_url=unit_url,
                         target_url="",
                         auto_create_target=True,
                         log=log,
                         on_complete=lambda: None,
+                        context=context,
+                        page=page,
                         **shared_kwargs,
                     )
-                    return True
                 except Exception as e:
                     log(f"✗ Unit failed: {e}", "error")
                     return False
