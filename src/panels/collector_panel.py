@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QSpinBox, QCheckBox,
 )
-from PySide6.QtCore import Signal, QTimer
+from PySide6.QtCore import Qt, Signal, QTimer
 
 from gui_log import LogWidget
 from panels._shared import _divider, _form_label, _section_header, PAGE_THEMES, _build_theme_swatches
@@ -280,6 +280,21 @@ class CollectorPanel(QWidget):
                 elif msg == "__SUCCESS__":
                     self._continue_btn.show()
                     self.step_success.emit()
+                elif msg == "__COL_CONFIRM__":
+                    conf_msg, result_ref, event = tag
+                    from PySide6.QtWidgets import QMessageBox
+                    dlg = QMessageBox(self)
+                    dlg.setWindowTitle("Continue to next unit?")
+                    dlg.setText(conf_msg)
+                    dlg.setStandardButtons(
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    )
+                    dlg.setDefaultButton(QMessageBox.StandardButton.No)
+                    dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+                    dlg.raise_()
+                    dlg.activateWindow()
+                    result_ref[0] = dlg.exec() == QMessageBox.StandardButton.Yes
+                    event.set()
                 else:
                     self._log.append_log(msg, tag)
         except queue.Empty:

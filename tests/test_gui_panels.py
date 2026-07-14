@@ -121,3 +121,23 @@ def test_multi_unit_toggle_enables_auto_continue_checkbox(qtbot):
     panel._multi_unit_chk.setChecked(False)
     assert panel._auto_continue_chk.isEnabled() is False
     assert panel._auto_continue_chk.isChecked() is False
+
+
+def test_col_confirm_message_shows_dialog_and_sets_event(qtbot, monkeypatch):
+    import threading
+    from unittest.mock import MagicMock
+    from gui_panels import CollectorPanel
+    from PySide6.QtWidgets import QMessageBox
+
+    mw = MagicMock(); mw.chromium_ready = False; mw.load_config.return_value = {}
+    panel = CollectorPanel(mw); qtbot.addWidget(panel)
+
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.StandardButton.Yes)
+
+    result_ref = [False]
+    event = threading.Event()
+    panel._log_queue.put(("__COL_CONFIRM__", ("Continue to next unit?", result_ref, event)))
+    panel._poll_log()
+
+    assert event.is_set()
+    assert result_ref[0] is True
