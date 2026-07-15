@@ -39,22 +39,37 @@ class KalturaCategorizer:
                 context = await browser.new_context(storage_state=storage)
                 page = await context.new_page()
 
+                # Normalise common Moodle URL variants (e.g. enrol/index.php) to course/view.php
+                _id_match = re.search(r"[?&]id=(\d+)", moodle_course_url)
+                if _id_match and "course/view.php" not in moodle_course_url:
+                    _base = moodle_course_url.split("/enrol")[0].split("/course")[0]
+                    moodle_course_url = f"{_base}/course/view.php?id={_id_match.group(1)}"
+                    log(f"Using Moodle course page: {moodle_course_url}")
+
                 log(f"Navigating to {moodle_course_url}")
                 await page.goto(moodle_course_url, wait_until="networkidle", timeout=30000)
                 log(f"Landed on: {page.url}")
+
+                # Retry if Moodle bounced us to the enrolment page (common on fresh login)
+                for _ in range(4):
+                    if "/enrol/" not in page.url:
+                        break
+                    log("Redirected to enrolment page — retrying course page", "dim")
+                    await page.goto(moodle_course_url, wait_until="networkidle", timeout=30000)
+                    log(f"Landed on: {page.url}")
 
                 if "mymoodle.okanagan.bc.ca" not in page.url:
                     log(f"Not on Moodle — got redirected to {page.url[:80]} — session may have expired. Use 'Login to Moodle' first.", "error")
                     return []
 
-                # Collect kalvidres links AND mod/page links (pages may embed Kaltura)
+                # Collect kalvidres links, mod/page links, and mod/book links (pages/books may embed Kaltura)
                 link_data = await page.evaluate("""() => {
                     const map = {};
                     document.querySelectorAll('li.section, li.section.main').forEach(section => {
                         const heading = section.querySelector('.sectionname, h3, h4');
                         const sectionName = heading ? heading.textContent.trim() : '(unnamed section)';
                         section.querySelectorAll(
-                            'a[href*="mod/kalvidres/view.php"], a[href*="mod/page/view.php"]'
+                            'a[href*="mod/kalvidres/view.php"], a[href*="mod/page/view.php"], a[href*="mod/book/view.php"]'
                         ).forEach(a => {
                             if (!map[a.href]) map[a.href] = sectionName;
                         });
@@ -63,12 +78,66 @@ class KalturaCategorizer:
                 }""")
 
                 all_links = list(link_data.keys())
-                log(f"Found {len(all_links)} candidate link(s) on course page (kalvidres + pages)")
+                log(f"Found {len(all_links)} candidate link(s) on course page (kalvidres + pages + books)")
 
                 if not all_links:
                     title = await page.title()
                     log(f"Page title: {title!r} — check URL is a Moodle course page", "warning")
                     return []
+
+                # entry_id dedupe (same video can appear in multiple book chapters/pages)
+                seen_entries = set()
+                # chapter URL dedupe (a book's own TOC can list the chapter we're already on)
+                seen_chapter_urls = set()
+
+                async def scan_embedded_entries():
+                    """Scan the current page's body HTML for embedded Kaltura entryIds."""
+                    return await page.evaluate("""() => {
+                        const found = [];
+                        // iframe src pattern: entryId=xxx or entryid/xxx
+                        document.querySelectorAll('iframe[src*="kaltura"]').forEach(f => {
+                            const m = f.src.match(/entryid[%2F\/=]+([\w_]+)/i);
+                            if (m) found.push(m[1]);
+                        });
+                        // script-based: entryId: 'xxx' or entryId: "xxx"
+                        document.querySelectorAll('script').forEach(s => {
+                            const matches = [...s.textContent.matchAll(/entryId\s*[=:]\s*['"]([^'"]+)['"]/gi)];
+                            matches.forEach(m => found.push(m[1]));
+                        });
+                        return [...new Set(found)];
+                    }""")
+
+                async def get_page_name():
+                    """Prefer page h1 over browser tab title — tab title includes course prefix."""
+                    page_name = await page.evaluate("""() => {
+                        const h1 = document.querySelector(
+                            '.page-header-headings h1, .activity-name h1, h1.h2, h1'
+                        );
+                        return h1 ? h1.textContent.trim() : '';
+                    }""")
+                    if not page_name:
+                        page_title = await page.title()
+                        page_name = re.sub(r'\s*\|\s*OCmoodle\s*$', '', page_title).strip()
+                        # strip course prefix "COURSE_CODE: " if present
+                        page_name = re.sub(r'^[A-Z0-9_\-]+:\s*', '', page_name).strip()
+                    return page_name
+
+                def record_embeds(embedded, name_base, moodle_url, section_name):
+                    added = 0
+                    for j, entry_id in enumerate(embedded):
+                        if entry_id in seen_entries:
+                            continue
+                        seen_entries.add(entry_id)
+                        added += 1
+                        name = name_base if len(embedded) == 1 else f"{name_base} ({j+1})"
+                        log(f"  → embed entry_id={entry_id}  name={name!r}", "info")
+                        results.append({
+                            "entry_id": entry_id,
+                            "name": name,
+                            "moodle_url": moodle_url,
+                            "section_name": section_name,
+                        })
+                    return added
 
                 for i, link in enumerate(all_links, 1):
                     section_name = link_data[link]
@@ -92,62 +161,59 @@ class KalturaCategorizer:
                             entry_id = m.group(1)
                             title = await page.title()
                             name = re.sub(r'\s*\|\s*OCmoodle\s*$', '', title).strip()
-                            log(f"  → kalvidres entry_id={entry_id}  name={name!r}", "info")
-                            results.append({
-                                "entry_id": entry_id,
-                                "name": name,
-                                "moodle_url": link,
-                                "section_name": section_name,
-                            })
+                            record_embeds([entry_id], name, link, section_name)
 
                         else:
-                            # mod/page — scan body HTML for embedded Kaltura entryIds
-                            embedded = await page.evaluate("""() => {
-                                const found = [];
-                                // iframe src pattern: entryId=xxx or entryid/xxx
-                                document.querySelectorAll('iframe[src*="kaltura"]').forEach(f => {
-                                    const m = f.src.match(/entryid[%2F\/=]+([\w_]+)/i);
-                                    if (m) found.push(m[1]);
-                                });
-                                // script-based: entryId: 'xxx' or entryId: "xxx"
-                                document.querySelectorAll('script').forEach(s => {
-                                    const matches = [...s.textContent.matchAll(/entryId\s*[=:]\s*['"]([^'"]+)['"]/gi)];
-                                    matches.forEach(m => found.push(m[1]));
-                                });
-                                // also check div id="kaltura_player_NNN" — extract entryId from sibling script
-                                document.querySelectorAll('[id^="kaltura_player_"]').forEach(el => {
-                                    // entryId already captured by script scan above
-                                });
-                                return [...new Set(found)];
-                            }""")
+                            # mod/page or mod/book — scan body HTML for embedded Kaltura entryIds
+                            is_book = "mod/book" in link
+                            embedded = await scan_embedded_entries()
+                            page_name = await get_page_name()
 
                             if not embedded:
                                 log(f"  No Kaltura embeds found in page — skipping", "dim")
-                                continue
+                            else:
+                                log(f"  Found {len(embedded)} Kaltura embed(s) in page: {page_name!r}", "info")
+                                record_embeds(embedded, page_name, link, section_name)
 
-                            # Prefer page h1 over browser tab title — tab title includes course prefix
-                            page_name = await page.evaluate("""() => {
-                                const h1 = document.querySelector(
-                                    '.page-header-headings h1, .activity-name h1, h1.h2, h1'
-                                );
-                                return h1 ? h1.textContent.trim() : '';
-                            }""")
-                            if not page_name:
-                                page_title = await page.title()
-                                page_name = re.sub(r'\s*\|\s*OCmoodle\s*$', '', page_title).strip()
-                                # strip course prefix "COURSE_CODE: " if present
-                                page_name = re.sub(r'^[A-Z0-9_\-]+:\s*', '', page_name).strip()
-                            log(f"  Found {len(embedded)} Kaltura embed(s) in page: {page_name!r}", "info")
-
-                            for j, entry_id in enumerate(embedded):
-                                name = page_name if len(embedded) == 1 else f"{page_name} ({j+1})"
-                                log(f"  → page embed entry_id={entry_id}  name={name!r}", "info")
-                                results.append({
-                                    "entry_id": entry_id,
-                                    "name": name,
-                                    "moodle_url": link,
-                                    "section_name": section_name,
-                                })
+                            if is_book:
+                                # Books can have many chapters, each its own URL — scan each too
+                                chapter_urls = await page.evaluate("""() => {
+                                    // Use the resolved a.href property (always absolute), not the raw
+                                    // attribute text — Moodle's book_toc sidebar links are often written
+                                    // as relative hrefs that a CSS attribute selector would miss.
+                                    const anchors = document.querySelectorAll(
+                                        '.book_toc a, a[href*="chapterid"], a[href*="mod/book/view.php"]'
+                                    );
+                                    const urls = [...anchors].map(a => a.href.split('#')[0]).filter(href => {
+                                        let u;
+                                        try { u = new URL(href); } catch (e) { return false; }
+                                        return u.pathname.includes('/mod/book/view.php')
+                                            && u.searchParams.has('chapterid')
+                                            && !u.pathname.includes('/mod/book/tool/')
+                                            && !href.includes('wordimport')
+                                            && !href.includes('export')
+                                            && !href.includes('download');
+                                    });
+                                    return [...new Set(urls)];
+                                }""")
+                                new_chapters = [u for u in chapter_urls if u != link and u not in seen_chapter_urls]
+                                for u in new_chapters:
+                                    seen_chapter_urls.add(u)
+                                if new_chapters:
+                                    log(f"  Book has {len(new_chapters)} more chapter(s) to scan", "dim")
+                                for k, chapter_url in enumerate(new_chapters, 1):
+                                    log(f"  [chapter {k}/{len(new_chapters)}] Visiting {chapter_url}")
+                                    try:
+                                        await page.goto(chapter_url, wait_until="networkidle", timeout=20000)
+                                        chapter_embedded = await scan_embedded_entries()
+                                        if not chapter_embedded:
+                                            continue
+                                        chapter_name = await get_page_name()
+                                        log(f"  Found {len(chapter_embedded)} Kaltura embed(s) in chapter: {chapter_name!r}", "info")
+                                        record_embeds(chapter_embedded, chapter_name, chapter_url, section_name)
+                                    except Exception as e:
+                                        log(f"    Error scanning chapter: {repr(e)} — skipping", "warning")
+                                        continue
 
                     except Exception as e:
                         log(f"  Error: {repr(e)} — skipping", "warning")

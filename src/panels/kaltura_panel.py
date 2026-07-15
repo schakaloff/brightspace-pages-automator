@@ -5,7 +5,7 @@ import threading
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QScrollArea, QCheckBox,
-    QFrame, QGridLayout, QComboBox,
+    QFrame, QGridLayout, QComboBox, QMessageBox,
 )
 from PySide6.QtCore import QTimer
 
@@ -21,6 +21,7 @@ class KalturaPanel(QWidget):
         self._log_queue: queue.Queue = queue.Queue()
         self._checkboxes: list[tuple[QCheckBox, dict]] = []
         self._combos: dict[str, QComboBox] = {}   # section_name → QComboBox
+        self._section_labels: dict[str, QLabel] = {}  # section_name → QLabel (for Needs Review tag)
         self._bs_modules: list[dict] = []          # [{id, title}] cached after fetch
         self._build()
         self._load_saved_links()
@@ -178,6 +179,7 @@ class KalturaPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         self._combos.clear()
+        self._section_labels.clear()
 
         for row, name in enumerate(section_names):
             lbl = QLabel(name)
@@ -188,6 +190,7 @@ class KalturaPanel(QWidget):
             self._mapping_grid.addWidget(lbl, row, 0)
             self._mapping_grid.addWidget(combo, row, 1)
             self._combos[name] = combo
+            self._section_labels[name] = lbl
 
     def _populate_combos(self, modules: list[dict]):
         """Fill QComboBox options from fetched BS module list."""
@@ -210,6 +213,33 @@ class KalturaPanel(QWidget):
             for combo in self._combos.values()
         )
         self._create_btn.setEnabled(all_selected)
+
+    def _maybe_autosuggest(self):
+        """Pre-select high-confidence Brightspace module matches per Moodle section.
+
+        Safe to call after either the scan or the module fetch completes (whichever
+        finishes first — this is a no-op until both are ready). Never overrides a
+        combo the user (or a prior auto-suggest) already set, so it's safe to call
+        more than once (e.g. if modules are re-fetched).
+        """
+        if not self._combos or not self._bs_modules:
+            return
+        from content_matcher import match_sections
+        matches = match_sections(list(self._combos.keys()), self._bs_modules)
+        for name, (module, score) in matches.items():
+            combo = self._combos.get(name)
+            if combo is None or combo.currentData() is not None:
+                continue
+            if module is None or score < 75:
+                continue
+            idx = combo.findData(module["id"])
+            if idx < 0:
+                continue
+            combo.setCurrentIndex(idx)
+            lbl = self._section_labels.get(name)
+            if lbl is not None and score < 90:
+                lbl.setText(f"{name}  ⚠ Needs review")
+        self._check_mapping_complete()
 
     def _build_section_map(self) -> dict[str, str]:
         """Return {section_name: bs_module_id} from current combo selections."""
@@ -342,6 +372,22 @@ class KalturaPanel(QWidget):
         if not section_map:
             self._log.append_log("Map sections to modules first.", "warning")
             return
+
+        module_count = len(set(section_map.values()))
+        confirm = QMessageBox.warning(
+            self,
+            "Create Brightspace Pages?",
+            f"This will create {len(entries)} page(s) in Brightspace, "
+            f"across {module_count} mapped module(s).\n\n"
+            "This writes directly to the live Brightspace course — it cannot be undone automatically.\n\n"
+            "Proceed?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            self._log.append_log("Create Pages cancelled — no pages created.", "dim")
+            return
+
         self._create_btn.setText("Running…")
         self._create_btn.setEnabled(False)
         self._scan_btn.setEnabled(False)
@@ -390,6 +436,7 @@ class KalturaPanel(QWidget):
                     ))
                     self._build_mapping_rows(section_names)
                     self._mapping_frame.setVisible(bool(entries))
+                    self._maybe_autosuggest()
                     self._log.append_log(f"Found {len(entries)} Kaltura video(s).", "success")
                 elif msg == "__SCAN_FAIL__":
                     self._scan_btn.setText("Scan Moodle")
@@ -402,6 +449,7 @@ class KalturaPanel(QWidget):
                     self._fetch_modules_btn.setText("Fetch BS Modules")
                     self._fetch_modules_btn.setEnabled(True)
                     self._populate_combos(modules)
+                    self._maybe_autosuggest()
                     self._log.append_log(f"Loaded {len(modules)} module(s).", "success")
                 elif msg == "__MODULES_FAIL__":
                     self._fetch_modules_btn.setText("Fetch BS Modules")

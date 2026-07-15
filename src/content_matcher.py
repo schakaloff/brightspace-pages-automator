@@ -100,6 +100,34 @@ def _detect_external_tool(name: str, hint: str = "") -> Optional[tuple]:
     return None
 
 
+def match_sections(section_names: list, bs_modules: list) -> dict:
+    """Match Moodle section names to Brightspace modules using the same
+    exact/fuzzy/containment logic as _compare_items's SECTION branch.
+
+    bs_modules: [{"id": ..., "title": ...}, ...]
+    Returns {section_name: (matched_module_dict_or_None, score)} — 100 for exact,
+    ~70-100 for fuzzy, 80 (_CONTAINMENT_SCORE) for containment, 0 for no match.
+    """
+    bs_by_norm = {_norm(m["title"]): m for m in bs_modules}
+    results = {}
+    for name in section_names:
+        name_l = _norm(name)
+        if name_l in bs_by_norm:
+            results[name] = (bs_by_norm[name_l], 100)
+            continue
+        close = difflib.get_close_matches(name_l, bs_by_norm.keys(), n=1, cutoff=0.70)
+        if close and not _numbers_conflict(name_l, close[0]):
+            score = int(difflib.SequenceMatcher(None, name_l, close[0]).ratio() * 100)
+            results[name] = (bs_by_norm[close[0]], score)
+            continue
+        contained = _containment_match(name_l, bs_by_norm)
+        if contained:
+            results[name] = (bs_by_norm[contained], _CONTAINMENT_SCORE)
+            continue
+        results[name] = (None, 0)
+    return results
+
+
 def _compare_items(moodle_items: list, bs_flat: list) -> list:
     SKIP = {"LABEL", "FORUM"}
 
