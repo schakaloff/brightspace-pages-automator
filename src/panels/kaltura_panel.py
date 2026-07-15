@@ -1,4 +1,5 @@
 import asyncio
+import os
 import queue
 import threading
 
@@ -78,6 +79,12 @@ class KalturaPanel(QWidget):
         self._scan_btn.clicked.connect(self._start_scan)
         bs_row.addWidget(self._scan_btn, 0)
         layout.addLayout(bs_row)
+        layout.addSpacing(16)
+
+        self._find_suggest_btn = QPushButton("Find Videos && Suggest Destinations")
+        self._find_suggest_btn.setFixedHeight(44)
+        self._find_suggest_btn.clicked.connect(self._start_find_and_suggest)
+        layout.addWidget(self._find_suggest_btn)
         layout.addSpacing(16)
 
         layout.addWidget(_form_label("FOUND VIDEOS"))
@@ -295,6 +302,84 @@ class KalturaPanel(QWidget):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _start_find_and_suggest(self):
+        """Orchestrates the existing manual steps in one click: Moodle session
+        check/login (only if no saved session), scan, Brightspace module fetch,
+        then auto-suggest mapping. Reuses the same backend calls as the manual
+        buttons below — no scanning/mapping/write logic changes here.
+        """
+        moodle_url = self._moodle_url.text().strip()
+        bs_url = self._bs_url.text().strip()
+        if not moodle_url:
+            self._log.append_log("Paste a Moodle course URL first.", "warning")
+            return
+        if not bs_url:
+            self._log.append_log("Paste a Brightspace course URL first.", "warning")
+            return
+
+        self._find_suggest_btn.setText("Working…")
+        self._find_suggest_btn.setEnabled(False)
+        self._login_btn.setEnabled(False)
+        self._scan_btn.setEnabled(False)
+        self._fetch_modules_btn.setEnabled(False)
+        self._create_btn.setEnabled(False)
+        self._mapping_frame.setVisible(False)
+        self._log.clear_log()
+        q = self._log_queue
+
+        moodle_user = self._mw.moodle_username
+        moodle_pass = self._mw.moodle_password
+        bs_user = self._mw.bs_username
+        bs_pass = self._mw.bs_password
+        sso_email = self._mw.sso_email
+        sso_pass = self._mw.sso_password
+
+        def worker():
+            try:
+                from kaltura_categorizer import KalturaCategorizer, MOODLE_SESSION_FILE
+                cat = KalturaCategorizer()
+
+                q.put(("Step 1/4 — Checking Moodle session…", "dim"))
+                if not os.path.exists(MOODLE_SESSION_FILE):
+                    q.put(("No saved Moodle session — logging in first (this may open a browser window)…", "dim"))
+                    asyncio.run(cat.login_to_moodle(
+                        moodle_url,
+                        moodle_username=moodle_user,
+                        moodle_password=moodle_pass,
+                        log_fn=lambda msg, tag="dim": q.put((msg, tag)),
+                    ))
+                else:
+                    q.put(("Moodle session found — skipping login.", "dim"))
+
+                q.put(("Step 2/4 — Scanning Moodle course for Kaltura videos… "
+                       "this can take 5-10 minutes on large courses with many book chapters.", "dim"))
+                entries = asyncio.run(cat.scan_moodle_course(
+                    moodle_url, log_fn=lambda msg, tag="dim": q.put((msg, tag))
+                ))
+                q.put((f"Scan finished — {len(entries)} video(s) found.", "dim"))
+
+                q.put(("Step 3/4 — Loading Brightspace modules…", "dim"))
+                modules = asyncio.run(cat.get_bs_modules(
+                    bs_url,
+                    bs_username=bs_user,
+                    bs_password=bs_pass,
+                    sso_email=sso_email,
+                    sso_password=sso_pass,
+                    log_fn=lambda msg, tag="dim": q.put((msg, tag)),
+                ))
+                q.put((f"Loaded {len(modules)} Brightspace module(s).", "dim"))
+
+                q.put(("Step 4/4 — Matching Moodle sections to Brightspace modules…", "dim"))
+                q.put(("__FIND_SUGGEST_DONE__", (entries, modules)))
+            except Exception as e:
+                msg, detail = friendly_error(e)
+                q.put((f"Find Videos & Suggest Destinations error: {msg}", "error"))
+                if detail != msg:
+                    q.put((detail, "detail"))
+                q.put(("__FIND_SUGGEST_FAIL__", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _start_scan(self):
         url = self._moodle_url.text().strip()
         if not url:
@@ -458,6 +543,32 @@ class KalturaPanel(QWidget):
                     self._create_btn.setText("Create Pages")
                     self._check_mapping_complete()
                     self._scan_btn.setEnabled(True)
+                elif msg == "__FIND_SUGGEST_DONE__":
+                    entries, modules = payload
+                    self._find_suggest_btn.setText("Find Videos && Suggest Destinations")
+                    self._find_suggest_btn.setEnabled(True)
+                    self._login_btn.setEnabled(True)
+                    self._scan_btn.setEnabled(True)
+                    self._fetch_modules_btn.setEnabled(True)
+                    self._populate_list(entries)
+                    section_names = list(dict.fromkeys(
+                        e.get("section_name", "") for e in entries if e.get("section_name")
+                    ))
+                    self._build_mapping_rows(section_names)
+                    self._mapping_frame.setVisible(bool(entries))
+                    self._populate_combos(modules)
+                    self._maybe_autosuggest()
+                    self._log.append_log(
+                        f"Done — {len(entries)} video(s) found, {len(modules)} module(s) loaded. "
+                        "Review the suggested mapping below before creating pages.",
+                        "success",
+                    )
+                elif msg == "__FIND_SUGGEST_FAIL__":
+                    self._find_suggest_btn.setText("Find Videos && Suggest Destinations")
+                    self._find_suggest_btn.setEnabled(True)
+                    self._login_btn.setEnabled(True)
+                    self._scan_btn.setEnabled(True)
+                    self._fetch_modules_btn.setEnabled(True)
                 else:
                     self._log.append_log(msg, payload)
         except queue.Empty:
