@@ -643,15 +643,17 @@ class ContentChecker:
                 bs_mod   = bs_module_by_title.get(bs_title, {})
                 section_to_bs[r["name"]] = {"id": bs_mod.get("id"), "title": bs_title}
 
+        def _bs_target(r):
+            sec = section_to_bs.get(r.get("section", ""), {})
+            return sec.get("id"), sec.get("title", r.get("section", ""))
+
         missing_files = [
             {
                 "name":            r["name"],
                 "section":         r.get("section", ""),
                 "href":            r["href"],
-                "bs_module_id":    section_to_bs.get(r.get("section", ""), {}).get("id"),
-                "bs_module_title": section_to_bs.get(r.get("section", ""), {}).get(
-                    "title", r.get("section", "")
-                ),
+                "bs_module_id":    _bs_target(r)[0],
+                "bs_module_title": _bs_target(r)[1],
             }
             for r in results
             if r.get("status") == "missing"
@@ -659,11 +661,46 @@ class ContentChecker:
             and r.get("href")
         ]
 
-        if not missing_files:
+        # Fuzzy FILE matches: same section-based upload target as missing files —
+        # the item's own fuzzy `matched` title is untrustworthy (may be a module/
+        # section title), so it's shown for review only, never used for routing.
+        review_candidates = [
+            {
+                "name":            r["name"],
+                "section":         r.get("section", ""),
+                "href":            r["href"],
+                "bs_module_id":    _bs_target(r)[0],
+                "bs_module_title": _bs_target(r)[1],
+                "matched_title":   r.get("matched") or "",
+                "score":           r.get("score", 80),
+                "matched_kind":    r.get("matched_kind", "TOPIC"),
+            }
+            for r in results
+            if r.get("status") == "fuzzy"
+            and r.get("type") == "FILE"
+            and r.get("href")
+        ]
+
+        # Drop review items that are already an exact-title duplicate in their
+        # target module — nothing to review, nothing to upload.
+        review_files = []
+        for f in review_candidates:
+            if f["bs_module_id"] and await self._verify_topic_in_module(
+                bs_page, course_id, f["bs_module_id"], f["name"]
+            ):
+                self.log(f"  ↷ '{f['name']}' already in Brightspace — skipping review", "dim")
+                continue
+            review_files.append(f)
+
+        if not missing_files and not review_files:
             return
 
-        self.log(f"📥 {len(missing_files)} missing FILE(s) — waiting for your selection…", "step")
-        self.on_file_checklist(_json.dumps(missing_files))
+        if missing_files:
+            self.log(f"📥 {len(missing_files)} missing FILE(s)", "step")
+        if review_files:
+            self.log(f"⚠ {len(review_files)} fuzzy-matched FILE(s) need review", "step")
+        self.log("  Waiting for your selection…", "step")
+        self.on_file_checklist(_json.dumps({"missing": missing_files, "review": review_files}))
 
         if self.file_checklist_event:
             loop = asyncio.get_event_loop()
@@ -1198,11 +1235,45 @@ class ContentChecker:
                 self.log(f"    ✗ File chooser not triggered: {fc_err}", "error")
                 return False
 
-            try:
-                await tab.wait_for_load_state("networkidle", timeout=60000)
-            except Exception:
-                pass
-            await tab.wait_for_timeout(2000)
+            # D2L uploads the batch in-page; closing this tab kills any upload
+            # still in flight (root cause of large/second-file losses). Poll the
+            # module's topic list until every file's title appears — D2L strips
+            # the final extension, so the expected title is the filename stem.
+            expected = [Path(p).stem for p in file_paths]
+            total_mb = sum(Path(p).stat().st_size for p in file_paths) / 1_000_000
+            deadline = time.time() + min(max(45, 30 + total_mb * 4), 300)
+
+            def _norm_title(s: str) -> str:
+                return re.sub(r'[^\w]', '', s).lower()
+
+            remaining = {_norm_title(e): e for e in expected}
+            while remaining and time.time() < deadline:
+                await tab.wait_for_timeout(3000)
+                try:
+                    topics = await tab.evaluate(
+                        """async ([courseId, moduleId]) => {
+                            const r = await fetch(
+                                `/d2l/api/le/1.0/${courseId}/content/modules/${moduleId}/structure/`,
+                                { credentials: 'include' }
+                            );
+                            if (!r.ok) return [];
+                            const kids = await r.json();
+                            return (kids || []).map(c => (c.Title || '').trim());
+                        }""",
+                        [str(course_id), str(module_id)],
+                    )
+                except Exception:
+                    continue
+                for t in topics or []:
+                    remaining.pop(_norm_title(t), None)
+
+            if remaining:
+                self.log(
+                    f"    ⚠ Timed out waiting for: {', '.join(remaining.values())}", "warning"
+                )
+            await tab.wait_for_timeout(1000)
+            # Per-file verification happens in the caller — report success if the
+            # batch flow completed, so partially-landed batches aren't blanket-failed.
             return True
 
         except Exception as e:

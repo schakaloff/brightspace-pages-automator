@@ -15,28 +15,31 @@ from PySide6.QtCore import Qt, QTimer
 # ── FileChecklistDialog ───────────────────────────────────────────────────────
 
 class FileChecklistDialog(QDialog):
-    """Checkbox list of missing files; user picks which to download.
+    """Two-section checklist: missing files (default checked) and fuzzy-matched
+    review files (default UNCHECKED — user must opt in before anything uploads).
 
-    Populates *result_list* in-place with selected file dicts, then sets
-    *event* so the background asyncio thread can resume.  The event is
-    guaranteed to be set on every exit path (OK, Skip All, window X).
+    Populates *result_list* in-place with selected file dicts from either
+    section, then sets *event* so the background asyncio thread can resume.
+    The event is guaranteed to be set on every exit path (OK, Skip All, window X).
     """
 
     def __init__(self, data_json: str, result_list: list, event: threading.Event, parent=None):
         super().__init__(parent)
         self._result_list = result_list
         self._event = event
-        self._files = json.loads(data_json)
+        payload = json.loads(data_json)
+        self._missing = payload.get("missing", [])
+        self._review = payload.get("review", [])
         self._checkboxes: list[tuple[QCheckBox, dict]] = []
 
         self.setWindowTitle("Missing Files — Select to Download")
-        self.setMinimumSize(560, 480)
-        self.resize(580, 540)
+        self.setMinimumSize(560, 520)
+        self.resize(580, 580)
         self.setModal(True)
 
         self._build()
 
-        if not self._files:
+        if not self._missing and not self._review:
             self._release(selected=[])
 
     def _build(self):
@@ -44,7 +47,8 @@ class FileChecklistDialog(QDialog):
         layout.setContentsMargins(20, 18, 20, 16)
         layout.setSpacing(8)
 
-        title = QLabel(f"📋  {len(self._files)} file(s) missing from Brightspace")
+        total = len(self._missing) + len(self._review)
+        title = QLabel(f"📋  {total} file(s) need attention")
         title.setStyleSheet("font-size:15px; font-weight:bold;")
         layout.addWidget(title)
 
@@ -52,10 +56,6 @@ class FileChecklistDialog(QDialog):
         sub1.setProperty("role", "dim")
         sub1.setWordWrap(True)
         layout.addWidget(sub1)
-
-        sub2 = QLabel("Uncheck any you already have or don't need.")
-        sub2.setProperty("role", "dim")
-        layout.addWidget(sub2)
 
         # Scrollable file list
         scroll = QScrollArea()
@@ -69,20 +69,27 @@ class FileChecklistDialog(QDialog):
         scroll.setWidget(inner)
         layout.addWidget(scroll, 1)
 
-        cur_section = None
-        for f in self._files:
-            sec = f.get("section") or "Other"
-            if sec != cur_section:
-                cur_section = sec
-                sec_lbl = QLabel(f"── {sec} ──")
-                sec_lbl.setProperty("role", "dim")
-                sec_lbl.setStyleSheet("font-size:11px; padding-top:8px;")
-                inner_layout.addWidget(sec_lbl)
-            cb = QCheckBox(f["name"])
-            cb.setChecked(True)
-            cb.toggled.connect(self._update_count)
-            self._checkboxes.append((cb, f))
-            inner_layout.addWidget(cb)
+        if self._missing:
+            hdr = QLabel(f"Missing files ({len(self._missing)})")
+            hdr.setStyleSheet("font-size:12px; font-weight:bold; padding-top:4px;")
+            inner_layout.addWidget(hdr)
+            sub2 = QLabel("Uncheck any you already have or don't need.")
+            sub2.setProperty("role", "dim")
+            inner_layout.addWidget(sub2)
+            self._add_section_items(inner_layout, self._missing, default_checked=True)
+
+        if self._review:
+            hdr = QLabel(f"⚠ Needs review — fuzzy match ({len(self._review)})")
+            hdr.setStyleSheet("font-size:12px; font-weight:bold; padding-top:14px; color:#d9822b;")
+            inner_layout.addWidget(hdr)
+            note = QLabel(
+                "These only matched a similar Brightspace title, not confirmed. "
+                "Unchecked by default — check the ones you've verified before uploading."
+            )
+            note.setProperty("role", "dim")
+            note.setWordWrap(True)
+            inner_layout.addWidget(note)
+            self._add_section_items(inner_layout, self._review, default_checked=False)
 
         # Select / Deselect row
         tog_row = QHBoxLayout()
@@ -121,9 +128,29 @@ class FileChecklistDialog(QDialog):
 
         self._update_count()
 
+    def _add_section_items(self, inner_layout, files: list, default_checked: bool):
+        cur_section = None
+        for f in files:
+            sec = f.get("section") or "Other"
+            if sec != cur_section:
+                cur_section = sec
+                sec_lbl = QLabel(f"── {sec} ──")
+                sec_lbl.setProperty("role", "dim")
+                sec_lbl.setStyleSheet("font-size:11px; padding-top:8px;")
+                inner_layout.addWidget(sec_lbl)
+            label = f["name"]
+            if f.get("matched_title"):
+                kind_tag = " [module/section title only]" if f.get("matched_kind") == "MODULE" else ""
+                label += f"  →  matched \"{f['matched_title']}\" ({f.get('score', '?')}%){kind_tag}"
+            cb = QCheckBox(label)
+            cb.setChecked(default_checked)
+            cb.toggled.connect(self._update_count)
+            self._checkboxes.append((cb, f))
+            inner_layout.addWidget(cb)
+
     def _update_count(self):
         n = sum(1 for cb, _ in self._checkboxes if cb.isChecked())
-        self._count_lbl.setText(f"{n} of {len(self._files)} selected")
+        self._count_lbl.setText(f"{n} of {len(self._checkboxes)} selected")
         self._dl_btn.setText(f"⬇  Download {n} Selected")
 
     def _select_all(self):

@@ -188,13 +188,15 @@ def _compare_items(moodle_items: list, bs_flat: list) -> list:
         if close and not _numbers_conflict(name_l, close[0]):
             score = int(difflib.SequenceMatcher(None, name_l, close[0]).ratio() * 100)
             results.append({**item, "section": current_section,
-                             "status": "fuzzy", "matched": bs_all[close[0]], "score": score})
+                             "status": "fuzzy", "matched": bs_all[close[0]], "score": score,
+                             "matched_kind": "MODULE" if close[0] in bs_modules else "TOPIC"})
             continue
 
         contained = _containment_match(name_l, bs_all)
         if contained:
             results.append({**item, "section": current_section,
-                             "status": "fuzzy", "matched": bs_all[contained], "score": _CONTAINMENT_SCORE})
+                             "status": "fuzzy", "matched": bs_all[contained], "score": _CONTAINMENT_SCORE,
+                             "matched_kind": "MODULE" if contained in bs_modules else "TOPIC"})
             continue
 
         results.append({**item, "section": current_section,
