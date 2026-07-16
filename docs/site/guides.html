@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Guides — Brightspace Pages Automator</title>
+<meta name="description" content="Manual fallback guides for when the app can't finish the job automatically.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #F7F9FA;
+    --ink: #111827;
+    --muted: #5B6472;
+    --accent: #0EA5E9;
+    --accent-dark: #0284C7;
+    --line: #E4E9EE;
+    --card: #FFFFFF;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 24px; }
+
+  /* ---------- Top bar ---------- */
+  .topbar {
+    padding: 28px 0 0;
+  }
+  .back-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--muted);
+    text-decoration: none;
+  }
+  .back-link:hover { color: var(--accent-dark); }
+  .back-link:focus-visible { outline: 3px solid var(--accent-dark); outline-offset: 3px; border-radius: 4px; }
+
+  /* ---------- Page header ---------- */
+  .page-header { padding: 40px 0 48px; }
+  .eyebrow {
+    display: inline-block;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent-dark);
+    background: #E0F2FE;
+    border-radius: 999px;
+    padding: 5px 14px;
+    margin-bottom: 18px;
+  }
+  h1 {
+    font-family: 'Bricolage Grotesque', 'Inter', sans-serif;
+    font-weight: 800;
+    font-size: clamp(1.9rem, 4.5vw, 2.6rem);
+    line-height: 1.12;
+    letter-spacing: -0.02em;
+    margin-bottom: 14px;
+  }
+  .page-header p {
+    font-size: 1.05rem;
+    color: var(--muted);
+    max-width: 560px;
+  }
+
+  /* ---------- Guide list (index of guides on this page) ---------- */
+  .guide-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 24px;
+  }
+  .guide-nav a {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--accent-dark);
+    background: #E0F2FE;
+    border-radius: 999px;
+    padding: 6px 14px;
+    text-decoration: none;
+  }
+  .guide-nav a:hover { background: #BAE6FD; }
+
+  /* ---------- Guide article ---------- */
+  .guide {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 32px;
+    margin-bottom: 28px;
+    scroll-margin-top: 24px;
+  }
+  .guide h2 {
+    font-family: 'Bricolage Grotesque', 'Inter', sans-serif;
+    font-weight: 700;
+    font-size: 1.4rem;
+    letter-spacing: -0.01em;
+    margin-bottom: 6px;
+  }
+  .guide .guide-sub {
+    font-size: 0.9rem;
+    color: var(--muted);
+    margin-bottom: 24px;
+  }
+
+  .guide-steps { list-style: none; counter-reset: gstep; }
+  .guide-steps > li {
+    counter-increment: gstep;
+    display: flex;
+    gap: 16px;
+    padding: 20px 0;
+  }
+  .guide-steps > li + li { border-top: 1px solid var(--line); }
+  .guide-steps > li::before {
+    content: counter(gstep);
+    font-family: 'Bricolage Grotesque', 'Inter', sans-serif;
+    font-weight: 700;
+    font-size: 0.9rem;
+    color: var(--accent-dark);
+    background: #E0F2FE;
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+  .guide-steps strong { display: block; font-weight: 600; margin-bottom: 8px; }
+  .guide-steps ul {
+    list-style: disc;
+    padding-left: 20px;
+    color: var(--muted);
+    font-size: 0.92rem;
+  }
+  .guide-steps ul li { padding: 3px 0; }
+  .guide-steps ul ul { margin-top: 4px; }
+  .guide-steps .note {
+    display: block;
+    margin-top: 10px;
+    font-size: 0.85rem;
+    color: var(--accent-dark);
+    background: #F0F9FF;
+    border-radius: 8px;
+    padding: 8px 12px;
+  }
+
+  kbd {
+    font-family: ui-monospace, 'SF Mono', Consolas, monospace;
+    font-size: 0.85em;
+    background: #EEF2F6;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 1px 6px;
+  }
+
+  /* ---------- Footer ---------- */
+  footer {
+    border-top: 1px solid var(--line);
+    padding: 32px 0 40px;
+    text-align: center;
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-top: 20px;
+  }
+
+  @media (max-width: 700px) {
+    .guide { padding: 22px; }
+    .guide-steps > li { gap: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="wrap">
+    <a class="back-link" href="index.html">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+      Back to download page
+    </a>
+  </div>
+</div>
+
+<header class="page-header">
+  <div class="wrap">
+    <span class="eyebrow">Manual fallback guides</span>
+    <h1>When the app can't finish the job</h1>
+    <p>Step-by-step instructions for doing by hand what the app usually does automatically. Use these if a run fails partway through.</p>
+
+    <nav class="guide-nav" aria-label="Jump to a guide">
+      <a href="#kaltura-video">Move a Kaltura video</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!--
+    ── Adding a new guide ──────────────────────────────────────────────────
+    Copy one <article class="guide"> block below (including its </article>),
+    paste it after the last one, then:
+      1. change the id="..." to something short and unique
+      2. change the <h2> title and .guide-sub description
+      3. change the <a href="#..."> link in .guide-nav above to match
+      4. edit the numbered steps inside .guide-steps
+  -->
+
+  <article class="guide" id="kaltura-video">
+    <h2>Find the video in Moodle</h2>
+    <p class="guide-sub">Manual steps for moving one Kaltura video from a Moodle course into the matching Brightspace unit.</p>
+
+    <ol class="guide-steps">
+      <li>
+        <div>
+          <strong>Find the video in Moodle</strong>
+          <ul>
+            <li>Open the Moodle course.</li>
+            <li>Find the video item.</li>
+            <li>Write down:
+              <ul>
+                <li>video title</li>
+                <li>Moodle section name</li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Find the matching Brightspace unit</strong>
+          <ul>
+            <li>Open the Brightspace course.</li>
+            <li>Find the unit with the same or similar section name.</li>
+            <li>If unsure, stop.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Create a page</strong>
+          <ul>
+            <li>Click <kbd>Create New</kbd></li>
+            <li>Choose <kbd>Page</kbd></li>
+            <li>Title it exactly like the Moodle video.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Insert the Kaltura video — preferred way</strong>
+          <ul>
+            <li>Click <kbd>Insert Stuff</kbd></li>
+            <li>Choose <kbd>Kaltura</kbd> / <kbd>My Media</kbd> / <kbd>Kaltura Media</kbd></li>
+            <li>Search the exact video title.</li>
+            <li>Select the video.</li>
+            <li>Insert it.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>If the Kaltura option isn't available</strong>
+          <ul>
+            <li>Use KMC.</li>
+            <li>Search the video.</li>
+            <li>Use <kbd>Share & Embed</kbd>.</li>
+            <li>Prefer an iframe embed, not a JavaScript/script embed.</li>
+            <li>Paste only inside <kbd>Source Code</kbd> — never the normal editor.</li>
+          </ul>
+          <span class="note">Pasting into the normal editor box shows the code as plain text instead of a video. Always use Source Code.</span>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Save and check</strong>
+          <ul>
+            <li>Click <kbd>Save and Close</kbd>.</li>
+            <li>Open the page.</li>
+            <li>Confirm the video appears and plays.</li>
+          </ul>
+        </div>
+      </li>
+    </ol>
+  </article>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    Built for Okanagan College instructors · Brightspace Pages Automator
+  </div>
+</footer>
+
+</body>
+</html>
