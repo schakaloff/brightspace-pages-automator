@@ -7,6 +7,12 @@ from typing import Callable, List, Optional
 from playwright.async_api import BrowserContext, Page
 
 
+# A single topic's inline HTML above this size is treated as a full standalone
+# document and linked instead of pasted — pasting very large HTML into D2L's
+# source-code dialog poisons the editor session and wipes the whole page.
+# Normal topic pages are a few hundred to a few thousand chars.
+MAX_INLINE_HTML_CHARS = 40000
+
 
 async def _find_locator_any_frame(page: Page, selector: str, retries: int = 6, delay_ms: int = 700):
     for _ in range(max(retries, 1)):
@@ -1139,7 +1145,7 @@ class UnitCollector:
             except Exception:
                 pass
 
-    async def _apply_claude_style(self, context) -> bool:
+    async def _apply_claude_style(self, context, expected_min_chars: int = 0) -> bool:
         if not self.claude_api_key:
             self.log("⚠ No Claude API key — skipping styling step", "warning")
             return False
@@ -1159,6 +1165,15 @@ class UnitCollector:
             source_html = await self._extract_html(page)
             if not source_html:
                 self.log("✗ Could not extract assembled HTML", "error")
+                return False
+
+            if expected_min_chars and len(source_html) < expected_min_chars * 0.5:
+                self.log(
+                    f"✗ Re-opened page only had {len(source_html):,} chars, expected "
+                    f"~{expected_min_chars:,} — the editor likely hadn't finished loading "
+                    "the saved content. Skipping styling to avoid overwriting it.",
+                    "error",
+                )
                 return False
 
             from ai_styler import apply_style, DEFAULT_MODEL
@@ -1285,8 +1300,27 @@ class UnitCollector:
                 safe = topic["label"].replace("<", "&lt;").replace(">", "&gt;")
 
                 if result["html"]:
-                    sections.append(f"<h2>{safe}</h2>\n{result['html']}\n<hr/>\n")
-                    html_count += 1
+                    # A single topic's HTML that is very large is almost always a
+                    # full standalone document (its own <html>/<head>/<style>).
+                    # Pasting that into D2L's source-code dialog poisons the whole
+                    # editor session and wipes every section, so link to the
+                    # original topic instead of inlining it.
+                    if len(result["html"]) > MAX_INLINE_HTML_CHARS:
+                        self.log(
+                            f"⚠ '{topic['label']}' is too large to inline "
+                            f"({len(result['html']):,} chars) — linking to the "
+                            "original page instead.",
+                            "warning",
+                        )
+                        sections.append(
+                            f'<h2>{safe}</h2>\n'
+                            f'<p><a href="{topic["url"]}">Open original page: {safe}</a></p>\n'
+                            f'<hr/>\n'
+                        )
+                        link_count += 1
+                    else:
+                        sections.append(f"<h2>{safe}</h2>\n{result['html']}\n<hr/>\n")
+                        html_count += 1
                 elif result["link_url"]:
                     corrected = self._name_matcher(topic["label"])
                     link_label = (corrected or topic["label"]).replace("<", "&lt;").replace(">", "&gt;")
@@ -1332,7 +1366,8 @@ class UnitCollector:
             self.log(f"✓ Text done: {html_count} pages, {link_count} links", "success")
 
             if self.claude_api_key:
-                await self._apply_claude_style(context)
+                assembled_chars = sum(len(s) for s in sections)
+                await self._apply_claude_style(context, expected_min_chars=assembled_chars)
 
             self.log("─" * 52, "dim")
             self.log("✓ Done! Close the browser when finished.", "success")

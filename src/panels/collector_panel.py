@@ -16,7 +16,7 @@ def _normalize_url(u: str) -> str:
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit, QSpinBox, QCheckBox,
+    QPushButton, QLineEdit, QSpinBox, QCheckBox, QScrollArea, QFrame,
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 
@@ -52,13 +52,19 @@ class CollectorPanel(QWidget):
         layout.addWidget(sub)
         layout.addSpacing(20)
 
-        layout.addWidget(_form_label("PAGE THEME"))
-        layout.addSpacing(6)
-        self._swatch_frames, self._selected_theme = _build_theme_swatches(layout)
-        layout.addSpacing(14)
+        # ── Controls (scrollable on small screens) ────────────────────────────
+        controls_widget = QWidget()
+        controls_layout = QVBoxLayout(controls_widget)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(0)
 
-        layout.addWidget(_form_label("BRIGHTSPACE UNIT URL"))
-        layout.addSpacing(4)
+        controls_layout.addWidget(_form_label("PAGE THEME"))
+        controls_layout.addSpacing(6)
+        self._swatch_frames, self._selected_theme = _build_theme_swatches(controls_layout)
+        controls_layout.addSpacing(14)
+
+        controls_layout.addWidget(_form_label("BRIGHTSPACE UNIT URL"))
+        controls_layout.addSpacing(4)
         self._unit_entry = QLineEdit()
         self._unit_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/le/content/…/lessons/…")
         self._unit_entry.setFixedHeight(40)
@@ -66,14 +72,14 @@ class CollectorPanel(QWidget):
             "The URL of a Brightspace unit (a collection of topic pages).\n"
             "Find it by clicking a unit in the course Content table — copy the URL from your browser."
         )
-        layout.addWidget(self._unit_entry)
+        controls_layout.addWidget(self._unit_entry)
         self._bs_course_hint = QLabel()
         self._bs_course_hint.setProperty("role", "dim")
         self._bs_course_hint.setWordWrap(True)
         self._bs_course_hint.hide()
-        layout.addSpacing(4)
-        layout.addWidget(self._bs_course_hint)
-        layout.addSpacing(12)
+        controls_layout.addSpacing(4)
+        controls_layout.addWidget(self._bs_course_hint)
+        controls_layout.addSpacing(12)
 
         self._auto_create_chk = QCheckBox("Auto-create the target page in this unit (recommended)")
         self._auto_create_chk.setChecked(True)
@@ -83,8 +89,8 @@ class CollectorPanel(QWidget):
             "Leave the Target Page URL below blank when this is on."
         )
         self._auto_create_chk.toggled.connect(self._on_auto_toggle)
-        layout.addWidget(self._auto_create_chk)
-        layout.addSpacing(8)
+        controls_layout.addWidget(self._auto_create_chk)
+        controls_layout.addSpacing(8)
 
         self._multi_unit_chk = QCheckBox("Continue to next unit automatically")
         self._multi_unit_chk.setToolTip(
@@ -94,7 +100,7 @@ class CollectorPanel(QWidget):
             "additional unit unless “Don't ask before each unit” is also checked."
         )
         self._multi_unit_chk.toggled.connect(self._on_multi_unit_toggle)
-        layout.addWidget(self._multi_unit_chk)
+        controls_layout.addWidget(self._multi_unit_chk)
 
         self._auto_continue_chk = QCheckBox("Don't ask before each unit")
         self._auto_continue_chk.setEnabled(False)
@@ -102,11 +108,11 @@ class CollectorPanel(QWidget):
             "Runs straight through additional units without pausing to\n"
             "confirm. Only used when “Continue to next unit automatically” is on."
         )
-        layout.addWidget(self._auto_continue_chk)
-        layout.addSpacing(8)
+        controls_layout.addWidget(self._auto_continue_chk)
+        controls_layout.addSpacing(8)
 
-        layout.addWidget(_form_label("TARGET PAGE URL  (optional — leave blank to auto-create)"))
-        layout.addSpacing(4)
+        controls_layout.addWidget(_form_label("TARGET PAGE URL  (optional — leave blank to auto-create)"))
+        controls_layout.addSpacing(4)
         self._target_entry = QLineEdit()
         self._target_entry.setPlaceholderText("Leave blank to auto-create, or paste an existing page URL")
         self._target_entry.setFixedHeight(40)
@@ -115,21 +121,21 @@ class CollectorPanel(QWidget):
             "Leave blank (with auto-create on) to have one made for you, or paste the URL\n"
             "of an existing blank HTML topic to reuse it."
         )
-        layout.addWidget(self._target_entry)
+        controls_layout.addWidget(self._target_entry)
         self._target_hint = QLabel("A blank page will be created for you. Paste a URL here only to reuse an existing page.")
         self._target_hint.setProperty("role", "dim")
         self._target_hint.setWordWrap(True)
-        layout.addSpacing(4)
-        layout.addWidget(self._target_hint)
-        layout.addSpacing(12)
+        controls_layout.addSpacing(4)
+        controls_layout.addWidget(self._target_hint)
+        controls_layout.addSpacing(12)
 
-        layout.addWidget(_form_label("MOODLE COURSE URL  (optional — fixes weird file/link names)"))
-        layout.addSpacing(4)
+        controls_layout.addWidget(_form_label("MOODLE COURSE URL  (optional — fixes weird file/link names)"))
+        controls_layout.addSpacing(4)
         self._moodle_entry = QLineEdit()
         self._moodle_entry.setPlaceholderText("https://mymoodle.okanagan.bc.ca/course/view.php?id=…")
         self._moodle_entry.setFixedHeight(40)
-        layout.addWidget(self._moodle_entry)
-        layout.addSpacing(12)
+        controls_layout.addWidget(self._moodle_entry)
+        controls_layout.addSpacing(12)
 
         par_row = QHBoxLayout()
         par_row.addWidget(_form_label("PARALLEL PAGES"))
@@ -143,7 +149,15 @@ class CollectorPanel(QWidget):
         )
         par_row.addWidget(self._parallel_spin)
         par_row.addStretch()
-        layout.addLayout(par_row)
+        controls_layout.addLayout(par_row)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(controls_widget)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        layout.addWidget(scroll_area, 3)
+
+        # ── Pinned below the scroll area: run action, log, continue ───────────
         layout.addSpacing(14)
 
         self._run_btn = QPushButton("Collect & Assemble")
@@ -159,6 +173,7 @@ class CollectorPanel(QWidget):
         layout.addWidget(_form_label("LOG"))
         layout.addSpacing(4)
         self._log = LogWidget()
+        self._log.setMinimumHeight(120)
         layout.addWidget(self._log, 1)
         layout.addSpacing(8)
 

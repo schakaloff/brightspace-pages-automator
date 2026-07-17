@@ -46,8 +46,14 @@ class KalturaPanel(QWidget):
         layout.addWidget(sub)
         layout.addSpacing(20)
 
-        layout.addWidget(_form_label("MOODLE COURSE URL"))
-        layout.addSpacing(4)
+        # ── Controls (scrollable on small screens) ────────────────────────────
+        controls_widget = QWidget()
+        controls_layout = QVBoxLayout(controls_widget)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(0)
+
+        controls_layout.addWidget(_form_label("MOODLE COURSE URL"))
+        controls_layout.addSpacing(4)
         moodle_row = QHBoxLayout()
         self._moodle_url = QLineEdit()
         self._moodle_url.setPlaceholderText(
@@ -59,8 +65,8 @@ class KalturaPanel(QWidget):
         self._login_btn.setFixedHeight(40)
         self._login_btn.clicked.connect(self._start_login)
         moodle_row.addWidget(self._login_btn)
-        layout.addLayout(moodle_row)
-        layout.addSpacing(12)
+        controls_layout.addLayout(moodle_row)
+        controls_layout.addSpacing(12)
 
         bs_row = QHBoxLayout()
         bs_col = QVBoxLayout()
@@ -78,17 +84,17 @@ class KalturaPanel(QWidget):
         self._scan_btn.setFixedHeight(40)
         self._scan_btn.clicked.connect(self._start_scan)
         bs_row.addWidget(self._scan_btn, 0)
-        layout.addLayout(bs_row)
-        layout.addSpacing(16)
+        controls_layout.addLayout(bs_row)
+        controls_layout.addSpacing(16)
 
         self._find_suggest_btn = QPushButton("Find Videos && Suggest Destinations")
         self._find_suggest_btn.setFixedHeight(44)
         self._find_suggest_btn.clicked.connect(self._start_find_and_suggest)
-        layout.addWidget(self._find_suggest_btn)
-        layout.addSpacing(16)
+        controls_layout.addWidget(self._find_suggest_btn)
+        controls_layout.addSpacing(16)
 
-        layout.addWidget(_form_label("FOUND VIDEOS"))
-        layout.addSpacing(4)
+        controls_layout.addWidget(_form_label("FOUND VIDEOS"))
+        controls_layout.addSpacing(4)
 
         self._list_widget = QWidget()
         self._list_layout = QVBoxLayout(self._list_widget)
@@ -99,8 +105,8 @@ class KalturaPanel(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._list_widget)
         scroll.setFixedHeight(180)
-        layout.addWidget(scroll)
-        layout.addSpacing(8)
+        controls_layout.addWidget(scroll)
+        controls_layout.addSpacing(8)
 
         sel_row = QHBoxLayout()
         self._select_all_btn = QPushButton("Select All")
@@ -112,8 +118,8 @@ class KalturaPanel(QWidget):
         sel_row.addWidget(self._select_all_btn)
         sel_row.addWidget(self._deselect_btn)
         sel_row.addStretch()
-        layout.addLayout(sel_row)
-        layout.addSpacing(16)
+        controls_layout.addLayout(sel_row)
+        controls_layout.addSpacing(16)
 
         # ── Map Sections area (hidden until scan) ─────────────────────────────
         self._mapping_frame = QFrame()
@@ -138,19 +144,27 @@ class KalturaPanel(QWidget):
         self._mapping_grid.setColumnStretch(1, 1)
         mapping_layout.addWidget(self._mapping_grid_widget)
 
-        layout.addWidget(self._mapping_frame)
-        layout.addSpacing(12)
+        controls_layout.addWidget(self._mapping_frame)
+        controls_layout.addSpacing(12)
 
         self._create_btn = QPushButton("Create Pages")
         self._create_btn.setFixedHeight(42)
         self._create_btn.setEnabled(False)
         self._create_btn.clicked.connect(self._start_create_pages)
-        layout.addWidget(self._create_btn)
-        layout.addSpacing(8)
+        controls_layout.addWidget(self._create_btn)
 
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(controls_widget)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        layout.addWidget(scroll_area, 3)
+
+        # ── Log (always visible, outside the scroll area) ─────────────────────
+        layout.addSpacing(8)
         layout.addWidget(_form_label("LOG"))
         layout.addSpacing(4)
         self._log = LogWidget()
+        self._log.setMinimumHeight(120)
         layout.addWidget(self._log, 1)
 
     # ── List helpers ──────────────────────────────────────────────────────────

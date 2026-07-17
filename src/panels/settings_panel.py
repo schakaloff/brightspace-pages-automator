@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import webbrowser
@@ -227,6 +228,18 @@ class SettingsPanel(QWidget):
         bs_save_btn.setToolTip("Save username to config and password to your system keyring.")
         bs_save_btn.clicked.connect(self._save_bs_credentials)
         layout.addWidget(bs_save_btn)
+        layout.addSpacing(6)
+
+        bs_import_btn = QPushButton("Import from Quiz Automator")
+        bs_import_btn.setProperty("variant", "secondary")
+        bs_import_btn.setFixedHeight(36)
+        bs_import_btn.setToolTip(
+            "Copy the Brightspace username/password saved in the Quiz Automator "
+            "app into this app. Shows field names only before importing — never "
+            "the values."
+        )
+        bs_import_btn.clicked.connect(self._import_bs_from_quiz_automator)
+        layout.addWidget(bs_import_btn)
         layout.addSpacing(24)
         layout.addWidget(_divider())
         layout.addSpacing(20)
@@ -470,6 +483,62 @@ class SettingsPanel(QWidget):
         if password:
             keyring.set_password("BrightspacePagesAutomator", username, password)
         self._bs_cred_status.setText("Saved.")
+        QTimer.singleShot(3000, lambda: self._bs_cred_status.setText(""))
+
+    def _import_bs_from_quiz_automator(self):
+        """Import Brightspace username/password from Quiz Automator's saved config.
+
+        Reads %APPDATA%\\BrightspaceAutomator\\outline_config.json (Quiz Automator's
+        plaintext config file), confirms with the user by field name only (never
+        showing values), then saves through the same path _save_bs_credentials uses
+        (config for username, keyring for password).
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        appdata = os.environ.get("APPDATA", "")
+        cfg_path = Path(appdata) / "BrightspaceAutomator" / "outline_config.json" if appdata else None
+
+        if not cfg_path or not cfg_path.exists():
+            self._bs_cred_status.setText("Quiz Automator config not found.")
+            QTimer.singleShot(3000, lambda: self._bs_cred_status.setText(""))
+            return
+
+        try:
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            self._bs_cred_status.setText("Could not read Quiz Automator config.")
+            QTimer.singleShot(3000, lambda: self._bs_cred_status.setText(""))
+            return
+
+        username = (cfg.get("bs_username") or "").strip()
+        password = (cfg.get("bs_password") or "").strip()
+        fields = [name for name, val in (("bs_username", username), ("bs_password", password)) if val]
+
+        if not fields:
+            self._bs_cred_status.setText("No Brightspace credentials found in Quiz Automator.")
+            QTimer.singleShot(3000, lambda: self._bs_cred_status.setText(""))
+            return
+
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("Import from Quiz Automator")
+        dlg.setText(
+            "Import the following field(s) from Quiz Automator?\n\n"
+            + "\n".join(f"• {name}" for name in fields)
+            + "\n\nValues are not shown here for security."
+        )
+        dlg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        dlg.setDefaultButton(QMessageBox.StandardButton.No)
+        if dlg.exec() != QMessageBox.StandardButton.Yes:
+            return
+
+        if username:
+            self._bs_user_field.setText(username)
+        if password:
+            self._bs_pass_field.setText(password)
+        self._save_bs_credentials()
+
+        print(f"[settings] Imported from Quiz Automator: {', '.join(fields)}", flush=True)
+        self._bs_cred_status.setText(f"Imported: {', '.join(fields)}")
         QTimer.singleShot(3000, lambda: self._bs_cred_status.setText(""))
 
     def _save_sso_credentials(self):
