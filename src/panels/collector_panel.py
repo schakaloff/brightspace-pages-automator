@@ -16,7 +16,7 @@ def _normalize_url(u: str) -> str:
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit, QSpinBox, QCheckBox, QScrollArea, QFrame, QSplitter,
+    QPushButton, QLineEdit, QSpinBox, QCheckBox, QScrollArea, QFrame, QSizePolicy,
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 
@@ -36,6 +36,7 @@ class CollectorPanel(QWidget):
         self._log_queue: queue.Queue = queue.Queue()
         self._swatch_frames: dict = {}
         self._selected_theme: list = ["lake"]
+        self._log_expanded = False
         self._build()
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_log)
@@ -43,57 +44,50 @@ class CollectorPanel(QWidget):
 
     def _build(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 28, 32, 20)
+        layout.setContentsMargins(24, 20, 24, 16)
         layout.setSpacing(0)
 
-        layout.addWidget(_section_header("Unit Collector"))
+        # ── Main content column (scrollable on small screens) ─────────────────
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+        content_widget.setMaximumWidth(1080)
+        content_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+
+        content_layout.addWidget(_section_header("Unit Collector"))
         sub = QLabel("Scrapes all topic pages from a unit and combines them into one collapsible HTML file.")
         sub.setProperty("role", "dim"); sub.setWordWrap(True)
-        layout.addWidget(sub)
-        layout.addSpacing(20)
+        content_layout.addWidget(sub)
+        content_layout.addSpacing(4)
 
-        # ── Controls (scrollable on small screens) ────────────────────────────
-        controls_widget = QWidget()
-        controls_layout = QVBoxLayout(controls_widget)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(0)
+        main_panel = QFrame()
+        main_panel.setProperty("role", "card")
+        main_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        panel = QVBoxLayout(main_panel)
+        panel.setContentsMargins(16, 14, 16, 14)
+        panel.setSpacing(8)
 
-        # ── Step 1 · Brightspace unit ─────────────────────────────────────────
-        card1 = QFrame()
-        card1.setProperty("role", "card")
-        c1 = QVBoxLayout(card1)
-        c1.setContentsMargins(16, 14, 16, 16)
-        c1.setSpacing(8)
-        c1.addWidget(self._step_header("1", "BRIGHTSPACE UNIT"))
+        # ── Brightspace unit ─────────────────────────────────────────────────
+        panel.addWidget(_form_label("BRIGHTSPACE UNIT URL"))
         self._unit_entry = QLineEdit()
         self._unit_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/le/content/…/lessons/…")
-        self._unit_entry.setFixedHeight(40)
+        self._unit_entry.setFixedHeight(36)
         self._unit_entry.setToolTip(
             "The URL of a Brightspace unit (a collection of topic pages).\n"
             "Find it by clicking a unit in the course Content table — copy the URL from your browser."
         )
-        c1.addWidget(self._unit_entry)
         self._bs_course_hint = QLabel()
         self._bs_course_hint.setProperty("role", "dim")
         self._bs_course_hint.setWordWrap(True)
         self._bs_course_hint.hide()
-        c1.addWidget(self._bs_course_hint)
-        controls_layout.addWidget(card1)
-        controls_layout.addSpacing(14)
+        panel.addWidget(self._unit_entry)
+        panel.addWidget(self._bs_course_hint)
+        panel.addSpacing(2)
+        panel.addWidget(_divider())
 
-        # ── Step 2 · Combined page ────────────────────────────────────────────
-        card2 = QFrame()
-        card2.setProperty("role", "card")
-        c2 = QVBoxLayout(card2)
-        c2.setContentsMargins(16, 14, 16, 16)
-        c2.setSpacing(10)
-        c2.addWidget(self._step_header("2", "COMBINED PAGE"))
-
-        auto_frame = QFrame()
-        auto_frame.setProperty("role", "card-accent")
-        af = QVBoxLayout(auto_frame)
-        af.setContentsMargins(12, 10, 12, 10)
-        af.setSpacing(0)
+        # ── Combined page ────────────────────────────────────────────────────
+        panel.addWidget(_form_label("COMBINED PAGE"))
         self._auto_create_chk = QCheckBox("Create the combined page for me (recommended)")
         self._auto_create_chk.setChecked(True)
         self._auto_create_chk.setToolTip(
@@ -102,50 +96,44 @@ class CollectorPanel(QWidget):
             "Leave the Target Page URL below blank when this is on."
         )
         self._auto_create_chk.toggled.connect(self._on_auto_toggle)
-        af.addWidget(self._auto_create_chk)
-        c2.addWidget(auto_frame)
+        panel.addWidget(self._auto_create_chk)
 
         self._target_entry = QLineEdit()
         self._target_entry.setPlaceholderText("Leave blank to auto-create, or paste an existing page URL")
-        self._target_entry.setFixedHeight(40)
+        self._target_entry.setFixedHeight(36)
         self._target_entry.setToolTip(
             "Where the combined output is written.\n"
             "Leave blank (with auto-create on) to have one made for you, or paste the URL\n"
             "of an existing blank HTML topic to reuse it."
         )
-        c2.addWidget(self._target_entry)
+        panel.addWidget(self._target_entry)
         self._target_hint = QLabel("A blank page will be created for you. Paste a URL here only to reuse an existing page.")
         self._target_hint.setProperty("role", "dim")
         self._target_hint.setWordWrap(True)
-        c2.addWidget(self._target_hint)
-        controls_layout.addWidget(card2)
-        controls_layout.addSpacing(14)
+        panel.addWidget(self._target_hint)
+        panel.addSpacing(2)
+        panel.addWidget(_divider())
 
-        # ── Step 3 · Style ────────────────────────────────────────────────────
-        card3 = QFrame()
-        card3.setProperty("role", "card")
-        c3 = QVBoxLayout(card3)
-        c3.setContentsMargins(16, 14, 16, 16)
-        c3.setSpacing(10)
-        c3.addWidget(self._step_header("3", "STYLE"))
-        self._swatch_frames, self._selected_theme = _build_theme_swatches(c3)
-        controls_layout.addWidget(card3)
-        controls_layout.addSpacing(14)
+        # ── Style ────────────────────────────────────────────────────────────
+        panel.addWidget(_form_label("STYLE / THEME"))
+        self._swatch_frames, self._selected_theme = _build_theme_swatches(panel)
+        panel.addSpacing(2)
+        panel.addWidget(_divider())
 
         # ── Advanced (collapsed by default) ───────────────────────────────────
         self._adv_btn = QPushButton("▸  Advanced options")
         self._adv_btn.setProperty("variant", "secondary")
         self._adv_btn.setCheckable(True)
-        self._adv_btn.setFixedHeight(38)
+        self._adv_btn.setFixedHeight(30)
+        self._adv_btn.setMaximumWidth(210)
         self._adv_btn.setToolTip("Batch runs, Moodle name-fixing, and speed. Most runs don't need these.")
         self._adv_btn.toggled.connect(self._on_adv_toggle)
-        controls_layout.addWidget(self._adv_btn)
+        panel.addWidget(self._adv_btn, 0, Qt.AlignmentFlag.AlignLeft)
 
-        self._adv_container = QFrame()
-        self._adv_container.setProperty("role", "card")
+        self._adv_container = QWidget()
         adv = QVBoxLayout(self._adv_container)
-        adv.setContentsMargins(16, 14, 16, 16)
-        adv.setSpacing(10)
+        adv.setContentsMargins(0, 2, 0, 0)
+        adv.setSpacing(8)
 
         self._multi_unit_chk = QCheckBox("Also do the following units in this course")
         self._multi_unit_chk.setToolTip(
@@ -165,22 +153,22 @@ class CollectorPanel(QWidget):
         )
         sub_row = QHBoxLayout()
         sub_row.setContentsMargins(0, 2, 0, 0)
-        sub_row.addSpacing(28)
+        sub_row.addSpacing(24)
         sub_row.addWidget(self._auto_continue_chk)
         sub_row.addStretch()
         adv.addLayout(sub_row)
-        adv.addSpacing(6)
+        adv.addSpacing(4)
 
         adv.addWidget(_form_label("MOODLE COURSE URL  (optional — fixes odd file names)"))
         self._moodle_entry = QLineEdit()
         self._moodle_entry.setPlaceholderText("https://mymoodle.okanagan.bc.ca/course/view.php?id=…")
-        self._moodle_entry.setFixedHeight(40)
+        self._moodle_entry.setFixedHeight(36)
         adv.addWidget(self._moodle_entry)
-        adv.addSpacing(6)
+        adv.addSpacing(4)
 
         par_row = QHBoxLayout()
         par_row.setSpacing(10)
-        par_row.addWidget(_form_label("SPEED  (pages at once)"))
+        par_row.addWidget(_form_label("SPEED  (pages at once)"), 0, Qt.AlignmentFlag.AlignVCenter)
         self._parallel_spin = QSpinBox()
         self._parallel_spin.setRange(1, 10)
         self._parallel_spin.setValue(3)
@@ -195,53 +183,44 @@ class CollectorPanel(QWidget):
         adv.addLayout(par_row)
 
         self._adv_container.setVisible(False)
-        controls_layout.addSpacing(8)
-        controls_layout.addWidget(self._adv_container)
-
-        # Cap the form width so cards don't stretch across huge windows.
-        controls_widget.setMaximumWidth(760)
-
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setWidget(controls_widget)
-        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        scroll_area.setAlignment(
-            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
-        )
-
-        # ── Footer: run action, log (drag the splitter handle to resize), continue
-        footer = QWidget()
-        f_outer = QHBoxLayout(footer)
-        f_outer.setContentsMargins(0, 0, 0, 0)
-        footer_inner = QWidget()
-        footer_inner.setMaximumWidth(760)
-        fv = QVBoxLayout(footer_inner)
-        fv.setContentsMargins(0, 0, 0, 0)
-        fv.setSpacing(0)
-        f_outer.addStretch()
-        f_outer.addWidget(footer_inner, 1)
-        f_outer.addStretch()
-
-        fv.addWidget(_divider())
-        fv.addSpacing(12)
+        panel.addWidget(self._adv_container)
 
         self._run_btn = QPushButton("Create Combined Page")
-        self._run_btn.setFixedHeight(42)
-        self._run_btn.setMinimumWidth(260)
+        self._run_btn.setFixedHeight(38)
+        self._run_btn.setMinimumWidth(240)
+        self._run_btn.setStyleSheet(
+            "QPushButton { background-color:#005F63; color:#ffffff; border:none; "
+            "border-radius:6px; padding:8px 18px; font-size:13px; font-weight:600; }"
+            "QPushButton:hover { background-color:#007a80; }"
+            "QPushButton:disabled { background-color:#1a2a2c; color:#636780; }"
+        )
         self._run_btn.setToolTip(
             "Scrapes all topic pages in the unit, combines them into one collapsible HTML file,\n"
             "and writes the result to the target page."
         )
         self._run_btn.clicked.connect(self._start_run)
-        fv.addWidget(self._run_btn, 0, Qt.AlignmentFlag.AlignHCenter)
-        fv.addSpacing(10)
+        panel.addSpacing(4)
+        panel.addWidget(self._run_btn, 0, Qt.AlignmentFlag.AlignLeft)
 
-        fv.addWidget(_form_label("LOG"))
-        fv.addSpacing(4)
+        content_layout.addWidget(main_panel)
+
+        log_header = QWidget()
+        log_header_layout = QHBoxLayout(log_header)
+        log_header_layout.setContentsMargins(0, 2, 0, 0)
+        log_header_layout.setSpacing(8)
+        log_header_layout.addWidget(_form_label("LOG"))
+        log_header_layout.addStretch()
+        self._log_expand_btn = QPushButton("Expand Log")
+        self._log_expand_btn.setProperty("variant", "secondary")
+        self._log_expand_btn.setFixedHeight(28)
+        self._log_expand_btn.setMaximumWidth(120)
+        self._log_expand_btn.clicked.connect(self._toggle_log_size)
+        log_header_layout.addWidget(self._log_expand_btn)
+        content_layout.addWidget(log_header)
+
         self._log = LogWidget()
-        self._log.setMinimumHeight(100)
-        fv.addWidget(self._log, 1)
-        fv.addSpacing(8)
+        self._log.setFixedHeight(240)
+        content_layout.addWidget(self._log)
 
         self._continue_btn = QPushButton("Continue to Page Changer")
         self._continue_btn.setProperty("variant", "next-step")
@@ -249,15 +228,16 @@ class CollectorPanel(QWidget):
         self._continue_btn.setToolTip("Proceed to Step 3: use Claude AI to restyle pages with an OC brand theme.")
         self._continue_btn.hide()
         self._continue_btn.clicked.connect(self.continue_next)
-        fv.addWidget(self._continue_btn)
+        content_layout.addWidget(self._continue_btn, 0, Qt.AlignmentFlag.AlignLeft)
 
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.setChildrenCollapsible(False)
-        splitter.addWidget(scroll_area)
-        splitter.addWidget(footer)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
-        layout.addWidget(splitter, 1)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(content_widget)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
+        )
+        layout.addWidget(scroll_area, 1)
 
         # Carry over URLs entered in the Checker tab, and restore the checkbox.
         cfg = self._mw.load_config() if hasattr(self._mw, "load_config") else {}
@@ -270,23 +250,10 @@ class CollectorPanel(QWidget):
             self._auto_create_chk.setChecked(bool(cfg["col_auto_create"]))
         self._on_auto_toggle(self._auto_create_chk.isChecked())
 
-    def _step_header(self, num: str, text: str) -> QWidget:
-        """A small numbered badge next to an uppercase step label."""
-        row = QWidget()
-        h = QHBoxLayout(row)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(9)
-        badge = QLabel(num)
-        badge.setFixedSize(20, 20)
-        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        badge.setStyleSheet(
-            "background:#005F63; color:#ffffff; border-radius:10px;"
-            "font-size:11px; font-weight:700;"
-        )
-        h.addWidget(badge)
-        h.addWidget(_form_label(text))
-        h.addStretch()
-        return row
+    def _toggle_log_size(self):
+        self._log_expanded = not self._log_expanded
+        self._log.setFixedHeight(420 if self._log_expanded else 240)
+        self._log_expand_btn.setText("Collapse Log" if self._log_expanded else "Expand Log")
 
     def _on_adv_toggle(self, checked: bool):
         self._adv_container.setVisible(checked)

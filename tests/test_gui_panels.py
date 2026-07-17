@@ -79,7 +79,7 @@ def test_collector_panel_builds(qtbot):
     from gui_panels import CollectorPanel
     mw = MagicMock(); mw.chromium_ready = False; mw.load_config.return_value = {}
     panel = CollectorPanel(mw); qtbot.addWidget(panel)
-    assert panel._run_btn.text() == "Collect & Assemble"
+    assert panel._run_btn.text() == "Create Combined Page"
     assert panel._continue_btn.isHidden()
 
 

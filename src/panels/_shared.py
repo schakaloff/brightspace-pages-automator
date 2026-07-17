@@ -29,6 +29,7 @@ def friendly_error(e: Exception) -> tuple[str, str]:
 
 def _divider() -> QFrame:
     line = QFrame()
+    line.setFrameShape(QFrame.Shape.HLine)
     line.setProperty("role", "divider")
     return line
 
