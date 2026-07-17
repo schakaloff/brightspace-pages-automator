@@ -167,12 +167,18 @@ QFrame[role="divider"] {{ background: {c['BORDER']}; max-height: 1px; border: no
 QFrame[role="card"] {{
     background-color: {c['PANEL']}; border: 1px solid {c['BORDER']}; border-radius: 10px;
 }}
-QFrame[role="card"] QLabel {{ background: transparent; }}
-QFrame[role="card"] QLineEdit {{ background-color: {c['BG']}; }}
+QFrame[role="card"] QWidget {{ background: transparent; }}
+QFrame[role="card"] QLineEdit {{
+    background-color: {c['BG']}; border: 1px solid {c['BORDER']}; border-radius: 6px;
+}}
+QFrame[role="card"] QSpinBox {{
+    background-color: {c['BG']}; border: 1px solid {c['BORDER']}; border-radius: 6px;
+    padding: 4px 8px; color: {c['TEXT_PRI']};
+}}
 QFrame[role="card-accent"] {{
     background-color: {c['OC_TEAL_BG']}; border: 1px solid {c['OC_TEAL']}; border-radius: 8px;
 }}
-QFrame[role="card-accent"] QLabel {{ background: transparent; }}
+QFrame[role="card-accent"] QWidget {{ background: transparent; }}
 
 QToolTip {{
     background-color: {c['PANEL']};
