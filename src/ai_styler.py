@@ -138,6 +138,16 @@ def apply_style(
                 max_tokens=_MAX_TOKENS,
                 messages=[{"role": "user", "content": prompt}],
             )
+
+            if response.stop_reason == "max_tokens":
+                log(
+                    f"❌ Response truncated at the {_MAX_TOKENS:,}-token output limit — "
+                    "page is likely too large to restyle in one pass. Leaving existing "
+                    "content untouched.",
+                    "error",
+                )
+                return None, None
+
             result = next(b.text for b in response.content if b.type == "text").strip()
 
             if result.startswith("```"):
@@ -145,6 +155,15 @@ def apply_style(
                 start = 1 if lines[0].startswith("```") else 0
                 end   = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
                 result = "\n".join(lines[start:end]).strip()
+
+            if len(result) < len(cleaned_html) * 0.5:
+                log(
+                    f"❌ Styled result ({len(result):,} chars) is suspiciously short "
+                    f"compared to the source ({len(cleaned_html):,} chars) — refusing to "
+                    "overwrite existing content.",
+                    "error",
+                )
+                return None, None
 
             usage = {
                 "input_tokens": response.usage.input_tokens,
