@@ -58,13 +58,9 @@ class CollectorPanel(QWidget):
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(0)
 
-        controls_layout.addWidget(_form_label("PAGE THEME"))
-        controls_layout.addSpacing(6)
-        self._swatch_frames, self._selected_theme = _build_theme_swatches(controls_layout)
-        controls_layout.addSpacing(14)
-
-        controls_layout.addWidget(_form_label("BRIGHTSPACE UNIT URL"))
-        controls_layout.addSpacing(4)
+        # ── Step 1 · Brightspace unit ─────────────────────────────────────────
+        controls_layout.addWidget(self._step_header("1", "BRIGHTSPACE UNIT"))
+        controls_layout.addSpacing(8)
         self._unit_entry = QLineEdit()
         self._unit_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/le/content/…/lessons/…")
         self._unit_entry.setFixedHeight(40)
@@ -79,9 +75,12 @@ class CollectorPanel(QWidget):
         self._bs_course_hint.hide()
         controls_layout.addSpacing(4)
         controls_layout.addWidget(self._bs_course_hint)
-        controls_layout.addSpacing(12)
+        controls_layout.addSpacing(22)
 
-        self._auto_create_chk = QCheckBox("Auto-create the target page in this unit (recommended)")
+        # ── Step 2 · Combined page ────────────────────────────────────────────
+        controls_layout.addWidget(self._step_header("2", "COMBINED PAGE"))
+        controls_layout.addSpacing(8)
+        self._auto_create_chk = QCheckBox("Create the combined page for me (recommended)")
         self._auto_create_chk.setChecked(True)
         self._auto_create_chk.setToolTip(
             "When on, a blank page is created automatically at the end of the unit above,\n"
@@ -92,27 +91,6 @@ class CollectorPanel(QWidget):
         controls_layout.addWidget(self._auto_create_chk)
         controls_layout.addSpacing(8)
 
-        self._multi_unit_chk = QCheckBox("Continue to next unit automatically")
-        self._multi_unit_chk.setToolTip(
-            "After this unit finishes, find the next unit in the course\n"
-            "(skipping empty units and units that already have a combined\n"
-            "page) and run it too. You'll be asked to confirm before each\n"
-            "additional unit unless “Don't ask before each unit” is also checked."
-        )
-        self._multi_unit_chk.toggled.connect(self._on_multi_unit_toggle)
-        controls_layout.addWidget(self._multi_unit_chk)
-
-        self._auto_continue_chk = QCheckBox("Don't ask before each unit")
-        self._auto_continue_chk.setEnabled(False)
-        self._auto_continue_chk.setToolTip(
-            "Runs straight through additional units without pausing to\n"
-            "confirm. Only used when “Continue to next unit automatically” is on."
-        )
-        controls_layout.addWidget(self._auto_continue_chk)
-        controls_layout.addSpacing(8)
-
-        controls_layout.addWidget(_form_label("TARGET PAGE URL  (optional — leave blank to auto-create)"))
-        controls_layout.addSpacing(4)
         self._target_entry = QLineEdit()
         self._target_entry.setPlaceholderText("Leave blank to auto-create, or paste an existing page URL")
         self._target_entry.setFixedHeight(40)
@@ -127,18 +105,62 @@ class CollectorPanel(QWidget):
         self._target_hint.setWordWrap(True)
         controls_layout.addSpacing(4)
         controls_layout.addWidget(self._target_hint)
-        controls_layout.addSpacing(12)
+        controls_layout.addSpacing(22)
 
-        controls_layout.addWidget(_form_label("MOODLE COURSE URL  (optional — fixes weird file/link names)"))
-        controls_layout.addSpacing(4)
+        # ── Step 3 · Style ────────────────────────────────────────────────────
+        controls_layout.addWidget(self._step_header("3", "STYLE"))
+        controls_layout.addSpacing(8)
+        self._swatch_frames, self._selected_theme = _build_theme_swatches(controls_layout)
+        controls_layout.addSpacing(22)
+
+        # ── Advanced (collapsed by default) ───────────────────────────────────
+        self._adv_btn = QPushButton("▸  Advanced options")
+        self._adv_btn.setProperty("variant", "secondary")
+        self._adv_btn.setCheckable(True)
+        self._adv_btn.setFixedHeight(38)
+        self._adv_btn.setToolTip("Batch runs, Moodle name-fixing, and speed. Most runs don't need these.")
+        self._adv_btn.toggled.connect(self._on_adv_toggle)
+        controls_layout.addWidget(self._adv_btn)
+
+        self._adv_container = QWidget()
+        adv = QVBoxLayout(self._adv_container)
+        adv.setContentsMargins(2, 12, 2, 2)
+        adv.setSpacing(8)
+
+        self._multi_unit_chk = QCheckBox("Also do the following units in this course")
+        self._multi_unit_chk.setToolTip(
+            "After this unit finishes, find the next unit in the course\n"
+            "(skipping empty units and units that already have a combined\n"
+            "page) and run it too. You'll be asked to confirm before each\n"
+            "additional unit unless “Don't ask me before each unit” is also checked."
+        )
+        self._multi_unit_chk.toggled.connect(self._on_multi_unit_toggle)
+        adv.addWidget(self._multi_unit_chk)
+
+        self._auto_continue_chk = QCheckBox("Don't ask me before each unit")
+        self._auto_continue_chk.setEnabled(False)
+        self._auto_continue_chk.setToolTip(
+            "Runs straight through additional units without pausing to\n"
+            "confirm. Only used when “Also do the following units” is on."
+        )
+        sub_row = QHBoxLayout()
+        sub_row.setContentsMargins(0, 0, 0, 0)
+        sub_row.addSpacing(24)
+        sub_row.addWidget(self._auto_continue_chk)
+        sub_row.addStretch()
+        adv.addLayout(sub_row)
+        adv.addSpacing(6)
+
+        adv.addWidget(_form_label("MOODLE COURSE URL  (optional — fixes odd file names)"))
         self._moodle_entry = QLineEdit()
         self._moodle_entry.setPlaceholderText("https://mymoodle.okanagan.bc.ca/course/view.php?id=…")
         self._moodle_entry.setFixedHeight(40)
-        controls_layout.addWidget(self._moodle_entry)
-        controls_layout.addSpacing(12)
+        adv.addWidget(self._moodle_entry)
+        adv.addSpacing(6)
 
         par_row = QHBoxLayout()
-        par_row.addWidget(_form_label("PARALLEL PAGES"))
+        par_row.addWidget(_form_label("SPEED  (pages at once)"))
+        par_row.addStretch()
         self._parallel_spin = QSpinBox()
         self._parallel_spin.setRange(1, 10)
         self._parallel_spin.setValue(3)
@@ -148,8 +170,10 @@ class CollectorPanel(QWidget):
             "Higher = faster, but may trigger Brightspace rate limits. Default 3 is safe."
         )
         par_row.addWidget(self._parallel_spin)
-        par_row.addStretch()
-        controls_layout.addLayout(par_row)
+        adv.addLayout(par_row)
+
+        self._adv_container.setVisible(False)
+        controls_layout.addWidget(self._adv_container)
 
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -160,7 +184,7 @@ class CollectorPanel(QWidget):
         # ── Pinned below the scroll area: run action, log, continue ───────────
         layout.addSpacing(14)
 
-        self._run_btn = QPushButton("Collect & Assemble")
+        self._run_btn = QPushButton("Create Combined Page")
         self._run_btn.setFixedHeight(42)
         self._run_btn.setToolTip(
             "Scrapes all topic pages in the unit, combines them into one collapsible HTML file,\n"
@@ -195,9 +219,37 @@ class CollectorPanel(QWidget):
         if "col_auto_create" in cfg:
             self._auto_create_chk.setChecked(bool(cfg["col_auto_create"]))
         self._on_auto_toggle(self._auto_create_chk.isChecked())
+        # If a Moodle URL was carried over, open Advanced so it's visible.
+        if self._moodle_entry.text().strip():
+            self._adv_btn.setChecked(True)
+
+    def _step_header(self, num: str, text: str) -> QWidget:
+        """A small numbered badge next to an uppercase step label."""
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(9)
+        badge = QLabel(num)
+        badge.setFixedSize(20, 20)
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge.setStyleSheet(
+            "background:#005F63; color:#ffffff; border-radius:10px;"
+            "font-size:11px; font-weight:700;"
+        )
+        h.addWidget(badge)
+        h.addWidget(_form_label(text))
+        h.addStretch()
+        return row
+
+    def _on_adv_toggle(self, checked: bool):
+        self._adv_container.setVisible(checked)
+        self._adv_btn.setText("▾  Advanced options" if checked else "▸  Advanced options")
 
     def _on_auto_toggle(self, checked: bool):
-        """Reflect the auto-create choice in the Target URL field's hint/placeholder."""
+        """Reflect the auto-create choice: hide the target field when a page will
+        be made automatically, show it (with guidance) when the user must supply one."""
+        self._target_entry.setVisible(not checked)
+        self._target_hint.setVisible(not checked)
         if checked:
             self._target_entry.setPlaceholderText("Leave blank to auto-create, or paste an existing page URL")
             self._target_hint.setText("A blank page will be created for you. Paste a URL here only to reuse an existing page.")
@@ -215,6 +267,7 @@ class CollectorPanel(QWidget):
         cfg = self._mw.load_config() if hasattr(self._mw, "load_config") else {}
         if cfg.get("chk_moodle_url") and not self._moodle_entry.text().strip():
             self._moodle_entry.setText(cfg["chk_moodle_url"])
+            self._adv_btn.setChecked(True)
         if cfg.get("chk_bs_url"):
             self._bs_course_hint.setText(f"Course carried over from Checker: {cfg['chk_bs_url']}")
             self._bs_course_hint.show()
@@ -376,7 +429,7 @@ class CollectorPanel(QWidget):
             while True:
                 msg, tag = self._log_queue.get_nowait()
                 if msg == "__DONE__":
-                    self._run_btn.setText("Collect & Assemble")
+                    self._run_btn.setText("Create Combined Page")
                     self._run_btn.setEnabled(True)
                 elif msg == "__SUCCESS__":
                     self._continue_btn.show()

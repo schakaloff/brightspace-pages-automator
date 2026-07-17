@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Guides — Brightspace Pages Automator</title>
-<meta name="description" content="Manual fallback guides for when the app can't finish the job automatically.">
+<meta name="description" content="A plain-language guide to using Page Automator, plus manual fallback steps for when the app can't finish the job.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -92,6 +92,22 @@
   }
   .guide-nav a:hover { background: #BAE6FD; }
 
+  /* ---------- Group heading between sets of guides ---------- */
+  .guide-group-title {
+    font-family: 'Bricolage Grotesque', 'Inter', sans-serif;
+    font-weight: 800;
+    font-size: 1.55rem;
+    letter-spacing: -0.01em;
+    margin: 8px 0 6px;
+    scroll-margin-top: 24px;
+  }
+  .guide-group-intro {
+    color: var(--muted);
+    font-size: 0.98rem;
+    margin-bottom: 24px;
+    max-width: 620px;
+  }
+
   /* ---------- Guide article ---------- */
   .guide {
     background: var(--card);
@@ -156,6 +172,58 @@
     padding: 8px 12px;
   }
 
+  /* Warning callout — for anything that could lose or misplace content */
+  .warn {
+    display: block;
+    margin-top: 10px;
+    font-size: 0.85rem;
+    color: #92400E;
+    background: #FEF3C7;
+    border: 1px solid #FDE68A;
+    border-radius: 8px;
+    padding: 8px 12px;
+  }
+  .warn strong { color: #92400E; }
+  /* A stand-alone warning at the top of a card */
+  .guide > .warn { margin-top: 0; margin-bottom: 20px; }
+
+  /* Plain lead paragraph describing what a tool does */
+  .lead {
+    color: var(--muted);
+    font-size: 0.95rem;
+    margin-bottom: 20px;
+  }
+  .lead + .lead { margin-top: -12px; }
+
+  /* Quality-control checklist */
+  .checklist { list-style: none; }
+  .checklist li {
+    position: relative;
+    padding: 10px 0 10px 32px;
+    font-size: 0.95rem;
+    border-top: 1px solid var(--line);
+  }
+  .checklist li:first-child { border-top: none; }
+  .checklist li::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 12px;
+    width: 16px; height: 16px;
+    border: 2px solid var(--accent);
+    border-radius: 4px;
+  }
+
+  /* Troubleshooting Q/A list */
+  .qa { list-style: none; }
+  .qa li {
+    padding: 16px 0;
+    font-size: 0.95rem;
+  }
+  .qa li + li { border-top: 1px solid var(--line); }
+  .qa strong { display: block; margin-bottom: 4px; }
+  .qa p { color: var(--muted); font-size: 0.92rem; }
+
   kbd {
     font-family: ui-monospace, 'SF Mono', Consolas, monospace;
     font-size: 0.85em;
@@ -194,17 +262,436 @@
 
 <header class="page-header">
   <div class="wrap">
-    <span class="eyebrow">Manual fallback guides</span>
-    <h1>When the app can't finish the job</h1>
-    <p>Step-by-step instructions for doing by hand what the app usually does automatically. Use these if a run fails partway through.</p>
+    <span class="eyebrow">Guides</span>
+    <h1>Using Page Automator</h1>
+    <p>A plain-language walkthrough for moving Moodle course content into Brightspace, step by step. No technical background needed.</p>
 
     <nav class="guide-nav" aria-label="Jump to a guide">
-      <a href="#kaltura-video">Move a Kaltura video</a>
+      <a href="#before-you-start">Before you start</a>
+      <a href="#settings">Settings</a>
+      <a href="#checker">Content Checker</a>
+      <a href="#collector">Unit Collector</a>
+      <a href="#kaltura-tab">Kaltura</a>
+      <a href="#h5p">H5P</a>
+      <a href="#qc">Quality checklist</a>
+      <a href="#troubleshooting">Troubleshooting</a>
+      <a href="#kaltura-video">Manual: move one video</a>
     </nav>
   </div>
 </header>
 
 <main class="wrap">
+
+  <p class="guide-group-title">Step by step</p>
+  <p class="guide-group-intro">Work through these in order the first time. Once you're comfortable, you can jump straight to the tool you need.</p>
+
+  <!-- ── 1. Before you start ─────────────────────────────────────────── -->
+  <article class="guide" id="before-you-start">
+    <h2>1 · Before you start</h2>
+    <p class="guide-sub">A few quick checks that save time later.</p>
+
+    <ol class="guide-steps">
+      <li>
+        <div>
+          <strong>Make sure you can log into Brightspace</strong>
+          <ul>
+            <li>Open Brightspace in your browser and sign in normally.</li>
+            <li>If you can reach your course, you're set.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Make sure you can log into Moodle</strong>
+          <ul>
+            <li>Open Moodle and sign in.</li>
+            <li>Confirm you can open the course you're moving.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>If you'll use Kaltura, have those details saved</strong>
+          <ul>
+            <li>Only needed if the course has Kaltura videos.</li>
+            <li>You'll add them in Settings (next section).</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Check the Moodle course format</strong>
+          <ul>
+            <li>If the Moodle course uses <em>Tab View</em>, change the course format first.</li>
+            <li>In Moodle: <kbd>Settings</kbd> → <kbd>Course format</kbd> → choose <kbd>Custom sections</kbd>.</li>
+          </ul>
+          <span class="warn">Do this <strong>before</strong> scanning. Tab View can hide sections from the tools, so content may look missing when it isn't.</span>
+        </div>
+      </li>
+    </ol>
+  </article>
+
+  <!-- ── 2. Settings ─────────────────────────────────────────────────── -->
+  <article class="guide" id="settings">
+    <h2>2 · Settings</h2>
+    <p class="guide-sub">Enter your sign-in details once. The app remembers them between sessions.</p>
+
+    <p class="warn"><strong>Keep it private.</strong> Never share your passwords or API key, and don't paste them into emails or chat. If you're unsure what to enter, ask your project lead before changing anything.</p>
+
+    <ol class="guide-steps">
+      <li>
+        <div>
+          <strong>Open Settings</strong>
+          <ul>
+            <li>Click <kbd>Settings</kbd> at the bottom of the left sidebar.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Enter your Brightspace credentials</strong>
+          <ul>
+            <li>Type your Brightspace username and password.</li>
+            <li>Microsoft (MS / SSO) sign-in is not needed.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Enter your Moodle credentials</strong>
+          <ul>
+            <li>Used by the Checker and Kaltura tools to read the Moodle course.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Enter Kaltura credentials — only if using Kaltura</strong>
+          <ul>
+            <li>Skip this if the course has no Kaltura videos.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Enter your Claude API key — only if required</strong>
+          <ul>
+            <li>Needed for the styling step in Unit Collector.</li>
+            <li>If you don't have one, ask your project lead.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Choose the Claude model</strong>
+          <ul>
+            <li>Pick the model marked as recommended in the list.</li>
+            <li>Your team may specify a particular one (for example, Haiku 4.5) — use that if told to.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Save your settings</strong>
+          <ul>
+            <li>Click <kbd>Save</kbd>. You only need to do this again if a password changes.</li>
+          </ul>
+        </div>
+      </li>
+    </ol>
+  </article>
+
+  <!-- ── 3. Content Checker ──────────────────────────────────────────── -->
+  <article class="guide" id="checker">
+    <h2>3 · Content Checker</h2>
+    <p class="guide-sub">Find out what made it into Brightspace and what didn't.</p>
+
+    <p class="lead">The Checker compares your Moodle course with your Brightspace course and reports what's missing. It can download missing files and H5P activities and place them into the matching Brightspace section, in the course's main content files. It also flags links and <em>fuzzy</em> matches — items that look like the same thing but aren't an exact name match.</p>
+
+    <ol class="guide-steps">
+      <li>
+        <div>
+          <strong>Paste the Moodle course URL</strong>
+          <ul>
+            <li>Copy the address of the Moodle course from your browser.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Paste the Brightspace course or unit URL</strong>
+          <ul>
+            <li>Copy the address of the matching Brightspace course.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Run the check</strong>
+          <ul>
+            <li>Start the scan and let it finish.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Review the results</strong>
+          <ul>
+            <li><strong>Exact</strong> — already in Brightspace, nothing to do.</li>
+            <li><strong>Missing</strong> — not found in Brightspace.</li>
+            <li><strong>Review / fuzzy</strong> — a possible match to double-check.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Choose what to upload</strong>
+          <ul>
+            <li>If the missing / review popup appears, tick only the files you actually want uploaded.</li>
+          </ul>
+          <span class="warn">For a fuzzy match, only tick it if it's genuinely the same file. When in doubt, leave it unticked and check by hand.</span>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Let the app finish</strong>
+          <ul>
+            <li>Wait until uploading is complete before moving on.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Read the summary</strong>
+          <ul>
+            <li>Confirm what was uploaded and note anything flagged for manual follow-up.</li>
+          </ul>
+        </div>
+      </li>
+    </ol>
+  </article>
+
+  <!-- ── 4. Unit Collector ───────────────────────────────────────────── -->
+  <article class="guide" id="collector">
+    <h2>4 · Unit Collector</h2>
+    <p class="guide-sub">Combine the pages of one Brightspace unit into a single page.</p>
+
+    <p class="lead">The Collector gathers the content pages in one unit and merges them into a single combined page. It does <strong>not</strong> move quizzes or assignments. It can create a fresh target page for you, or fill a blank page you point it to.</p>
+
+    <ol class="guide-steps">
+      <li>
+        <div>
+          <strong>Paste the Brightspace unit URL</strong>
+          <ul>
+            <li>Copy the address of the unit you want to combine.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Set the target page</strong>
+          <ul>
+            <li>Leave <em>auto-create target page</em> on to have a new blank page made for you.</li>
+            <li>Or make a blank page yourself first and paste its link into <kbd>Target Page</kbd> — handy if you want to compare before deleting anything.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Choose a theme colour</strong>
+          <ul>
+            <li>Pick the colour theme for the page. Your department may have a preferred one (for example, EA uses Lake).</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Choose the speed</strong>
+          <ul>
+            <li>Set parallel pages to <strong>2 or 3</strong>. Higher isn't always better and can trip Brightspace limits.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Click Collect &amp; Assemble</strong>
+          <ul>
+            <li>Start the run.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Log in if prompted</strong>
+          <ul>
+            <li>If a browser window asks you to sign in, do it, then let the run continue.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Wait until it's complete</strong>
+          <ul>
+            <li>Watch the log at the bottom. Let it finish before touching the course.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Review the combined page</strong>
+          <ul>
+            <li>Open the new page and check everything came across.</li>
+          </ul>
+        </div>
+      </li>
+    </ol>
+
+    <p class="warn"><strong>Always review before deleting.</strong> Check the combined page carefully before you remove any original unit content. Deleting first means there's nothing to fall back on.</p>
+    <p class="warn"><strong>Very large units:</strong> if a unit is too big, the app will skip the automatic styling step on purpose. That's a safety measure to avoid wiping content — the combined text is still collected; it just won't be restyled.</p>
+  </article>
+
+  <!-- ── 5. Kaltura ──────────────────────────────────────────────────── -->
+  <article class="guide" id="kaltura-tab">
+    <h2>5 · Kaltura</h2>
+    <p class="guide-sub">Move Kaltura videos from Moodle into Brightspace pages.</p>
+
+    <p class="lead">The Kaltura tool finds Kaltura videos in the Moodle course (including videos inside Books), suggests which Brightspace unit each one belongs in, and creates Brightspace pages with the videos embedded. Videos are linked in place — nothing is downloaded.</p>
+
+    <ol class="guide-steps">
+      <li>
+        <div>
+          <strong>Paste the Moodle course URL</strong>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Paste the Brightspace course URL</strong>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Find the videos</strong>
+          <ul>
+            <li>Click <kbd>Find Videos &amp; Suggest Destinations</kbd> if available — it scans and suggests mappings in one step.</li>
+            <li>The first time, you may be asked to log into Moodle in the browser window.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Review the suggested mappings</strong>
+          <ul>
+            <li>Check where each Moodle section will send its videos in Brightspace.</li>
+            <li>Fix any mapping marked <em>Needs review</em>.</li>
+          </ul>
+          <span class="warn">If a video's destination is unclear, leave it unticked and ask for a second opinion rather than guessing.</span>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Select the videos to transfer</strong>
+          <ul>
+            <li>Tick the videos you want. Use <kbd>Select All</kbd> if you want them all.</li>
+          </ul>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Click Create Pages</strong>
+          <ul>
+            <li>Confirm when asked — this writes new pages into the live Brightspace course.</li>
+            <li>Log into Kaltura if prompted.</li>
+          </ul>
+          <span class="warn"><strong>Don't create pages until the mappings look right.</strong> This step writes directly to Brightspace and can't be undone automatically.</span>
+        </div>
+      </li>
+    </ol>
+  </article>
+
+  <!-- ── 6. H5P ──────────────────────────────────────────────────────── -->
+  <article class="guide" id="h5p">
+    <h2>6 · H5P</h2>
+    <p class="guide-sub">Move H5P activities from Moodle into Brightspace.</p>
+
+    <p class="lead">The H5P tool finds H5P activities in the Moodle course and helps you bring them into Brightspace. Use it when the Content Checker reports H5P items that are missing.</p>
+
+    <ol class="guide-steps">
+      <li>
+        <div>
+          <strong>Paste the Moodle course URL</strong>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Paste the Brightspace course URL</strong>
+        </div>
+      </li>
+      <li>
+        <div>
+          <strong>Start the scan</strong>
+          <ul>
+            <li>Click <kbd>Scrape</kbd> and follow the prompts.</li>
+            <li>You may be asked to switch your Moodle role to Teacher so the files can be downloaded.</li>
+          </ul>
+        </div>
+      </li>
+    </ol>
+  </article>
+
+  <!-- ── 7. Quality control checklist ────────────────────────────────── -->
+  <article class="guide" id="qc">
+    <h2>7 · Quality control checklist</h2>
+    <p class="guide-sub">Run through this before you delete any original content.</p>
+
+    <ul class="checklist">
+      <li>Is this the correct Brightspace unit?</li>
+      <li>Does the page title match the Moodle name?</li>
+      <li>Do the files open?</li>
+      <li>Do the videos play?</li>
+      <li>Does the H5P activity work?</li>
+      <li>Do the links open?</li>
+      <li>Does the combined page have all the expected content?</li>
+      <li>Are there no duplicate pages?</li>
+      <li>Old content deleted only after this review?</li>
+    </ul>
+  </article>
+
+  <!-- ── 8. Troubleshooting ──────────────────────────────────────────── -->
+  <article class="guide" id="troubleshooting">
+    <h2>8 · Troubleshooting</h2>
+    <p class="guide-sub">Common situations and what to do.</p>
+
+    <ul class="qa">
+      <li>
+        <strong>The app asks me to log in again</strong>
+        <p>Sign in when the browser window appears, then start the run again.</p>
+      </li>
+      <li>
+        <strong>A missing-file popup appeared</strong>
+        <p>Review the ticked files before uploading. Only tick what you actually want added.</p>
+      </li>
+      <li>
+        <strong>A fuzzy match showed up</strong>
+        <p>Only select it if it really is the same file. If you're not sure, leave it and check by hand.</p>
+      </li>
+      <li>
+        <strong>The Kaltura scan is taking a long time</strong>
+        <p>That's normal for courses with Books that have many chapters — it can take several minutes.</p>
+      </li>
+      <li>
+        <strong>The page looks empty after collecting</strong>
+        <p>Stop and report it. Do <strong>not</strong> delete the original content — the original is your backup.</p>
+      </li>
+      <li>
+        <strong>It said upload failed, but the file appears later</strong>
+        <p>Refresh Brightspace and check the module. The upload may have finished after the message.</p>
+      </li>
+    </ul>
+  </article>
+
+  <!-- ════════════════════════════════════════════════════════════════ -->
+  <p class="guide-group-title" id="manual-fallback">Manual fallback</p>
+  <p class="guide-group-intro">Step-by-step instructions for doing by hand what the app usually does automatically. Use these if a run fails partway through.</p>
 
   <!--
     ── Adding a new guide ──────────────────────────────────────────────────
@@ -212,12 +699,12 @@
     paste it after the last one, then:
       1. change the id="..." to something short and unique
       2. change the <h2> title and .guide-sub description
-      3. change the <a href="#..."> link in .guide-nav above to match
+      3. add a matching <a href="#..."> link in .guide-nav above
       4. edit the numbered steps inside .guide-steps
   -->
 
   <article class="guide" id="kaltura-video">
-    <h2>Find the video in Moodle</h2>
+    <h2>Move one Kaltura video by hand</h2>
     <p class="guide-sub">Manual steps for moving one Kaltura video from a Moodle course into the matching Brightspace unit.</p>
 
     <ol class="guide-steps">
@@ -274,7 +761,7 @@
           <ul>
             <li>Use KMC.</li>
             <li>Search the video.</li>
-            <li>Use <kbd>Share & Embed</kbd>.</li>
+            <li>Use <kbd>Share &amp; Embed</kbd>.</li>
             <li>Prefer an iframe embed, not a JavaScript/script embed.</li>
             <li>Paste only inside <kbd>Source Code</kbd> — never the normal editor.</li>
           </ul>

@@ -30,10 +30,35 @@
   }
   .wrap { max-width: 880px; margin: 0 auto; padding: 0 24px; }
 
+  /* ---------- Top nav ---------- */
+  .topnav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 0;
+    gap: 16px;
+  }
+  .topnav .brand {
+    font-family: 'Bricolage Grotesque', 'Inter', sans-serif;
+    font-weight: 700;
+    font-size: 0.95rem;
+    color: var(--ink);
+    text-decoration: none;
+  }
+  .topnav .nav-links { display: flex; gap: 20px; }
+  .topnav .nav-links a {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--muted);
+    text-decoration: none;
+  }
+  .topnav .nav-links a:hover { color: var(--accent-dark); }
+  .topnav .nav-links a:focus-visible { outline: 3px solid var(--accent-dark); outline-offset: 3px; border-radius: 4px; }
+
   /* ---------- Hero ---------- */
   .hero {
     text-align: center;
-    padding: 88px 0 72px;
+    padding: 56px 0 72px;
     position: relative;
     overflow: hidden;
   }
@@ -259,6 +284,14 @@
 </style>
 </head>
 <body>
+
+<nav class="topnav wrap" aria-label="Primary">
+  <a class="brand" href="index.html">Brightspace Pages Automator</a>
+  <div class="nav-links">
+    <a href="guides.html">Guides</a>
+    <a href="https://github.com/schakaloff/brightspace-pages-automator/issues">Report an issue</a>
+  </div>
+</nav>
 
 <header class="hero">
   <div class="wrap">
