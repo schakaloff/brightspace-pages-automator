@@ -3,6 +3,8 @@ import re
 from PySide6.QtWidgets import QFrame, QLabel, QWidget, QHBoxLayout, QVBoxLayout, QPushButton
 from PySide6.QtCore import Qt
 
+import gui_styles
+
 
 _ERROR_PATTERNS = [
     (r"Timeout \d+ms exceeded|TimeoutError",
@@ -82,9 +84,11 @@ def _build_theme_swatches(parent_layout: QVBoxLayout) -> tuple[dict, list]:
                 f"border:2px solid transparent;"
             )
         selected[0] = name
+        # Ring color from the active app theme so it's visible on light and dark.
+        ring = gui_styles.current["TEXT_PRI"]
         frames[name].setStyleSheet(
             f"background:{PAGE_THEMES[name]['circle']};border-radius:13px;"
-            f"border:2px solid #ffffff;"
+            f"border:3px solid {ring};"
         )
 
     for name, theme in PAGE_THEMES.items():

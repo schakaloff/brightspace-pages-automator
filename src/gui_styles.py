@@ -173,7 +173,13 @@ QFrame[role="card"] QLineEdit {{
 }}
 QFrame[role="card"] QSpinBox {{
     background-color: {c['BG']}; border: 1px solid {c['BORDER']}; border-radius: 6px;
-    padding: 4px 8px; color: {c['TEXT_PRI']};
+    padding: 2px 4px; color: {c['TEXT_PRI']};
+}}
+QFrame[role="card"] QSpinBox::up-button, QFrame[role="card"] QSpinBox::down-button {{
+    width: 18px; border: none; background: transparent;
+}}
+QFrame[role="card"] QSpinBox::up-button:hover, QFrame[role="card"] QSpinBox::down-button:hover {{
+    background: {c['BORDER']};
 }}
 QFrame[role="card-accent"] {{
     background-color: {c['OC_TEAL_BG']}; border: 1px solid {c['OC_TEAL']}; border-radius: 8px;

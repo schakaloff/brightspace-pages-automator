@@ -16,7 +16,7 @@ def _normalize_url(u: str) -> str:
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit, QSpinBox, QCheckBox, QScrollArea, QFrame,
+    QPushButton, QLineEdit, QSpinBox, QCheckBox, QScrollArea, QFrame, QSplitter,
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 
@@ -164,8 +164,8 @@ class CollectorPanel(QWidget):
             "confirm. Only used when “Also do the following units” is on."
         )
         sub_row = QHBoxLayout()
-        sub_row.setContentsMargins(0, 0, 0, 0)
-        sub_row.addSpacing(24)
+        sub_row.setContentsMargins(0, 2, 0, 0)
+        sub_row.addSpacing(28)
         sub_row.addWidget(self._auto_continue_chk)
         sub_row.addStretch()
         adv.addLayout(sub_row)
@@ -179,50 +179,69 @@ class CollectorPanel(QWidget):
         adv.addSpacing(6)
 
         par_row = QHBoxLayout()
+        par_row.setSpacing(10)
         par_row.addWidget(_form_label("SPEED  (pages at once)"))
-        par_row.addStretch()
         self._parallel_spin = QSpinBox()
         self._parallel_spin.setRange(1, 10)
         self._parallel_spin.setValue(3)
-        self._parallel_spin.setFixedWidth(60)
+        self._parallel_spin.setFixedWidth(84)
+        self._parallel_spin.setFixedHeight(32)
         self._parallel_spin.setToolTip(
             "Number of topic pages fetched simultaneously.\n"
             "Higher = faster, but may trigger Brightspace rate limits. Default 3 is safe."
         )
         par_row.addWidget(self._parallel_spin)
+        par_row.addStretch()
         adv.addLayout(par_row)
 
         self._adv_container.setVisible(False)
         controls_layout.addSpacing(8)
         controls_layout.addWidget(self._adv_container)
 
+        # Cap the form width so cards don't stretch across huge windows.
+        controls_widget.setMaximumWidth(760)
+
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setWidget(controls_widget)
         scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        layout.addWidget(scroll_area, 3)
+        scroll_area.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
+        )
 
-        # ── Pinned below the scroll area: run action, log, continue ───────────
-        layout.addSpacing(12)
-        layout.addWidget(_divider())
-        layout.addSpacing(12)
+        # ── Footer: run action, log (drag the splitter handle to resize), continue
+        footer = QWidget()
+        f_outer = QHBoxLayout(footer)
+        f_outer.setContentsMargins(0, 0, 0, 0)
+        footer_inner = QWidget()
+        footer_inner.setMaximumWidth(760)
+        fv = QVBoxLayout(footer_inner)
+        fv.setContentsMargins(0, 0, 0, 0)
+        fv.setSpacing(0)
+        f_outer.addStretch()
+        f_outer.addWidget(footer_inner, 1)
+        f_outer.addStretch()
+
+        fv.addWidget(_divider())
+        fv.addSpacing(12)
 
         self._run_btn = QPushButton("Create Combined Page")
         self._run_btn.setFixedHeight(42)
+        self._run_btn.setMinimumWidth(260)
         self._run_btn.setToolTip(
             "Scrapes all topic pages in the unit, combines them into one collapsible HTML file,\n"
             "and writes the result to the target page."
         )
         self._run_btn.clicked.connect(self._start_run)
-        layout.addWidget(self._run_btn)
-        layout.addSpacing(8)
+        fv.addWidget(self._run_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+        fv.addSpacing(10)
 
-        layout.addWidget(_form_label("LOG"))
-        layout.addSpacing(4)
+        fv.addWidget(_form_label("LOG"))
+        fv.addSpacing(4)
         self._log = LogWidget()
-        self._log.setMinimumHeight(120)
-        layout.addWidget(self._log, 1)
-        layout.addSpacing(8)
+        self._log.setMinimumHeight(100)
+        fv.addWidget(self._log, 1)
+        fv.addSpacing(8)
 
         self._continue_btn = QPushButton("Continue to Page Changer")
         self._continue_btn.setProperty("variant", "next-step")
@@ -230,7 +249,15 @@ class CollectorPanel(QWidget):
         self._continue_btn.setToolTip("Proceed to Step 3: use Claude AI to restyle pages with an OC brand theme.")
         self._continue_btn.hide()
         self._continue_btn.clicked.connect(self.continue_next)
-        layout.addWidget(self._continue_btn)
+        fv.addWidget(self._continue_btn)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(scroll_area)
+        splitter.addWidget(footer)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        layout.addWidget(splitter, 1)
 
         # Carry over URLs entered in the Checker tab, and restore the checkbox.
         cfg = self._mw.load_config() if hasattr(self._mw, "load_config") else {}
@@ -242,9 +269,6 @@ class CollectorPanel(QWidget):
         if "col_auto_create" in cfg:
             self._auto_create_chk.setChecked(bool(cfg["col_auto_create"]))
         self._on_auto_toggle(self._auto_create_chk.isChecked())
-        # If a Moodle URL was carried over, open Advanced so it's visible.
-        if self._moodle_entry.text().strip():
-            self._adv_btn.setChecked(True)
 
     def _step_header(self, num: str, text: str) -> QWidget:
         """A small numbered badge next to an uppercase step label."""
