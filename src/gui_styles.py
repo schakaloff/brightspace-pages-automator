@@ -164,6 +164,16 @@ QMenu::separator {{ height: 1px; background: {c['BORDER']}; margin: 4px 10px; }}
 
 QFrame[role="divider"] {{ background: {c['BORDER']}; max-height: 1px; border: none; }}
 
+QFrame[role="card"] {{
+    background-color: {c['PANEL']}; border: 1px solid {c['BORDER']}; border-radius: 10px;
+}}
+QFrame[role="card"] QLabel {{ background: transparent; }}
+QFrame[role="card"] QLineEdit {{ background-color: {c['BG']}; }}
+QFrame[role="card-accent"] {{
+    background-color: {c['OC_TEAL_BG']}; border: 1px solid {c['OC_TEAL']}; border-radius: 8px;
+}}
+QFrame[role="card-accent"] QLabel {{ background: transparent; }}
+
 QToolTip {{
     background-color: {c['PANEL']};
     color: {c['TEXT_PRI']};

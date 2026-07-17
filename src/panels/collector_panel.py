@@ -59,8 +59,12 @@ class CollectorPanel(QWidget):
         controls_layout.setSpacing(0)
 
         # ── Step 1 · Brightspace unit ─────────────────────────────────────────
-        controls_layout.addWidget(self._step_header("1", "BRIGHTSPACE UNIT"))
-        controls_layout.addSpacing(8)
+        card1 = QFrame()
+        card1.setProperty("role", "card")
+        c1 = QVBoxLayout(card1)
+        c1.setContentsMargins(16, 14, 16, 16)
+        c1.setSpacing(8)
+        c1.addWidget(self._step_header("1", "BRIGHTSPACE UNIT"))
         self._unit_entry = QLineEdit()
         self._unit_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/le/content/…/lessons/…")
         self._unit_entry.setFixedHeight(40)
@@ -68,18 +72,28 @@ class CollectorPanel(QWidget):
             "The URL of a Brightspace unit (a collection of topic pages).\n"
             "Find it by clicking a unit in the course Content table — copy the URL from your browser."
         )
-        controls_layout.addWidget(self._unit_entry)
+        c1.addWidget(self._unit_entry)
         self._bs_course_hint = QLabel()
         self._bs_course_hint.setProperty("role", "dim")
         self._bs_course_hint.setWordWrap(True)
         self._bs_course_hint.hide()
-        controls_layout.addSpacing(4)
-        controls_layout.addWidget(self._bs_course_hint)
-        controls_layout.addSpacing(22)
+        c1.addWidget(self._bs_course_hint)
+        controls_layout.addWidget(card1)
+        controls_layout.addSpacing(14)
 
         # ── Step 2 · Combined page ────────────────────────────────────────────
-        controls_layout.addWidget(self._step_header("2", "COMBINED PAGE"))
-        controls_layout.addSpacing(8)
+        card2 = QFrame()
+        card2.setProperty("role", "card")
+        c2 = QVBoxLayout(card2)
+        c2.setContentsMargins(16, 14, 16, 16)
+        c2.setSpacing(10)
+        c2.addWidget(self._step_header("2", "COMBINED PAGE"))
+
+        auto_frame = QFrame()
+        auto_frame.setProperty("role", "card-accent")
+        af = QVBoxLayout(auto_frame)
+        af.setContentsMargins(12, 10, 12, 10)
+        af.setSpacing(0)
         self._auto_create_chk = QCheckBox("Create the combined page for me (recommended)")
         self._auto_create_chk.setChecked(True)
         self._auto_create_chk.setToolTip(
@@ -88,8 +102,8 @@ class CollectorPanel(QWidget):
             "Leave the Target Page URL below blank when this is on."
         )
         self._auto_create_chk.toggled.connect(self._on_auto_toggle)
-        controls_layout.addWidget(self._auto_create_chk)
-        controls_layout.addSpacing(8)
+        af.addWidget(self._auto_create_chk)
+        c2.addWidget(auto_frame)
 
         self._target_entry = QLineEdit()
         self._target_entry.setPlaceholderText("Leave blank to auto-create, or paste an existing page URL")
@@ -99,19 +113,24 @@ class CollectorPanel(QWidget):
             "Leave blank (with auto-create on) to have one made for you, or paste the URL\n"
             "of an existing blank HTML topic to reuse it."
         )
-        controls_layout.addWidget(self._target_entry)
+        c2.addWidget(self._target_entry)
         self._target_hint = QLabel("A blank page will be created for you. Paste a URL here only to reuse an existing page.")
         self._target_hint.setProperty("role", "dim")
         self._target_hint.setWordWrap(True)
-        controls_layout.addSpacing(4)
-        controls_layout.addWidget(self._target_hint)
-        controls_layout.addSpacing(22)
+        c2.addWidget(self._target_hint)
+        controls_layout.addWidget(card2)
+        controls_layout.addSpacing(14)
 
         # ── Step 3 · Style ────────────────────────────────────────────────────
-        controls_layout.addWidget(self._step_header("3", "STYLE"))
-        controls_layout.addSpacing(8)
-        self._swatch_frames, self._selected_theme = _build_theme_swatches(controls_layout)
-        controls_layout.addSpacing(22)
+        card3 = QFrame()
+        card3.setProperty("role", "card")
+        c3 = QVBoxLayout(card3)
+        c3.setContentsMargins(16, 14, 16, 16)
+        c3.setSpacing(10)
+        c3.addWidget(self._step_header("3", "STYLE"))
+        self._swatch_frames, self._selected_theme = _build_theme_swatches(c3)
+        controls_layout.addWidget(card3)
+        controls_layout.addSpacing(14)
 
         # ── Advanced (collapsed by default) ───────────────────────────────────
         self._adv_btn = QPushButton("▸  Advanced options")
@@ -122,10 +141,11 @@ class CollectorPanel(QWidget):
         self._adv_btn.toggled.connect(self._on_adv_toggle)
         controls_layout.addWidget(self._adv_btn)
 
-        self._adv_container = QWidget()
+        self._adv_container = QFrame()
+        self._adv_container.setProperty("role", "card")
         adv = QVBoxLayout(self._adv_container)
-        adv.setContentsMargins(2, 12, 2, 2)
-        adv.setSpacing(8)
+        adv.setContentsMargins(16, 14, 16, 16)
+        adv.setSpacing(10)
 
         self._multi_unit_chk = QCheckBox("Also do the following units in this course")
         self._multi_unit_chk.setToolTip(
@@ -173,6 +193,7 @@ class CollectorPanel(QWidget):
         adv.addLayout(par_row)
 
         self._adv_container.setVisible(False)
+        controls_layout.addSpacing(8)
         controls_layout.addWidget(self._adv_container)
 
         scroll_area = QScrollArea()
@@ -182,7 +203,9 @@ class CollectorPanel(QWidget):
         layout.addWidget(scroll_area, 3)
 
         # ── Pinned below the scroll area: run action, log, continue ───────────
-        layout.addSpacing(14)
+        layout.addSpacing(12)
+        layout.addWidget(_divider())
+        layout.addSpacing(12)
 
         self._run_btn = QPushButton("Create Combined Page")
         self._run_btn.setFixedHeight(42)
