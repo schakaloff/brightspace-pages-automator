@@ -2,16 +2,138 @@ import asyncio
 import os
 import queue
 import threading
+from enum import Enum, auto
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QScrollArea, QCheckBox,
-    QFrame, QGridLayout, QComboBox, QMessageBox,
+    QFrame, QComboBox, QMessageBox, QToolButton,
 )
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt
 
 from gui_log import LogWidget
 from panels._shared import _form_label, _section_header, friendly_error
+
+
+class KalturaState(Enum):
+    EMPTY = auto()
+    SCANNING = auto()
+    RESULTS = auto()
+
+
+class VideoGroupWidget(QFrame):
+    """One collapsible group per Moodle section: tri-state checkbox header,
+    destination combo row, and a hidden-until-expanded video checkbox list."""
+
+    def __init__(self, section_name: str, entries: list[dict],
+                 on_selection_changed, parent=None):
+        super().__init__(parent)
+        self.setObjectName("video_group_widget")
+        self.section_name = section_name
+        self._on_selection_changed = on_selection_changed
+        self._syncing = False
+        self.video_checkboxes: list[tuple[QCheckBox, dict]] = []
+
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+
+        header = QHBoxLayout()
+        self.group_checkbox = QCheckBox()
+        self.group_checkbox.setObjectName("group_checkbox")
+        self.group_checkbox.setTristate(True)
+        self.group_checkbox.clicked.connect(self._on_group_clicked)
+        header.addWidget(self.group_checkbox)
+
+        title = section_name if section_name else "(no section)"
+        self.title_label = QLabel(f"{title} ({len(entries)} video{'s' if len(entries) != 1 else ''})")
+        self.title_label.setWordWrap(True)
+        header.addWidget(self.title_label, 1)
+
+        self.needs_review_badge = QLabel("Needs review")
+        self.needs_review_badge.setObjectName("needs_review_badge")
+        self.needs_review_badge.setStyleSheet(
+            "background: #7a5b00; color: #ffd75e; border-radius: 8px; padding: 1px 8px;"
+        )
+        self.needs_review_badge.setVisible(False)
+        header.addWidget(self.needs_review_badge)
+
+        self.expand_btn = QToolButton()
+        self.expand_btn.setObjectName("group_expand_btn")
+        self.expand_btn.setText("▸")
+        self.expand_btn.setCheckable(True)
+        self.expand_btn.toggled.connect(self._on_expand_toggled)
+        header.addWidget(self.expand_btn)
+        layout.addLayout(header)
+
+        dest_row = QHBoxLayout()
+        self.destination_label = QLabel("→ Destination:")
+        self.destination_label.setObjectName("destination_label")
+        dest_row.addWidget(self.destination_label)
+        self.combo = QComboBox()
+        self.combo.addItem("— select module —", None)
+        dest_row.addWidget(self.combo, 1)
+        layout.addLayout(dest_row)
+
+        self.video_list_container = QWidget()
+        vlist = QVBoxLayout(self.video_list_container)
+        vlist.setContentsMargins(24, 0, 0, 0)
+        vlist.setSpacing(2)
+        for entry in entries:
+            cb = QCheckBox(entry["name"])
+            cb.setObjectName("video_row_checkbox")
+            cb.stateChanged.connect(self._on_video_toggled)
+            vlist.addWidget(cb)
+            self.video_checkboxes.append((cb, entry))
+        self.video_list_container.setVisible(False)
+        layout.addWidget(self.video_list_container)
+
+    # ── selection logic ────────────────────────────────────────────────────
+
+    def _on_expand_toggled(self, expanded: bool):
+        self.expand_btn.setText("▾" if expanded else "▸")
+        self.video_list_container.setVisible(expanded)
+
+    def _on_group_clicked(self):
+        # user click cycles tri-state; treat partial-click as "check all"
+        state = self.group_checkbox.checkState()
+        target = state != Qt.CheckState.Unchecked
+        self.set_all_checked(target)
+
+    def _on_video_toggled(self, _state):
+        if self._syncing:
+            return
+        self._sync_group_state()
+        self._on_selection_changed()
+
+    def _sync_group_state(self):
+        checked = sum(1 for cb, _ in self.video_checkboxes if cb.isChecked())
+        self._syncing = True
+        if checked == 0:
+            self.group_checkbox.setCheckState(Qt.CheckState.Unchecked)
+        elif checked == len(self.video_checkboxes):
+            self.group_checkbox.setCheckState(Qt.CheckState.Checked)
+        else:
+            self.group_checkbox.setCheckState(Qt.CheckState.PartiallyChecked)
+        self._syncing = False
+
+    def set_all_checked(self, checked: bool):
+        self._syncing = True
+        for cb, _ in self.video_checkboxes:
+            cb.setChecked(checked)
+        self._syncing = False
+        self._sync_group_state()
+        self._on_selection_changed()
+
+    def set_needs_review(self, needs_review: bool, no_match: bool = False):
+        self.needs_review_badge.setVisible(needs_review)
+        if no_match:
+            self.destination_label.setText("→ No matching unit found — pick manually:")
+            self.destination_label.setStyleSheet("color: #ffd75e;")
+        else:
+            self.destination_label.setText("→ Destination:")
+            self.destination_label.setStyleSheet("")
 
 
 class KalturaPanel(QWidget):
@@ -20,12 +142,14 @@ class KalturaPanel(QWidget):
         super().__init__(parent)
         self._mw = main_window
         self._log_queue: queue.Queue = queue.Queue()
-        self._checkboxes: list[tuple[QCheckBox, dict]] = []
+        self._groups: list[VideoGroupWidget] = []
         self._combos: dict[str, QComboBox] = {}   # section_name → QComboBox
-        self._section_labels: dict[str, QLabel] = {}  # section_name → QLabel (for Needs Review tag)
         self._bs_modules: list[dict] = []          # [{id, title}] cached after fetch
+        self._match_scores: dict[str, float] = {}  # section_name → autosuggest score
+        self._state = KalturaState.EMPTY
         self._build()
         self._load_saved_links()
+        self._apply_state()
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_log)
         self._poll_timer.start(100)
@@ -44,174 +168,269 @@ class KalturaPanel(QWidget):
         sub.setProperty("role", "dim")
         sub.setWordWrap(True)
         layout.addWidget(sub)
-        layout.addSpacing(20)
+        layout.addSpacing(16)
 
-        # ── Controls (scrollable on small screens) ────────────────────────────
-        controls_widget = QWidget()
-        controls_layout = QVBoxLayout(controls_widget)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(0)
-
-        controls_layout.addWidget(_form_label("MOODLE COURSE URL"))
-        controls_layout.addSpacing(4)
-        moodle_row = QHBoxLayout()
+        # ── URL fields ────────────────────────────────────────────────────────
+        layout.addWidget(_form_label("MOODLE COURSE URL"))
+        layout.addSpacing(4)
         self._moodle_url = QLineEdit()
+        self._moodle_url.setObjectName("url_moodle_edit")
         self._moodle_url.setPlaceholderText(
             "https://mymoodle.okanagan.bc.ca/course/view.php?id=183744"
         )
-        self._moodle_url.setFixedHeight(40)
-        moodle_row.addWidget(self._moodle_url)
-        self._login_btn = QPushButton("Login to Moodle")
-        self._login_btn.setFixedHeight(40)
-        self._login_btn.clicked.connect(self._start_login)
-        moodle_row.addWidget(self._login_btn)
-        controls_layout.addLayout(moodle_row)
-        controls_layout.addSpacing(12)
+        self._moodle_url.setFixedHeight(36)
+        layout.addWidget(self._moodle_url)
+        layout.addSpacing(8)
 
-        bs_row = QHBoxLayout()
-        bs_col = QVBoxLayout()
-        bs_col.setSpacing(4)
-        bs_col.addWidget(_form_label("BRIGHTSPACE COURSE URL"))
+        layout.addWidget(_form_label("BRIGHTSPACE COURSE URL"))
+        layout.addSpacing(4)
         self._bs_url = QLineEdit()
+        self._bs_url.setObjectName("url_brightspace_edit")
         self._bs_url.setPlaceholderText(
             "https://brightspace.okanagan.bc.ca/d2l/home/10263"
         )
-        self._bs_url.setFixedHeight(40)
-        bs_col.addWidget(self._bs_url)
-        bs_row.addLayout(bs_col)
-        bs_row.addSpacing(12)
-        self._scan_btn = QPushButton("Scan Moodle")
-        self._scan_btn.setFixedHeight(40)
+        self._bs_url.setFixedHeight(36)
+        layout.addWidget(self._bs_url)
+        layout.addSpacing(10)
+
+        # ── Advanced settings (collapsed by default) ──────────────────────────
+        self._advanced_toggle = QToolButton()
+        self._advanced_toggle.setObjectName("advanced_toggle_btn")
+        self._advanced_toggle.setText("▸ Advanced settings")
+        self._advanced_toggle.setCheckable(True)
+        self._advanced_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._advanced_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._advanced_toggle.toggled.connect(self._toggle_advanced)
+        self._advanced_toggle.setStyleSheet(
+            "QToolButton { background: transparent; border: none; color: palette(mid);"
+            " padding: 4px 0px; font-size: 11px; font-weight: 700; text-align: left; }"
+            "QToolButton:hover { color: palette(text); }"
+        )
+        layout.addWidget(self._advanced_toggle)
+
+        self._advanced_panel = QFrame()
+        self._advanced_panel.setObjectName("advanced_panel")
+        self._advanced_panel.setVisible(False)
+        adv = QVBoxLayout(self._advanced_panel)
+        adv.setContentsMargins(12, 6, 12, 6)
+        adv.setSpacing(6)
+        adv.addWidget(_form_label("MANUAL STEPS"))
+
+        manual_row = QHBoxLayout()
+        manual_row.setSpacing(6)
+
+        manual_btn_style = (
+            "QPushButton { background: #e8eef4; border: 1px solid #9aa7b4;"
+            " border-radius: 6px; color: #1a2530; padding: 6px 14px;"
+            " font-size: 12px; font-weight: 600; }"
+            "QPushButton:hover { background: #f4f8fb; border-color: #6b7885; }"
+            "QPushButton:disabled { background: #cdd4db; color: #7a8590; }"
+        )
+
+        self._login_btn = QPushButton("Login to Moodle")
+        self._login_btn.setObjectName("btn_login_moodle")
+        self._login_btn.setProperty("variant", "secondary")
+        self._login_btn.setMinimumHeight(34)
+        self._login_btn.setStyleSheet(manual_btn_style)
+        self._login_btn.clicked.connect(self._start_login)
+        manual_row.addWidget(self._login_btn)
+
+        self._scan_btn = QPushButton("Scan Moodle only")
+        self._scan_btn.setObjectName("btn_scan_moodle_only")
+        self._scan_btn.setProperty("variant", "secondary")
+        self._scan_btn.setMinimumHeight(34)
+        self._scan_btn.setStyleSheet(manual_btn_style)
         self._scan_btn.clicked.connect(self._start_scan)
-        bs_row.addWidget(self._scan_btn, 0)
-        controls_layout.addLayout(bs_row)
-        controls_layout.addSpacing(16)
+        manual_row.addWidget(self._scan_btn)
 
-        self._find_suggest_btn = QPushButton("Find Videos && Suggest Destinations")
-        self._find_suggest_btn.setFixedHeight(44)
-        self._find_suggest_btn.clicked.connect(self._start_find_and_suggest)
-        controls_layout.addWidget(self._find_suggest_btn)
-        controls_layout.addSpacing(16)
-
-        controls_layout.addWidget(_form_label("FOUND VIDEOS"))
-        controls_layout.addSpacing(4)
-
-        self._list_widget = QWidget()
-        self._list_layout = QVBoxLayout(self._list_widget)
-        self._list_layout.setContentsMargins(0, 0, 0, 0)
-        self._list_layout.setSpacing(4)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self._list_widget)
-        scroll.setFixedHeight(180)
-        controls_layout.addWidget(scroll)
-        controls_layout.addSpacing(8)
-
-        sel_row = QHBoxLayout()
-        self._select_all_btn = QPushButton("Select All")
-        self._select_all_btn.setFixedHeight(30)
-        self._select_all_btn.clicked.connect(lambda: self._set_all(True))
-        self._deselect_btn = QPushButton("Deselect All")
-        self._deselect_btn.setFixedHeight(30)
-        self._deselect_btn.clicked.connect(lambda: self._set_all(False))
-        sel_row.addWidget(self._select_all_btn)
-        sel_row.addWidget(self._deselect_btn)
-        sel_row.addStretch()
-        controls_layout.addLayout(sel_row)
-        controls_layout.addSpacing(16)
-
-        # ── Map Sections area (hidden until scan) ─────────────────────────────
-        self._mapping_frame = QFrame()
-        self._mapping_frame.setVisible(False)
-        mapping_layout = QVBoxLayout(self._mapping_frame)
-        mapping_layout.setContentsMargins(0, 0, 0, 0)
-        mapping_layout.setSpacing(8)
-
-        map_header_row = QHBoxLayout()
-        map_header_row.addWidget(_form_label("MAP SECTIONS → BRIGHTSPACE MODULES"))
-        map_header_row.addStretch()
-        self._fetch_modules_btn = QPushButton("Fetch BS Modules")
-        self._fetch_modules_btn.setFixedHeight(32)
+        self._fetch_modules_btn = QPushButton("Load Brightspace modules only")
+        self._fetch_modules_btn.setObjectName("btn_load_brightspace_modules")
+        self._fetch_modules_btn.setProperty("variant", "secondary")
+        self._fetch_modules_btn.setMinimumHeight(34)
+        self._fetch_modules_btn.setStyleSheet(manual_btn_style)
         self._fetch_modules_btn.clicked.connect(self._start_fetch_modules)
-        map_header_row.addWidget(self._fetch_modules_btn)
-        mapping_layout.addLayout(map_header_row)
+        manual_row.addWidget(self._fetch_modules_btn)
+        manual_row.addStretch()
 
-        self._mapping_grid_widget = QWidget()
-        self._mapping_grid = QGridLayout(self._mapping_grid_widget)
-        self._mapping_grid.setContentsMargins(0, 0, 0, 0)
-        self._mapping_grid.setSpacing(6)
-        self._mapping_grid.setColumnStretch(1, 1)
-        mapping_layout.addWidget(self._mapping_grid_widget)
+        adv.addLayout(manual_row)
 
-        controls_layout.addWidget(self._mapping_frame)
-        controls_layout.addSpacing(12)
+        layout.addWidget(self._advanced_panel)
+        layout.addSpacing(10)
 
-        self._create_btn = QPushButton("Create Pages")
-        self._create_btn.setFixedHeight(42)
-        self._create_btn.setEnabled(False)
-        self._create_btn.clicked.connect(self._start_create_pages)
-        controls_layout.addWidget(self._create_btn)
-
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setWidget(controls_widget)
-        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        layout.addWidget(scroll_area, 3)
-
-        # ── Log (always visible, outside the scroll area) ─────────────────────
-        layout.addSpacing(8)
-        layout.addWidget(_form_label("LOG"))
+        # ── Results (internal scroll, hard height cap) ────────────────────────
+        layout.addWidget(_form_label("RESULTS"))
         layout.addSpacing(4)
+
+        self._results_container = QWidget()
+        self._results_container.setObjectName("results_container")
+        self._results_layout = QVBoxLayout(self._results_container)
+        self._results_layout.setContentsMargins(0, 0, 0, 0)
+        self._results_layout.setSpacing(6)
+        self._results_layout.addStretch()
+
+        self._placeholder = QLabel("No videos found yet — run a scan to see results here.")
+        self._placeholder.setProperty("role", "dim")
+        self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._placeholder.setWordWrap(True)
+        self._results_layout.insertWidget(0, self._placeholder)
+
+        self._results_scroll = QScrollArea()
+        self._results_scroll.setObjectName("results_scroll_area")
+        self._results_scroll.setWidgetResizable(True)
+        self._results_scroll.setWidget(self._results_container)
+        self._results_scroll.setMinimumHeight(140)
+        self._results_scroll.setMaximumHeight(180)
+        self._results_scroll.setFrameShape(QFrame.Shape.StyledPanel)
+        self._results_scroll.setStyleSheet(
+            "QScrollArea#results_scroll_area { border: 1px solid palette(mid);"
+            " border-radius: 6px; }"
+        )
+        layout.addWidget(self._results_scroll, 1)
+        layout.addSpacing(6)
+
+        # ── Footer: primary button + log handle (never scrolls away) ──────────
+        self._footer = QFrame()
+        footer_layout = QVBoxLayout(self._footer)
+        footer_layout.setContentsMargins(0, 0, 0, 0)
+        footer_layout.setSpacing(4)
+
+        self._primary_btn = QPushButton("Find Videos && Suggest Destinations")
+        self._primary_btn.setObjectName("primary_action_btn")
+        self._primary_btn.setFixedHeight(40)
+        self._primary_btn.clicked.connect(self._on_primary_clicked)
+        footer_layout.addWidget(self._primary_btn)
+
+        self._log_handle = QToolButton()
+        self._log_handle.setObjectName("log_handle_btn")
+        self._log_handle.setText("LOG  Expand ▴")
+        self._log_handle.setCheckable(True)
+        self._log_handle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._log_handle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._log_handle.setStyleSheet(
+            "QToolButton { background: transparent; border: none; color: palette(mid);"
+            " padding: 2px 0px; font-size: 11px; font-weight: 700; text-align: left; }"
+            "QToolButton:hover { color: palette(text); }"
+        )
+        self._log_handle.toggled.connect(self._toggle_log)
+        footer_layout.addWidget(self._log_handle)
+        layout.addWidget(self._footer, 0)
+
+        self._log_panel = QFrame()
+        self._log_panel.setObjectName("log_panel")
+        self._log_panel.setVisible(False)
+        log_layout = QVBoxLayout(self._log_panel)
+        log_layout.setContentsMargins(0, 4, 0, 0)
         self._log = LogWidget()
-        self._log.setMinimumHeight(120)
-        layout.addWidget(self._log, 1)
+        self._log.setMinimumHeight(100)
+        self._log.setMaximumHeight(150)
+        log_layout.addWidget(self._log)
+        layout.addWidget(self._log_panel, 0)
 
-    # ── List helpers ──────────────────────────────────────────────────────────
+    # ── Collapse toggles ──────────────────────────────────────────────────────
 
-    def _populate_list(self, entries: list[dict]):
-        while self._list_layout.count():
-            item = self._list_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._checkboxes.clear()
+    def _toggle_advanced(self, open_: bool):
+        self._advanced_toggle.setText(
+            "▾ Advanced settings" if open_ else "▸ Advanced settings"
+        )
+        self._advanced_panel.setVisible(open_)
+
+    def _toggle_log(self, open_: bool):
+        self._log_handle.setText("LOG  Collapse ▾" if open_ else "LOG  Expand ▴")
+        self._log_panel.setVisible(open_)
+
+    # ── State machine ─────────────────────────────────────────────────────────
+
+    def _apply_state(self):
+        state = self._state
+        if state == KalturaState.EMPTY:
+            self._placeholder.setText(
+                "No videos found yet — run a scan to see results here."
+            )
+            self._placeholder.setVisible(True)
+            self._primary_btn.setText("Find Videos && Suggest Destinations")
+            self._primary_btn.setEnabled(True)
+            self._set_inputs_enabled(True)
+        elif state == KalturaState.SCANNING:
+            self._placeholder.setText("Scanning… usually 2–5 min")
+            self._placeholder.setVisible(True)
+            self._primary_btn.setText("Scanning… usually 2–5 min")
+            self._primary_btn.setEnabled(False)
+            self._set_inputs_enabled(False)
+        elif state == KalturaState.RESULTS:
+            self._placeholder.setVisible(False)
+            self._set_inputs_enabled(True)
+            self._update_primary_button_count()
+
+    def _set_inputs_enabled(self, enabled: bool):
+        self._moodle_url.setEnabled(enabled)
+        self._bs_url.setEnabled(enabled)
+        self._advanced_toggle.setEnabled(enabled)
+        self._login_btn.setEnabled(enabled)
+        self._scan_btn.setEnabled(enabled)
+        self._fetch_modules_btn.setEnabled(enabled)
+        # log handle stays clickable in every state
+
+    def _update_primary_button_count(self):
+        if self._state != KalturaState.RESULTS:
+            return
+        count = len(self._selected_entries())
+        self._primary_btn.setText(f"Create Pages for {count} Selected Videos")
+        self._primary_btn.setEnabled(count > 0)
+
+    def _on_primary_clicked(self):
+        if self._state == KalturaState.RESULTS:
+            self._start_create_pages()
+        else:
+            self._start_find_and_suggest()
+
+    # ── Results population ────────────────────────────────────────────────────
+
+    def _clear_groups(self):
+        for g in self._groups:
+            self._results_layout.removeWidget(g)
+            g.deleteLater()
+        self._groups.clear()
+        self._combos.clear()
+
+    def _populate_groups(self, entries: list[dict]):
+        self._clear_groups()
+        buckets: dict[str, list[dict]] = {}
         for entry in entries:
-            section = entry.get("section_name", "")
-            label = f"[{section}] {entry['name']}" if section else entry["name"]
-            cb = QCheckBox(label)
-            cb.setChecked(True)
-            self._list_layout.addWidget(cb)
-            self._checkboxes.append((cb, entry))
+            buckets.setdefault(entry.get("section_name", ""), []).append(entry)
+        insert_at = 0
+        for section, vids in buckets.items():
+            group = VideoGroupWidget(section, vids, self._update_primary_button_count)
+            group.combo.currentIndexChanged.connect(self._check_mapping_complete)
+            self._results_layout.insertWidget(insert_at, group)
+            insert_at += 1
+            self._groups.append(group)
+            if section:
+                self._combos[section] = group.combo
 
-    def _set_all(self, checked: bool):
-        for cb, _ in self._checkboxes:
-            cb.setChecked(checked)
+    def _apply_default_selection(self):
+        """Confident autosuggest (score ≥ 90) → checked; ambiguous or no
+        match → unchecked + Needs review badge. Uses only match_sections
+        output already computed in _maybe_autosuggest."""
+        for group in self._groups:
+            score = self._match_scores.get(group.section_name, 0)
+            has_dest = group.combo.currentData() is not None
+            if has_dest and score >= 90:
+                group.set_needs_review(False)
+                group.set_all_checked(True)
+            else:
+                group.set_needs_review(True, no_match=not has_dest)
+                group.set_all_checked(False)
+        self._update_primary_button_count()
 
     def _selected_entries(self) -> list[dict]:
-        return [entry for cb, entry in self._checkboxes if cb.isChecked()]
+        return [
+            entry
+            for group in self._groups
+            for cb, entry in group.video_checkboxes
+            if cb.isChecked()
+        ]
 
     # ── Mapping helpers ───────────────────────────────────────────────────────
-
-    def _build_mapping_rows(self, section_names: list[str]):
-        """Create one label + QComboBox row per unique section name."""
-        # Clear existing rows
-        while self._mapping_grid.count():
-            item = self._mapping_grid.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._combos.clear()
-        self._section_labels.clear()
-
-        for row, name in enumerate(section_names):
-            lbl = QLabel(name)
-            lbl.setWordWrap(True)
-            combo = QComboBox()
-            combo.addItem("— select module —", None)
-            combo.currentIndexChanged.connect(self._check_mapping_complete)
-            self._mapping_grid.addWidget(lbl, row, 0)
-            self._mapping_grid.addWidget(combo, row, 1)
-            self._combos[name] = combo
-            self._section_labels[name] = lbl
 
     def _populate_combos(self, modules: list[dict]):
         """Fill QComboBox options from fetched BS module list."""
@@ -225,15 +444,7 @@ class KalturaPanel(QWidget):
         self._check_mapping_complete()
 
     def _check_mapping_complete(self):
-        """Enable Create Pages only when every section combo has a non-placeholder selection."""
-        if not self._combos:
-            self._create_btn.setEnabled(False)
-            return
-        all_selected = all(
-            combo.currentData() is not None
-            for combo in self._combos.values()
-        )
-        self._create_btn.setEnabled(all_selected)
+        self._update_primary_button_count()
 
     def _maybe_autosuggest(self):
         """Pre-select high-confidence Brightspace module matches per Moodle section.
@@ -248,6 +459,7 @@ class KalturaPanel(QWidget):
         from content_matcher import match_sections
         matches = match_sections(list(self._combos.keys()), self._bs_modules)
         for name, (module, score) in matches.items():
+            self._match_scores[name] = score if module is not None else 0
             combo = self._combos.get(name)
             if combo is None or combo.currentData() is not None:
                 continue
@@ -257,9 +469,6 @@ class KalturaPanel(QWidget):
             if idx < 0:
                 continue
             combo.setCurrentIndex(idx)
-            lbl = self._section_labels.get(name)
-            if lbl is not None and score < 90:
-                lbl.setText(f"{name}  ⚠ Needs review")
         self._check_mapping_complete()
 
     def _build_section_map(self) -> dict[str, str]:
@@ -320,7 +529,7 @@ class KalturaPanel(QWidget):
         """Orchestrates the existing manual steps in one click: Moodle session
         check/login (only if no saved session), scan, Brightspace module fetch,
         then auto-suggest mapping. Reuses the same backend calls as the manual
-        buttons below — no scanning/mapping/write logic changes here.
+        buttons — no scanning/mapping/write logic changes here.
         """
         moodle_url = self._moodle_url.text().strip()
         bs_url = self._bs_url.text().strip()
@@ -331,13 +540,9 @@ class KalturaPanel(QWidget):
             self._log.append_log("Paste a Brightspace course URL first.", "warning")
             return
 
-        self._find_suggest_btn.setText("Working…")
-        self._find_suggest_btn.setEnabled(False)
-        self._login_btn.setEnabled(False)
-        self._scan_btn.setEnabled(False)
-        self._fetch_modules_btn.setEnabled(False)
-        self._create_btn.setEnabled(False)
-        self._mapping_frame.setVisible(False)
+        self._state = KalturaState.SCANNING
+        self._clear_groups()
+        self._apply_state()
         self._log.clear_log()
         q = self._log_queue
 
@@ -401,8 +606,6 @@ class KalturaPanel(QWidget):
             return
         self._scan_btn.setText("Scanning…")
         self._scan_btn.setEnabled(False)
-        self._create_btn.setEnabled(False)
-        self._mapping_frame.setVisible(False)
         self._log.clear_log()
         q = self._log_queue
 
@@ -487,9 +690,9 @@ class KalturaPanel(QWidget):
             self._log.append_log("Create Pages cancelled — no pages created.", "dim")
             return
 
-        self._create_btn.setText("Running…")
-        self._create_btn.setEnabled(False)
-        self._scan_btn.setEnabled(False)
+        self._primary_btn.setText("Running…")
+        self._primary_btn.setEnabled(False)
+        self._set_inputs_enabled(False)
         q = self._log_queue
         kmc_user = self._mw.kmc_username
         kmc_pass = self._mw.kmc_password
@@ -527,62 +730,67 @@ class KalturaPanel(QWidget):
                     self._log.append_log("Moodle session saved — ready to scan.", "success")
                 elif msg == "__SCAN_DONE__":
                     entries = payload
-                    self._scan_btn.setText("Scan Moodle")
+                    self._scan_btn.setText("Scan Moodle only")
                     self._scan_btn.setEnabled(True)
-                    self._populate_list(entries)
-                    section_names = list(dict.fromkeys(
-                        e.get("section_name", "") for e in entries if e.get("section_name")
-                    ))
-                    self._build_mapping_rows(section_names)
-                    self._mapping_frame.setVisible(bool(entries))
-                    self._maybe_autosuggest()
+                    if entries:
+                        self._populate_groups(entries)
+                        if self._bs_modules:
+                            self._populate_combos(self._bs_modules)
+                        self._maybe_autosuggest()
+                        self._apply_default_selection()
+                        self._state = KalturaState.RESULTS
+                    else:
+                        self._state = KalturaState.EMPTY
+                    self._apply_state()
                     self._log.append_log(f"Found {len(entries)} Kaltura video(s).", "success")
                 elif msg == "__SCAN_FAIL__":
-                    self._scan_btn.setText("Scan Moodle")
+                    self._scan_btn.setText("Scan Moodle only")
                     self._scan_btn.setEnabled(True)
-                    self._create_btn.setEnabled(False)
-                    self._mapping_frame.setVisible(False)
-                    self._populate_list([])
+                    self._clear_groups()
+                    self._state = KalturaState.EMPTY
+                    self._apply_state()
                 elif msg == "__MODULES_DONE__":
                     modules = payload
-                    self._fetch_modules_btn.setText("Fetch BS Modules")
+                    self._fetch_modules_btn.setText("Load Brightspace modules only")
                     self._fetch_modules_btn.setEnabled(True)
                     self._populate_combos(modules)
                     self._maybe_autosuggest()
+                    if self._groups:
+                        self._apply_default_selection()
                     self._log.append_log(f"Loaded {len(modules)} module(s).", "success")
                 elif msg == "__MODULES_FAIL__":
-                    self._fetch_modules_btn.setText("Fetch BS Modules")
+                    self._fetch_modules_btn.setText("Load Brightspace modules only")
                     self._fetch_modules_btn.setEnabled(True)
                 elif msg == "__CAT_DONE__":
-                    self._create_btn.setText("Create Pages")
-                    self._check_mapping_complete()
-                    self._scan_btn.setEnabled(True)
+                    self._set_inputs_enabled(True)
+                    self._apply_state()
                 elif msg == "__FIND_SUGGEST_DONE__":
                     entries, modules = payload
-                    self._find_suggest_btn.setText("Find Videos && Suggest Destinations")
-                    self._find_suggest_btn.setEnabled(True)
-                    self._login_btn.setEnabled(True)
-                    self._scan_btn.setEnabled(True)
-                    self._fetch_modules_btn.setEnabled(True)
-                    self._populate_list(entries)
-                    section_names = list(dict.fromkeys(
-                        e.get("section_name", "") for e in entries if e.get("section_name")
-                    ))
-                    self._build_mapping_rows(section_names)
-                    self._mapping_frame.setVisible(bool(entries))
-                    self._populate_combos(modules)
-                    self._maybe_autosuggest()
-                    self._log.append_log(
-                        f"Done — {len(entries)} video(s) found, {len(modules)} module(s) loaded. "
-                        "Review the suggested mapping below before creating pages.",
-                        "success",
-                    )
+                    if entries:
+                        self._populate_groups(entries)
+                        self._populate_combos(modules)
+                        self._maybe_autosuggest()
+                        self._apply_default_selection()
+                        self._state = KalturaState.RESULTS
+                        self._apply_state()
+                        self._log.append_log(
+                            f"Done — {len(entries)} video(s) found, {len(modules)} module(s) loaded. "
+                            "Review the suggested groups above before creating pages.",
+                            "success",
+                        )
+                    else:
+                        self._state = KalturaState.EMPTY
+                        self._apply_state()
+                        self._placeholder.setText(
+                            "Scan finished — no Kaltura videos found in this course."
+                        )
+                        self._log.append_log("No Kaltura videos found.", "warning")
                 elif msg == "__FIND_SUGGEST_FAIL__":
-                    self._find_suggest_btn.setText("Find Videos && Suggest Destinations")
-                    self._find_suggest_btn.setEnabled(True)
-                    self._login_btn.setEnabled(True)
-                    self._scan_btn.setEnabled(True)
-                    self._fetch_modules_btn.setEnabled(True)
+                    self._state = KalturaState.EMPTY
+                    self._apply_state()
+                    self._placeholder.setText(
+                        "Scan failed — expand the log below for details, then try again."
+                    )
                 else:
                     self._log.append_log(msg, payload)
         except queue.Empty:

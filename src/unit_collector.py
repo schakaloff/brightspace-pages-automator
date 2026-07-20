@@ -1,4 +1,5 @@
 import asyncio
+import html
 import re
 import tempfile
 from pathlib import Path
@@ -690,6 +691,7 @@ class UnitCollector:
                     except Exception:
                         pass
                 self.log("  ✗ Insert Stuff button not found", "warning")
+                await self._close_any_dialog(page)
                 return False
             # Step 2: Wait for My Computer option and click it (content-driven, not fixed wait)
             _JS_CLICK_MY_COMPUTER = """() => {
@@ -714,6 +716,7 @@ class UnitCollector:
                     break
             if not clicked:
                 self.log("  ✗ My Computer option not found", "warning")
+                await self._close_any_dialog(page)
                 return False
 
             # Give the ISF dialog time to load the file-input UI after My Computer is selected.
@@ -739,6 +742,7 @@ class UnitCollector:
 
             if upload_trigger is None:
                 self.log("  ✗ File chooser trigger not found inside Insert Stuff dialog", "warning")
+                await self._close_any_dialog(page)
                 return False
 
             async with page.expect_file_chooser(timeout=15000) as fc_info:
@@ -1017,6 +1021,12 @@ class UnitCollector:
             return True
         except Exception as e:
             self.log(f"  ✗ Insert failed for {file_item['filename']}: {e}", "error")
+            # Leaving the Insert Stuff dialog open blocks every later click,
+            # including Save and Close — always clear it before giving up.
+            try:
+                await self._close_any_dialog(page)
+            except Exception:
+                pass
             return False
 
     async def _source_code_append(self, page: Page, section_html: str) -> bool:
@@ -1290,7 +1300,7 @@ class UnitCollector:
             self.log("Assembling target page...", "info")
             sections: list = []
             file_items: list = []
-            html_count = link_count = file_count = 0
+            html_count = link_count = file_count = file_link_count = 0
 
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
@@ -1330,7 +1340,13 @@ class UnitCollector:
                     )
                     link_count += 1
                 elif result["file"]:
-                    file_items.append(result["file"])
+                    # The file already exists as a Brightspace topic (we downloaded
+                    # it from there), so keep its original URL for the link fallback
+                    # used when Insert Stuff can't embed it.
+                    fi = result["file"]
+                    fi.setdefault("topic_url", topic.get("url", ""))
+                    fi.setdefault("topic_label", topic["label"])
+                    file_items.append(fi)
                     file_count += 1
 
             # ── Phase 3: one persistent editor session — append all, save once ─
@@ -1353,7 +1369,40 @@ class UnitCollector:
                         await tab.wait_for_timeout(5000)
                         for f in file_items:
                             await self._editor_cursor_end(tab)
-                            await self._insert_file(tab, f)
+                            if await self._insert_file(tab, f):
+                                continue
+                            # Fallback: the file is already a topic in this unit, so
+                            # link to it rather than failing the whole unit.
+                            fallback_url = f.get("topic_url") or ""
+                            if not fallback_url:
+                                self.log(
+                                    f"  ⚠ Could not insert {f['filename']} and no "
+                                    "original URL to link to — skipped.",
+                                    "warning",
+                                )
+                                continue
+                            link_label = (
+                                f.get("corrected_name")
+                                or f.get("topic_label")
+                                or f.get("filename", "File")
+                            )
+                            safe_label = html.escape(str(link_label))
+                            safe_url = html.escape(fallback_url, quote=True)
+                            if await self._source_code_append(
+                                tab,
+                                f'<p><a href="{safe_url}">{safe_label}</a></p>\n',
+                            ):
+                                self.log(
+                                    f"  ⚠ Could not insert {f['filename']} directly; "
+                                    "added link to original file instead.",
+                                    "warning",
+                                )
+                                file_link_count += 1
+                            else:
+                                self.log(
+                                    f"  ✗ Could not insert or link {f['filename']}.",
+                                    "error",
+                                )
 
                     await self._save_and_close(tab)
             finally:
@@ -1363,7 +1412,11 @@ class UnitCollector:
                     pass
 
             self.log("─" * 52, "dim")
-            self.log(f"✓ Text done: {html_count} pages, {link_count} links", "success")
+            file_link_note = f", {file_link_count} file link(s)" if file_link_count else ""
+            self.log(
+                f"✓ Text done: {html_count} pages, {link_count} links{file_link_note}",
+                "success",
+            )
 
             if self.claude_api_key:
                 assembled_chars = sum(len(s) for s in sections)

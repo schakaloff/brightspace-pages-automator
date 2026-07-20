@@ -61,6 +61,55 @@ def _clean_html(html: str) -> str:
     result = body.decode_contents() if body else str(soup)
     return result.strip()
 
+
+def _restore_kaltura_sizing(cleaned_html: str, styled_html: str, log=None) -> str:
+    """Kaltura's player library sizes itself off the inline width/height style
+    on its `id="kaltura_player_*"` container div. Claude's restyle rewrite is
+    generative and sometimes drops that inline style in favour of a generic
+    responsive-iframe CSS pattern the player can't use (its internal UI is a
+    normal flex child, not an absolutely-positioned fill-parent element), which
+    collapses the whole player to zero height and the video never loads.
+    Force the original inline style back onto any such container Claude's
+    output still contains, so the player keeps a real pixel size."""
+    from bs4 import BeautifulSoup
+
+    id_re = re.compile(r"^kaltura_player_")
+
+    source_soup = BeautifulSoup(cleaned_html, "lxml")
+    original_styles = {
+        tag["id"]: tag.get("style", "")
+        for tag in source_soup.find_all(id=id_re)
+    }
+    if not original_styles:
+        return styled_html
+
+    result_soup = BeautifulSoup(styled_html, "lxml")
+    restored = 0
+    for player_id, style in original_styles.items():
+        tag = result_soup.find(id=player_id)
+        if tag is None:
+            continue
+        if tag.get("style", "") != style:
+            if style:
+                tag["style"] = style
+            elif "style" in tag.attrs:
+                del tag.attrs["style"]
+            restored += 1
+
+    if not restored:
+        return styled_html
+
+    if log:
+        log(
+            f"🛠 Restored original size on {restored} Kaltura player container(s) "
+            "the rewrite had resized",
+            "warning",
+        )
+
+    body = result_soup.find("body")
+    return (body.decode_contents() if body else str(result_soup)).strip()
+
+
 _PROMPTS_DIR = (
     Path(sys._MEIPASS) / "prompts"
     if getattr(sys, "frozen", False)
@@ -155,6 +204,8 @@ def apply_style(
                 start = 1 if lines[0].startswith("```") else 0
                 end   = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
                 result = "\n".join(lines[start:end]).strip()
+
+            result = _restore_kaltura_sizing(cleaned_html, result, log=log)
 
             if len(result) < len(cleaned_html) * 0.5:
                 log(

@@ -2,6 +2,7 @@ import asyncio
 import queue
 import re
 import threading
+from enum import Enum, auto
 from pathlib import Path
 
 
@@ -17,6 +18,7 @@ def _normalize_url(u: str) -> str:
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QSpinBox, QCheckBox, QScrollArea, QFrame, QSizePolicy,
+    QToolButton,
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 
@@ -24,6 +26,15 @@ from gui_log import LogWidget
 from panels._shared import (
     _divider, _form_label, _section_header, PAGE_THEMES, _build_theme_swatches, friendly_error,
 )
+
+
+class CollectState(Enum):
+    READY = auto()
+    RUNNING = auto()
+    SUCCESS = auto()
+
+
+_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 
 class CollectorPanel(QWidget):
@@ -36,31 +47,28 @@ class CollectorPanel(QWidget):
         self._log_queue: queue.Queue = queue.Queue()
         self._swatch_frames: dict = {}
         self._selected_theme: list = ["lake"]
-        self._log_expanded = False
+        self._state = CollectState.READY
+        self._succeeded = False          # set from the backend log stream, read on __DONE__
+        self._last_page_count = None     # parsed from "✓ Text done: N pages"
+        self._spin_idx = 0
         self._build()
+        self._apply_state()
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_log)
         self._poll_timer.start(100)
 
     def _build(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 16)
+        layout.setContentsMargins(32, 28, 32, 20)
         layout.setSpacing(0)
 
-        # ── Main content column (scrollable on small screens) ─────────────────
-        content_widget = QWidget()
-        content_layout = QVBoxLayout(content_widget)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(8)
-        content_widget.setMaximumWidth(1080)
-        content_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-
-        content_layout.addWidget(_section_header("Unit Collector"))
-        sub = QLabel("Scrapes all topic pages from a unit and combines them into one collapsible HTML file.")
+        layout.addWidget(_section_header("Unit Collector"))
+        sub = QLabel("Scrapes all topic pages from a unit and combines them into one collapsible Brightspace page.")
         sub.setProperty("role", "dim"); sub.setWordWrap(True)
-        content_layout.addWidget(sub)
-        content_layout.addSpacing(4)
+        layout.addWidget(sub)
+        layout.addSpacing(10)
 
+        # ── Workflow card — fills the content width like Kaltura/Checker ──────
         main_panel = QFrame()
         main_panel.setProperty("role", "card")
         main_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
@@ -68,9 +76,15 @@ class CollectorPanel(QWidget):
         panel.setContentsMargins(16, 14, 16, 14)
         panel.setSpacing(8)
 
+        # Top content is added straight into the card; the whole card sits in an
+        # outer scroll (below) as the small-screen safety net so nothing clips
+        # and the footer is never displaced — §2/§6.
+        top = panel
+
         # ── Brightspace unit ─────────────────────────────────────────────────
-        panel.addWidget(_form_label("BRIGHTSPACE UNIT URL"))
+        top.addWidget(_form_label("BRIGHTSPACE UNIT URL"))
         self._unit_entry = QLineEdit()
+        self._unit_entry.setObjectName("unit_url_edit")
         self._unit_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/le/content/…/lessons/…")
         self._unit_entry.setFixedHeight(36)
         self._unit_entry.setToolTip(
@@ -78,17 +92,16 @@ class CollectorPanel(QWidget):
             "Find it by clicking a unit in the course Content table — copy the URL from your browser."
         )
         self._bs_course_hint = QLabel()
+        self._bs_course_hint.setObjectName("carried_over_label")
         self._bs_course_hint.setProperty("role", "dim")
         self._bs_course_hint.setWordWrap(True)
         self._bs_course_hint.hide()
-        panel.addWidget(self._unit_entry)
-        panel.addWidget(self._bs_course_hint)
-        panel.addSpacing(2)
-        panel.addWidget(_divider())
+        top.addWidget(self._unit_entry)
+        top.addWidget(self._bs_course_hint)
 
         # ── Combined page ────────────────────────────────────────────────────
-        panel.addWidget(_form_label("COMBINED PAGE"))
         self._auto_create_chk = QCheckBox("Create the combined page for me (recommended)")
+        self._auto_create_chk.setObjectName("combine_checkbox")
         self._auto_create_chk.setChecked(True)
         self._auto_create_chk.setToolTip(
             "When on, a blank page is created automatically at the end of the unit above,\n"
@@ -96,7 +109,7 @@ class CollectorPanel(QWidget):
             "Leave the Target Page URL below blank when this is on."
         )
         self._auto_create_chk.toggled.connect(self._on_auto_toggle)
-        panel.addWidget(self._auto_create_chk)
+        top.addWidget(self._auto_create_chk)
 
         self._target_entry = QLineEdit()
         self._target_entry.setPlaceholderText("Leave blank to auto-create, or paste an existing page URL")
@@ -106,36 +119,40 @@ class CollectorPanel(QWidget):
             "Leave blank (with auto-create on) to have one made for you, or paste the URL\n"
             "of an existing blank HTML topic to reuse it."
         )
-        panel.addWidget(self._target_entry)
+        top.addWidget(self._target_entry)
         self._target_hint = QLabel("A blank page will be created for you. Paste a URL here only to reuse an existing page.")
         self._target_hint.setProperty("role", "dim")
         self._target_hint.setWordWrap(True)
-        panel.addWidget(self._target_hint)
-        panel.addSpacing(2)
-        panel.addWidget(_divider())
+        top.addWidget(self._target_hint)
 
         # ── Style ────────────────────────────────────────────────────────────
-        panel.addWidget(_form_label("STYLE / THEME"))
-        self._swatch_frames, self._selected_theme = _build_theme_swatches(panel)
-        panel.addSpacing(2)
-        panel.addWidget(_divider())
+        top.addWidget(_form_label("STYLE / THEME"))
+        self._swatch_frames, self._selected_theme = _build_theme_swatches(top)
 
         # ── Advanced (collapsed by default) ───────────────────────────────────
-        self._adv_btn = QPushButton("▸  Advanced options")
-        self._adv_btn.setProperty("variant", "secondary")
+        self._adv_btn = QToolButton()
+        self._adv_btn.setObjectName("advanced_toggle_btn")
+        self._adv_btn.setText("▸  Advanced settings")
         self._adv_btn.setCheckable(True)
-        self._adv_btn.setFixedHeight(30)
-        self._adv_btn.setMaximumWidth(210)
+        self._adv_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._adv_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._adv_btn.setStyleSheet(
+            "QToolButton { background: transparent; border: none; color: palette(mid);"
+            " padding: 4px 0px; font-size: 11px; font-weight: 700; text-align: left; }"
+            "QToolButton:hover { color: palette(text); }"
+        )
         self._adv_btn.setToolTip("Batch runs, Moodle name-fixing, and speed. Most runs don't need these.")
         self._adv_btn.toggled.connect(self._on_adv_toggle)
-        panel.addWidget(self._adv_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        top.addWidget(self._adv_btn, 0, Qt.AlignmentFlag.AlignLeft)
 
-        self._adv_container = QWidget()
+        self._adv_container = QFrame()
+        self._adv_container.setObjectName("advanced_panel")
         adv = QVBoxLayout(self._adv_container)
-        adv.setContentsMargins(0, 2, 0, 0)
-        adv.setSpacing(8)
+        adv.setContentsMargins(12, 4, 12, 6)
+        adv.setSpacing(6)
 
         self._multi_unit_chk = QCheckBox("Also do the following units in this course")
+        self._multi_unit_chk.setObjectName("chk_also_do_following_units")
         self._multi_unit_chk.setToolTip(
             "After this unit finishes, find the next unit in the course\n"
             "(skipping empty units and units that already have a combined\n"
@@ -146,6 +163,7 @@ class CollectorPanel(QWidget):
         adv.addWidget(self._multi_unit_chk)
 
         self._auto_continue_chk = QCheckBox("Don't ask me before each unit")
+        self._auto_continue_chk.setObjectName("chk_dont_ask_before_each_unit")
         self._auto_continue_chk.setEnabled(False)
         self._auto_continue_chk.setToolTip(
             "Runs straight through additional units without pausing to\n"
@@ -157,19 +175,21 @@ class CollectorPanel(QWidget):
         sub_row.addWidget(self._auto_continue_chk)
         sub_row.addStretch()
         adv.addLayout(sub_row)
-        adv.addSpacing(4)
+        adv.addSpacing(2)
 
         adv.addWidget(_form_label("MOODLE COURSE URL  (optional — fixes odd file names)"))
         self._moodle_entry = QLineEdit()
+        self._moodle_entry.setObjectName("moodle_url_edit")
         self._moodle_entry.setPlaceholderText("https://mymoodle.okanagan.bc.ca/course/view.php?id=…")
-        self._moodle_entry.setFixedHeight(36)
+        self._moodle_entry.setFixedHeight(34)
         adv.addWidget(self._moodle_entry)
-        adv.addSpacing(4)
+        adv.addSpacing(2)
 
         par_row = QHBoxLayout()
         par_row.setSpacing(10)
         par_row.addWidget(_form_label("SPEED  (pages at once)"), 0, Qt.AlignmentFlag.AlignVCenter)
         self._parallel_spin = QSpinBox()
+        self._parallel_spin.setObjectName("speed_spin")
         self._parallel_spin.setRange(1, 10)
         self._parallel_spin.setValue(3)
         self._parallel_spin.setFixedWidth(84)
@@ -183,9 +203,38 @@ class CollectorPanel(QWidget):
         adv.addLayout(par_row)
 
         self._adv_container.setVisible(False)
-        panel.addWidget(self._adv_container)
+        top.addWidget(self._adv_container)
+        panel.addSpacing(4)
 
-        self._run_btn = QPushButton("Create Combined Page")
+        # ── Status row (hidden unless running or succeeded) ───────────────────
+        self._status_row = QFrame()
+        self._status_row.setObjectName("status_row")
+        status_layout = QHBoxLayout(self._status_row)
+        status_layout.setContentsMargins(10, 6, 10, 6)
+        status_layout.setSpacing(8)
+        self._status_spinner = QLabel("")
+        self._status_spinner.setObjectName("status_spinner")
+        self._status_label = QLabel("")
+        self._status_label.setObjectName("status_label")
+        self._status_label.setWordWrap(True)
+        status_layout.addWidget(self._status_spinner, 0, Qt.AlignmentFlag.AlignVCenter)
+        status_layout.addWidget(self._status_label, 1, Qt.AlignmentFlag.AlignVCenter)
+        self._status_row.setVisible(False)
+        panel.addWidget(self._status_row)
+
+        # ── Footer: primary (+ secondary in SUCCESS) always visible ───────────
+        self._btn_row = QHBoxLayout()
+        self._btn_row.setSpacing(8)
+        self._secondary_btn = QPushButton("Create Another")
+        self._secondary_btn.setObjectName("secondary_action_btn")
+        self._secondary_btn.setProperty("variant", "secondary")
+        self._secondary_btn.setFixedHeight(38)
+        self._secondary_btn.setMinimumWidth(150)
+        self._secondary_btn.clicked.connect(self._on_create_another)
+        self._secondary_btn.hide()
+
+        self._run_btn = QPushButton("Create Combined Unit Page")
+        self._run_btn.setObjectName("primary_action_btn")
         self._run_btn.setFixedHeight(38)
         self._run_btn.setMinimumWidth(240)
         self._run_btn.setStyleSheet(
@@ -195,49 +244,54 @@ class CollectorPanel(QWidget):
             "QPushButton:disabled { background-color:#1a2a2c; color:#636780; }"
         )
         self._run_btn.setToolTip(
-            "Scrapes all topic pages in the unit, combines them into one collapsible HTML file,\n"
+            "Scrapes all topic pages in the unit, combines them into one collapsible page,\n"
             "and writes the result to the target page."
         )
-        self._run_btn.clicked.connect(self._start_run)
-        panel.addSpacing(4)
-        panel.addWidget(self._run_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        self._run_btn.clicked.connect(self._on_primary_clicked)
+        self._btn_row.addWidget(self._secondary_btn)
+        self._btn_row.addWidget(self._run_btn, 1)
+        panel.addLayout(self._btn_row)
 
-        content_layout.addWidget(main_panel)
-
-        log_header = QWidget()
-        log_header_layout = QHBoxLayout(log_header)
-        log_header_layout.setContentsMargins(0, 2, 0, 0)
-        log_header_layout.setSpacing(8)
-        log_header_layout.addWidget(_form_label("LOG"))
-        log_header_layout.addStretch()
-        self._log_expand_btn = QPushButton("Expand Log")
-        self._log_expand_btn.setProperty("variant", "secondary")
-        self._log_expand_btn.setFixedHeight(28)
-        self._log_expand_btn.setMaximumWidth(120)
-        self._log_expand_btn.clicked.connect(self._toggle_log_size)
-        log_header_layout.addWidget(self._log_expand_btn)
-        content_layout.addWidget(log_header)
-
-        self._log = LogWidget()
-        self._log.setFixedHeight(240)
-        content_layout.addWidget(self._log)
-
-        self._continue_btn = QPushButton("Continue to Page Changer")
-        self._continue_btn.setProperty("variant", "next-step")
-        self._continue_btn.setFixedHeight(38)
-        self._continue_btn.setToolTip("Proceed to Step 3: use Claude AI to restyle pages with an OC brand theme.")
-        self._continue_btn.hide()
-        self._continue_btn.clicked.connect(self.continue_next)
-        content_layout.addWidget(self._continue_btn, 0, Qt.AlignmentFlag.AlignLeft)
-
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setWidget(content_widget)
-        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        scroll_area.setAlignment(
-            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
+        # ── Log handle + collapsible log panel ────────────────────────────────
+        self._log_handle = QToolButton()
+        self._log_handle.setObjectName("log_handle_btn")
+        self._log_handle.setText("LOG  Expand ▴")
+        self._log_handle.setCheckable(True)
+        self._log_handle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._log_handle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._log_handle.setStyleSheet(
+            "QToolButton { background: transparent; border: none; color: palette(mid);"
+            " padding: 2px 0px; font-size: 11px; font-weight: 700; text-align: left; }"
+            "QToolButton:hover { color: palette(text); }"
         )
-        layout.addWidget(scroll_area, 1)
+        self._log_handle.toggled.connect(self._toggle_log)
+        panel.addWidget(self._log_handle, 0, Qt.AlignmentFlag.AlignLeft)
+
+        self._log_panel = QFrame()
+        self._log_panel.setObjectName("log_panel")
+        log_layout = QVBoxLayout(self._log_panel)
+        log_layout.setContentsMargins(0, 4, 0, 0)
+        self._log = LogWidget()
+        self._log.setMinimumHeight(110)
+        self._log.setMaximumHeight(170)
+        log_layout.addWidget(self._log)
+        self._log_panel.setVisible(False)
+        panel.addWidget(self._log_panel)
+
+        # Outer scroll = small-screen safety net (§6): the card keeps its natural
+        # compact height; a scrollbar only appears if the viewport is too short.
+        outer_scroll = QScrollArea()
+        outer_scroll.setWidgetResizable(True)
+        outer_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer_holder = QWidget()
+        holder_layout = QVBoxLayout(outer_holder)
+        holder_layout.setContentsMargins(0, 0, 0, 0)
+        holder_layout.setSpacing(0)
+        holder_layout.addWidget(main_panel, 0, Qt.AlignmentFlag.AlignTop)
+        holder_layout.addStretch(1)
+        outer_scroll.setWidget(outer_holder)
+        layout.addWidget(outer_scroll, 1)
 
         # Carry over URLs entered in the Checker tab, and restore the checkbox.
         cfg = self._mw.load_config() if hasattr(self._mw, "load_config") else {}
@@ -250,14 +304,95 @@ class CollectorPanel(QWidget):
             self._auto_create_chk.setChecked(bool(cfg["col_auto_create"]))
         self._on_auto_toggle(self._auto_create_chk.isChecked())
 
-    def _toggle_log_size(self):
-        self._log_expanded = not self._log_expanded
-        self._log.setFixedHeight(420 if self._log_expanded else 240)
-        self._log_expand_btn.setText("Collapse Log" if self._log_expanded else "Expand Log")
+    # ── Collapse toggles ──────────────────────────────────────────────────────
+
+    def _toggle_log(self, open_: bool):
+        self._log_handle.setText("LOG  Collapse ▾" if open_ else "LOG  Expand ▴")
+        self._log_panel.setVisible(open_)
 
     def _on_adv_toggle(self, checked: bool):
         self._adv_container.setVisible(checked)
-        self._adv_btn.setText("▾  Advanced options" if checked else "▸  Advanced options")
+        self._adv_btn.setText("▾  Advanced settings" if checked else "▸  Advanced settings")
+
+    # ── State machine ─────────────────────────────────────────────────────────
+
+    def _apply_state(self):
+        state = self._state
+        if state == CollectState.READY:
+            self._status_row.setVisible(False)
+            self._secondary_btn.hide()
+            self._run_btn.show()
+            self._run_btn.setText("Create Combined Unit Page")
+            self._run_btn.setEnabled(True)
+            self._set_inputs_enabled(True)
+        elif state == CollectState.RUNNING:
+            self._show_status(
+                "Collecting pages… this usually takes 1–3 min.", running=True
+            )
+            self._secondary_btn.hide()
+            self._run_btn.show()
+            self._run_btn.setText("Collecting… usually 1–3 min")
+            self._run_btn.setEnabled(False)
+            self._set_inputs_enabled(False)
+        elif state == CollectState.SUCCESS:
+            n = self._last_page_count
+            count_txt = f"{n} topic pages" if n else "topic pages"
+            self._show_status(
+                f"Done — {count_txt} collected into one Brightspace page", running=False
+            )
+            self._set_inputs_enabled(True)
+            self._secondary_btn.setText("Create Another")
+            self._secondary_btn.show()
+            self._run_btn.show()
+            self._run_btn.setText("Continue →")
+            self._run_btn.setEnabled(True)
+
+    def _set_inputs_enabled(self, enabled: bool):
+        self._unit_entry.setEnabled(enabled)
+        self._target_entry.setEnabled(enabled)
+        self._auto_create_chk.setEnabled(enabled)
+        self._adv_btn.setEnabled(enabled)
+        self._adv_container.setEnabled(enabled)
+        self._parallel_spin.setEnabled(enabled)
+        self._moodle_entry.setEnabled(enabled)
+        self._multi_unit_chk.setEnabled(enabled)
+        # dependent checkbox keeps its parent-gated rule when re-enabling
+        self._auto_continue_chk.setEnabled(enabled and self._multi_unit_chk.isChecked())
+        for swatch in self._swatch_frames.values():
+            swatch.setEnabled(enabled)
+        # log handle intentionally always clickable
+
+    def _show_status(self, text: str, running: bool):
+        self._status_label.setText(text)
+        self._status_row.setVisible(True)
+        if running:
+            self._status_row.setStyleSheet(
+                "QFrame#status_row { background:#1a2a2c; border:1px solid #2a4145;"
+                " border-radius:6px; }"
+            )
+            self._status_label.setStyleSheet("color:#c8d4d6;")
+        else:
+            self._status_spinner.setText("✓")
+            self._status_spinner.setStyleSheet("color:#3ddc84; font-weight:700; font-size:14px;")
+            self._status_row.setStyleSheet(
+                "QFrame#status_row { background:#12331f; border:1px solid #1f6b3a;"
+                " border-radius:6px; }"
+            )
+            self._status_label.setStyleSheet("color:#b7f0cd; font-weight:600;")
+
+    # ── Footer actions ────────────────────────────────────────────────────────
+
+    def _on_primary_clicked(self):
+        if self._state == CollectState.SUCCESS:
+            self.continue_next.emit()   # existing post-success "Continue" action
+        else:
+            self._start_run()
+
+    def _on_create_another(self):
+        # Reset to READY, preserving all field values (spec §3 SUCCESS).
+        self._state = CollectState.READY
+        self._status_spinner.setText("")
+        self._apply_state()
 
     def _on_auto_toggle(self, checked: bool):
         """Reflect the auto-create choice: hide the target field when a page will
@@ -325,8 +460,10 @@ class CollectorPanel(QWidget):
         except FileNotFoundError:
             style_reference_html = ""
 
-        self._run_btn.setText("Running…"); self._run_btn.setEnabled(False)
-        self._continue_btn.hide()
+        self._succeeded = False
+        self._last_page_count = None
+        self._state = CollectState.RUNNING
+        self._apply_state()
         self._log.clear_log()
 
         q = self._log_queue
@@ -439,14 +576,20 @@ class CollectorPanel(QWidget):
             await p.stop()
 
     def _poll_log(self):
+        # Animate the running spinner off the existing poll tick (no new timer).
+        if self._state == CollectState.RUNNING:
+            self._spin_idx = (self._spin_idx + 1) % len(_SPINNER_FRAMES)
+            self._status_spinner.setText(_SPINNER_FRAMES[self._spin_idx])
+            self._status_spinner.setStyleSheet("color:#2ECDDC; font-size:13px;")
         try:
             while True:
                 msg, tag = self._log_queue.get_nowait()
                 if msg == "__DONE__":
-                    self._run_btn.setText("Create Combined Page")
-                    self._run_btn.setEnabled(True)
+                    # Backend fires __DONE__ on both success and failure; decide
+                    # final state from the success sentinel sniffed below.
+                    self._state = CollectState.SUCCESS if self._succeeded else CollectState.READY
+                    self._apply_state()
                 elif msg == "__SUCCESS__":
-                    self._continue_btn.show()
                     self.step_success.emit()
                 elif msg == "__COL_CONFIRM__":
                     conf_msg, result_ref, event = tag
@@ -464,6 +607,15 @@ class CollectorPanel(QWidget):
                     result_ref[0] = dlg.exec() == QMessageBox.StandardButton.Yes
                     event.set()
                 else:
+                    # Sniff success + page count off the existing backend log
+                    # stream (no backend change): "✓ Text done: N pages" and the
+                    # final "✓ Done!" line are the only success signals emitted.
+                    if tag == "success":
+                        m = re.search(r"Text done:\s*(\d+)\s+pages", msg)
+                        if m:
+                            self._last_page_count = int(m.group(1))
+                        if "Done!" in msg:
+                            self._succeeded = True
                     self._log.append_log(msg, tag)
         except queue.Empty:
             pass
