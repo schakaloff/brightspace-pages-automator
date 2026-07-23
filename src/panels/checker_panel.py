@@ -169,6 +169,14 @@ class CheckerPanel(QWidget):
         if cfg.get("chk_moodle_url"):
             self._moodle_entry.setText(cfg["chk_moodle_url"])
 
+    def save_state(self):
+        if not hasattr(self._mw, "save_config"):
+            return
+        self._mw.save_config({
+            "chk_bs_url": self._bs_entry.text().strip(),
+            "chk_moodle_url": self._moodle_entry.text().strip(),
+        })
+
     def _run_worker(self, phase_b: bool = False):
         bs_url     = self._bs_entry.text().strip()
         moodle_url = self._moodle_entry.text().strip()
@@ -179,7 +187,7 @@ class CheckerPanel(QWidget):
             self._log.append_log("Paste a Brightspace URL first.", "warning")
             return
 
-        self._mw.save_config({"chk_bs_url": bs_url, "chk_moodle_url": moodle_url})
+        self.save_state()
 
         import threading as _t
         moodle_ev = _t.Event(); h5p_ev = _t.Event(); file_ev = _t.Event()

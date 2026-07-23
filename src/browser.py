@@ -61,6 +61,7 @@ async def wait_for_login(
     password: str | None = None,
     sso_email: str | None = None,
     sso_password: str | None = None,
+    log_fn=None,
 ) -> None:
     """
     Navigate to Brightspace and wait for login if needed.
@@ -68,6 +69,13 @@ async def wait_for_login(
     If sso_email/sso_password are provided, auto-fills the Microsoft SSO form.
     If the saved session is still valid the loop exits in ~3 s without user action.
     """
+    def log(msg, tag="dim"):
+        if log_fn:
+            log_fn(msg, tag)
+        print(msg)
+
+    log("Brightspace: wait_for_login() called")
+    log(f"Brightspace session file exists: {'yes' if os.path.exists(SESSION_FILE) else 'no'} ({SESSION_FILE})")
     print("Opening Brightspace...")
     if username and password:
         print("  Attempting auto-login with saved credentials...")
@@ -109,17 +117,31 @@ async def wait_for_login(
             break
     else:
         raise RuntimeError("Login timed out after 9 minutes")
-    print("✓ Logged in — saving session...")
+    log(f"Brightspace: final URL after login/session check: {page.url}")
+    print("[OK] Logged in — saving session...")
     await page.wait_for_load_state("networkidle", timeout=20000)
     await context.storage_state(path=SESSION_FILE)
-    print("✓ Session saved")
+    log(f"Brightspace: session saved to {SESSION_FILE}", "success")
+    print("[OK] Session saved")
 
 
-async def launch_browser():
+async def launch_browser(log_fn=None):
     """
     Start Playwright and launch Chromium with saved session (if any).
     Returns (playwright_instance, browser, context, page).
     """
+    def log(msg, tag="dim"):
+        if log_fn:
+            log_fn(msg, tag)
+        print(msg)
+
+    session_exists = os.path.exists(SESSION_FILE)
+    log(f"Brightspace session file exists before browser launch: {'yes' if session_exists else 'no'} ({SESSION_FILE})")
+    if session_exists:
+        log(f"Brightspace: loading saved session from {SESSION_FILE}")
+    else:
+        log("Brightspace: launching without saved session")
+
     p = await async_playwright().start()
     browser = await p.chromium.launch(
         headless=False,
@@ -127,7 +149,7 @@ async def launch_browser():
         args=["--start-maximized"],
     )
     context = await browser.new_context(
-        storage_state=SESSION_FILE if os.path.exists(SESSION_FILE) else None,
+        storage_state=SESSION_FILE if session_exists else None,
         no_viewport=True,
         permissions=["clipboard-read", "clipboard-write"],
     )

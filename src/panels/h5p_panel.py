@@ -100,6 +100,14 @@ class H5PPanel(QWidget):
         if cfg.get("h5p_moodle_url"):
             self._moodle_entry.setText(cfg["h5p_moodle_url"])
 
+    def save_state(self):
+        if not hasattr(self._mw, "save_config"):
+            return
+        self._mw.save_config({
+            "h5p_bs_url": self._bs_entry.text().strip(),
+            "h5p_moodle_url": self._moodle_entry.text().strip(),
+        })
+
     def _start_run(self):
         if not self._mw.chromium_ready:
             self._log.append_log("Browser engine still installing — please wait.", "warning")
@@ -111,7 +119,7 @@ class H5PPanel(QWidget):
             self._log.append_log("Enter both a Brightspace and a Moodle course URL.", "warning")
             return
 
-        self._mw.save_config({"h5p_bs_url": bs_url, "h5p_moodle_url": moodle_url})
+        self.save_state()
 
         moodle_ev = threading.Event()
         h5p_ev = threading.Event()

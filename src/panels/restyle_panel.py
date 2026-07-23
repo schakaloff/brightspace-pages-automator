@@ -86,6 +86,13 @@ class RestylePanel(QWidget):
         if cfg.get("automator_url"):
             self._url_entry.setText(cfg["automator_url"])
 
+    def save_state(self):
+        if not hasattr(self._mw, "save_config"):
+            return
+        self._mw.save_config({
+            "automator_url": self._url_entry.text().strip(),
+        })
+
     def _start_run(self):
         if not self._mw.chromium_ready:
             self._log.append_log("Browser engine still installing — please wait.", "warning"); return
@@ -149,8 +156,7 @@ class RestylePanel(QWidget):
                 msg, tag = self._log_queue.get_nowait()
                 if msg == "__DONE__":
                     self._run_btn.setText("Start"); self._run_btn.setEnabled(True)
-                    if hasattr(self._mw, "save_config"):
-                        self._mw.save_config({"automator_url": self._url_entry.text().strip()})
+                    self.save_state()
                 elif msg == "__PAGES__":
                     from gui_dialogs import PagesDialog
                     dlg = PagesDialog(tag, self)

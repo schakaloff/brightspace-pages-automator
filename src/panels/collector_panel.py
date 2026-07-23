@@ -255,7 +255,7 @@ class CollectorPanel(QWidget):
         # ── Log handle + collapsible log panel ────────────────────────────────
         self._log_handle = QToolButton()
         self._log_handle.setObjectName("log_handle_btn")
-        self._log_handle.setText("LOG  Expand ▴")
+        self._log_handle.setText("LOG  Collapse ▾")
         self._log_handle.setCheckable(True)
         self._log_handle.setCursor(Qt.CursorShape.PointingHandCursor)
         self._log_handle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
@@ -275,8 +275,9 @@ class CollectorPanel(QWidget):
         self._log.setMinimumHeight(110)
         self._log.setMaximumHeight(170)
         log_layout.addWidget(self._log)
-        self._log_panel.setVisible(False)
+        self._log_panel.setVisible(True)
         panel.addWidget(self._log_panel)
+        self._log_handle.setChecked(True)
 
         # Outer scroll = small-screen safety net (§6): the card keeps its natural
         # compact height; a scrollbar only appears if the viewport is too short.
@@ -293,10 +294,15 @@ class CollectorPanel(QWidget):
         outer_scroll.setWidget(outer_holder)
         layout.addWidget(outer_scroll, 1)
 
-        # Carry over URLs entered in the Checker tab, and restore the checkbox.
+        # Restore this panel's URLs, falling back to Checker course URLs where useful.
         cfg = self._mw.load_config() if hasattr(self._mw, "load_config") else {}
-        if cfg.get("chk_moodle_url") and not self._moodle_entry.text().strip():
-            self._moodle_entry.setText(cfg["chk_moodle_url"])
+        if cfg.get("col_unit_url"):
+            self._unit_entry.setText(cfg["col_unit_url"])
+        if cfg.get("col_target_url"):
+            self._target_entry.setText(cfg["col_target_url"])
+        saved_moodle_url = cfg.get("col_moodle_url") or cfg.get("chk_moodle_url")
+        if saved_moodle_url:
+            self._moodle_entry.setText(saved_moodle_url)
         if cfg.get("chk_bs_url"):
             self._bs_course_hint.setText(f"Course carried over from Checker: {cfg['chk_bs_url']}")
             self._bs_course_hint.show()
@@ -421,6 +427,16 @@ class CollectorPanel(QWidget):
             self._bs_course_hint.setText(f"Course carried over from Checker: {cfg['chk_bs_url']}")
             self._bs_course_hint.show()
 
+    def save_state(self):
+        if not hasattr(self._mw, "save_config"):
+            return
+        self._mw.save_config({
+            "col_unit_url": self._unit_entry.text().strip(),
+            "col_target_url": self._target_entry.text().strip(),
+            "col_moodle_url": self._moodle_entry.text().strip(),
+            "col_auto_create": self._auto_create_chk.isChecked(),
+        })
+
     def _start_run(self):
         if not self._mw.chromium_ready:
             self._log.append_log("Browser engine still installing — please wait.", "warning")
@@ -448,7 +464,7 @@ class CollectorPanel(QWidget):
                     "warning",
                 ); return
 
-        self._mw.save_config({"col_auto_create": auto_create})
+        self.save_state()
 
         theme_name   = self._selected_theme[0]
         theme_colors = PAGE_THEMES[theme_name]

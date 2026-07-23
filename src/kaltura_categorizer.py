@@ -2,6 +2,7 @@ import asyncio
 import re
 import os
 import sys
+from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
 
@@ -16,7 +17,14 @@ MOODLE_SESSION_FILE = str(USERDATA_DIR / "moodle_session.json")
 
 class KalturaCategorizer:
 
-    async def scan_moodle_course(self, moodle_course_url: str, log_fn=None) -> list[dict]:
+    async def scan_moodle_course(
+        self,
+        moodle_course_url: str,
+        log_fn=None,
+        moodle_username: str = "",
+        moodle_password: str = "",
+        _retry_stale_session: bool = True,
+    ) -> list[dict]:
         """Scrape all kalvidres activity pages in a Moodle course.
 
         Returns list of {entry_id, name, moodle_url, section_name}.
@@ -26,15 +34,44 @@ class KalturaCategorizer:
                 log_fn(msg, tag)
             print(f"[kaltura scan] {msg}", file=sys.stderr)
 
+        def safe_url(page_url: str) -> str:
+            parsed = urlparse(page_url)
+            host = (parsed.hostname or "").lower()
+            query_l = parsed.query.lower()
+            if "microsoftonline.com" in host:
+                return f"{parsed.scheme}://{parsed.netloc}{parsed.path}?[redacted]"
+            if any(key in query_l for key in ("saml", "signature", "token")):
+                return f"{parsed.scheme}://{parsed.netloc}{parsed.path}?[redacted]"
+            return page_url
+
+        def stale_course_reason(page_url: str, title: str = "") -> str | None:
+            parsed = urlparse(page_url)
+            host = (parsed.hostname or "").lower()
+            path = parsed.path.lower()
+            title_l = title.lower()
+            if "microsoftonline.com" in host:
+                return "Moodle redirected to Microsoft SSO"
+            if host != "mymoodle.okanagan.bc.ca":
+                return f"Moodle navigation ended on {host or 'an unknown host'}"
+            if "/login/" in path or path.endswith("/login/index.php"):
+                return "Moodle login page opened"
+            if "sign in to your account" in title_l:
+                return "Microsoft sign-in page opened"
+            if "/course/view.php" not in path:
+                return "Moodle course page did not open"
+            return None
+
         results = []
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             try:
-                if os.path.exists(MOODLE_SESSION_FILE):
-                    log(f"Loading Moodle session from {MOODLE_SESSION_FILE}")
+                moodle_session_exists = os.path.exists(MOODLE_SESSION_FILE)
+                log(f"Moodle session file exists: {'yes' if moodle_session_exists else 'no'} ({MOODLE_SESSION_FILE})")
+                if moodle_session_exists:
+                    log(f"Moodle: using saved session for scan from {MOODLE_SESSION_FILE}")
                     storage = MOODLE_SESSION_FILE
                 else:
-                    log("No Moodle session — use 'Login to Moodle' first", "warning")
+                    log("Moodle: no saved session for scan; login is required before scanning", "warning")
                     storage = None
                 context = await browser.new_context(storage_state=storage)
                 page = await context.new_page()
@@ -47,20 +84,160 @@ class KalturaCategorizer:
                     log(f"Using Moodle course page: {moodle_course_url}")
 
                 log(f"Navigating to {moodle_course_url}")
-                await page.goto(moodle_course_url, wait_until="networkidle", timeout=30000)
-                log(f"Landed on: {page.url}")
+                await page.goto(moodle_course_url, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(2000)
+                log(f"Moodle: final URL after course navigation: {safe_url(page.url)}")
 
                 # Retry if Moodle bounced us to the enrolment page (common on fresh login)
                 for _ in range(4):
                     if "/enrol/" not in page.url:
                         break
                     log("Redirected to enrolment page — retrying course page", "dim")
-                    await page.goto(moodle_course_url, wait_until="networkidle", timeout=30000)
-                    log(f"Landed on: {page.url}")
+                    await page.goto(moodle_course_url, wait_until="domcontentloaded", timeout=30000)
+                    await page.wait_for_timeout(2000)
+                    log(f"Moodle: final URL after enrolment retry: {safe_url(page.url)}")
+
+                try:
+                    title = await page.title()
+                except Exception:
+                    title = ""
+                stale_reason = stale_course_reason(page.url, title)
+                if stale_reason:
+                    if moodle_session_exists and _retry_stale_session:
+                        log(f"Saved Moodle session appears stale: {stale_reason}. Re-authenticating once...", "warning")
+                        await browser.close()
+                        await self.login_to_moodle(
+                            moodle_course_url,
+                            moodle_username=moodle_username,
+                            moodle_password=moodle_password,
+                            log_fn=log_fn,
+                        )
+                        log("Retrying Moodle scan with refreshed session...", "dim")
+                        return await self.scan_moodle_course(
+                            moodle_course_url,
+                            log_fn=log_fn,
+                            moodle_username=moodle_username,
+                            moodle_password=moodle_password,
+                            _retry_stale_session=False,
+                        )
+                    log(f"Could not open Moodle course content: {stale_reason}. Use 'Login to Moodle' first.", "error")
+                    return []
 
                 if "mymoodle.okanagan.bc.ca" not in page.url:
                     log(f"Not on Moodle — got redirected to {page.url[:80]} — session may have expired. Use 'Login to Moodle' first.", "error")
                     return []
+
+                # Kaltura players can be embedded directly in labels/section summaries on
+                # the course page, without a kalvidres/page/book activity link.
+                course_embeds = await page.evaluate(r"""() => {
+                    const cleanText = value => (value || '').replace(/\s+/g, ' ').trim();
+                    const entryIdFromSrc = src => {
+                        const match = (src || '').match(/entryid(?:%2F|\/|=|%3D)+([01]_[a-z0-9_]+)/i);
+                        return match ? match[1] : '';
+                    };
+                    const found = [];
+                    document.querySelectorAll(
+                        'iframe.kaltura-player-iframe, iframe[src*="/filter/kaltura/" i], iframe[src*="kaltura" i]'
+                    ).forEach(frame => {
+                        const entryId = entryIdFromSrc(frame.getAttribute('src') || frame.src);
+                        if (!entryId) return;
+
+                        const section = frame.closest('li.section, li.section.main, [data-for="section"]');
+                        const heading = section && (
+                            section.querySelector(
+                                'h3[data-for="section_title"] > a, h4[data-for="section_title"] > a, '
+                                + 'h3.sectionname > a, h4.sectionname > a'
+                            )
+                            || section.querySelector(
+                                'h3[data-for="section_title"], h4[data-for="section_title"], '
+                                + 'h3.sectionname, h4.sectionname'
+                            )
+                        );
+                        const sectionName = cleanText(
+                            heading ? heading.textContent : '(unnamed section)'
+                        );
+
+                        const activity = frame.closest(
+                            '.activity-altcontent, .contentwithoutlink, .activity-description'
+                        ) || frame.closest('.activity-item, li.activity, .activity-wrapper');
+                        let name = '';
+                        if (activity) {
+                            const copy = activity.cloneNode(true);
+                            copy.querySelectorAll(
+                                'iframe, script, style, .sr-only, .activity-badges, '
+                                + '[data-for="cmAvailabilityInfo"]'
+                            ).forEach(el => el.remove());
+                            name = cleanText(copy.textContent);
+                            if (name.length > 160) name = name.slice(0, 157).trimEnd() + '...';
+                        }
+                        found.push({ entryId, sectionName, name });
+                    });
+                    return found;
+                }""")
+
+                async def get_course_embed_titles() -> dict[str, str]:
+                    """Read media titles from the nested Kaltura player frames."""
+                    expected_ids = {embed["entryId"] for embed in course_embeds}
+                    titles = {}
+                    generic_titles = {
+                        "okanagan college",
+                        "kaltura",
+                        "kaltura - everything video",
+                        "the kaltura dynamic video player",
+                    }
+
+                    for _ in range(12):
+                        frame_locators = page.locator(
+                            'iframe.kaltura-player-iframe, '
+                            'iframe[src*="/filter/kaltura/" i], '
+                            'iframe[src*="kaltura" i]'
+                        )
+                        for index in range(await frame_locators.count()):
+                            iframe = frame_locators.nth(index)
+                            src = await iframe.get_attribute("src") or ""
+                            match = re.search(
+                                r"entryid(?:%2F|/|=|%3D)+([01]_[a-z0-9_]+)",
+                                src,
+                                re.IGNORECASE,
+                            )
+                            if not match:
+                                continue
+                            entry_id = match.group(1)
+                            if entry_id not in expected_ids or entry_id in titles:
+                                continue
+
+                            handle = await iframe.element_handle()
+                            outer_frame = await handle.content_frame() if handle else None
+                            if not outer_frame:
+                                continue
+
+                            frames_to_check = [outer_frame]
+                            for frame in frames_to_check:
+                                frames_to_check.extend(frame.child_frames)
+                                try:
+                                    title = re.sub(r"\s+", " ", await frame.title()).strip()
+                                except Exception:
+                                    continue
+                                if title and title.lower() not in generic_titles:
+                                    titles[entry_id] = title
+                                    break
+
+                        if len(titles) == len(expected_ids):
+                            break
+                        await page.wait_for_timeout(1000)
+
+                    return titles
+
+                player_titles = await get_course_embed_titles()
+                if course_embeds:
+                    log(
+                        f"Resolved {len(player_titles)} of {len(course_embeds)} "
+                        "course-page video title(s) from Kaltura players"
+                    )
+                for embed in course_embeds:
+                    player_title = player_titles.get(embed["entryId"])
+                    if player_title:
+                        embed["name"] = player_title
 
                 # Collect kalvidres links, mod/page links, and mod/book links (pages/books may embed Kaltura)
                 link_data = await page.evaluate("""() => {
@@ -78,9 +255,10 @@ class KalturaCategorizer:
                 }""")
 
                 all_links = list(link_data.keys())
+                log(f"Found {len(course_embeds)} Kaltura embed(s) directly on the course page")
                 log(f"Found {len(all_links)} candidate link(s) on course page (kalvidres + pages + books)")
 
-                if not all_links:
+                if not all_links and not course_embeds:
                     title = await page.title()
                     log(f"Page title: {title!r} — check URL is a Moodle course page", "warning")
                     return []
@@ -92,7 +270,7 @@ class KalturaCategorizer:
 
                 async def scan_embedded_entries():
                     """Scan the current page's body HTML for embedded Kaltura entryIds."""
-                    return await page.evaluate("""() => {
+                    return await page.evaluate(r"""() => {
                         const found = [];
                         // iframe src pattern: entryId=xxx or entryid/xxx
                         document.querySelectorAll('iframe[src*="kaltura"]').forEach(f => {
@@ -139,11 +317,23 @@ class KalturaCategorizer:
                         })
                     return added
 
+                for embed in course_embeds:
+                    entry_id = embed["entryId"]
+                    section_name = embed["sectionName"]
+                    name = embed["name"] or f"Kaltura video [{entry_id}]"
+                    record_embeds(
+                        [entry_id],
+                        name,
+                        moodle_course_url,
+                        section_name,
+                    )
+
                 for i, link in enumerate(all_links, 1):
                     section_name = link_data[link]
                     log(f"[{i}/{len(all_links)}] Visiting {link}")
                     try:
-                        await page.goto(link, wait_until="networkidle", timeout=20000)
+                        await page.goto(link, wait_until="domcontentloaded", timeout=20000)
+                        await page.wait_for_timeout(1500)
 
                         if "mod/kalvidres" in link:
                             # Dedicated Kaltura activity — entryId in iframe src
@@ -204,7 +394,8 @@ class KalturaCategorizer:
                                 for k, chapter_url in enumerate(new_chapters, 1):
                                     log(f"  [chapter {k}/{len(new_chapters)}] Visiting {chapter_url}")
                                     try:
-                                        await page.goto(chapter_url, wait_until="networkidle", timeout=20000)
+                                        await page.goto(chapter_url, wait_until="domcontentloaded", timeout=20000)
+                                        await page.wait_for_timeout(1500)
                                         chapter_embedded = await scan_embedded_entries()
                                         if not chapter_embedded:
                                             continue
@@ -241,6 +432,7 @@ class KalturaCategorizer:
 
         MANUAL_LOGIN_URL = "https://mymoodle.okanagan.bc.ca/login/index.php?saml=off"
 
+        log(f"Moodle session file exists before login: {'yes' if os.path.exists(MOODLE_SESSION_FILE) else 'no'} ({MOODLE_SESSION_FILE})")
         p = await async_playwright().start()
         browser = await p.chromium.launch(headless=False, slow_mo=50)
         try:
@@ -252,6 +444,7 @@ class KalturaCategorizer:
                 await page.goto(MANUAL_LOGIN_URL, wait_until="domcontentloaded", timeout=15000)
             except Exception:
                 pass
+            log(f"Moodle: URL after opening manual login: {page.url}")
             await page.wait_for_timeout(1000)
 
             # "Already logged in as X — Log out?" dialog (stale SSO session)
@@ -279,7 +472,7 @@ class KalturaCategorizer:
                 await page.wait_for_timeout(1000)
 
             if moodle_username and moodle_password:
-                log(f"Filling credentials for {moodle_username}…")
+                log("Filling saved Moodle credentials...")
                 try:
                     await page.evaluate("""([u, p]) => {
                         const set = Object.getOwnPropertyDescriptor(
@@ -312,8 +505,9 @@ class KalturaCategorizer:
                 else:
                     raise RuntimeError("Moodle login timed out after 6 minutes")
 
+            log(f"Moodle: final URL before saving session: {page.url}")
             await context.storage_state(path=MOODLE_SESSION_FILE)
-            log("Moodle session saved — ready to scan.", "success")
+            log(f"Moodle session saved to {MOODLE_SESSION_FILE} — ready to scan.", "success")
         finally:
             try:
                 await browser.close()
@@ -345,14 +539,16 @@ class KalturaCategorizer:
         base_url = "/".join(bs_url.split("/")[:3])
         log(f"Course ID: {course_id}  Base: {base_url}")
 
-        p, browser, context, page = await launch_browser()
+        p, browser, context, page = await launch_browser(log_fn=log)
         try:
+            log("Brightspace: calling wait_for_login() for module fetch")
             await wait_for_login(
                 page, context,
                 bs_username or None,
                 bs_password or None,
                 sso_email or None,
                 sso_password or None,
+                log_fn=log,
             )
             nav_url = f"{base_url}/d2l/le/content/{course_id}/home"
             log(f"Navigating to {nav_url}")
@@ -411,7 +607,7 @@ class KalturaCategorizer:
         count = await rows.count()
         log_fn(f"  KMC: {count} row(s) found", "dim")
         if count == 0:
-            log_fn(f"  ⚠ Entry {entry_id} not found in KMC", "warning")
+            log_fn(f"  [WARN] Entry {entry_id} not found in KMC", "warning")
             return None
 
         # Click entry name cell (2nd td) — first td is checkbox
@@ -430,7 +626,7 @@ class KalturaCategorizer:
             await share_link.click()
             log_fn(f"  KMC: clicked Share & Embed", "dim")
         except Exception as e:
-            log_fn(f"  ⚠ Share & Embed link not found: {e}", "warning")
+            log_fn(f"  [WARN] Share & Embed link not found: {e}", "warning")
             return None
         await kmc_page.wait_for_timeout(2000)
 
@@ -445,9 +641,9 @@ class KalturaCategorizer:
                     return code.strip()
                 await kmc_page.wait_for_timeout(1000)
         except Exception as e:
-            log_fn(f"  ⚠ Textarea read failed: {e}", "warning")
+            log_fn(f"  [WARN] Textarea read failed: {e}", "warning")
 
-        log_fn(f"  ⚠ Embed textarea empty for {entry_id}", "warning")
+        log_fn(f"  [WARN] Embed textarea empty for {entry_id}", "warning")
         return None
 
     async def _create_bs_page(
@@ -468,7 +664,7 @@ class KalturaCategorizer:
         try:
             await bs_page.goto(module_url, wait_until="domcontentloaded", timeout=30000)
         except Exception as e:
-            log_fn(f"  ⚠ Navigation to module failed: {e}", "warning")
+            log_fn(f"  [WARN] Navigation to module failed: {e}", "warning")
         await bs_page.wait_for_timeout(2000)
 
         # ── Shadow-DOM helpers ─────────────────────────────────────────────────
@@ -675,7 +871,7 @@ class KalturaCategorizer:
                     log_fn(f"  CN diag f{idx} url={(frame.url or '')[:55]} {vis}", "dim")
                 except Exception as e:
                     log_fn(f"  CN diag f{idx} err {e}", "dim")
-            log_fn("  ✗ 'Create New' — could not open the create menu", "error")
+            log_fn("  [ERROR] 'Create New' — could not open the create menu", "error")
             return False
         await bs_page.wait_for_timeout(600)
 
@@ -752,7 +948,7 @@ class KalturaCategorizer:
                 except Exception as e:
                     log_fn(f"  Tile diag f{idx}: err {e}", "dim")
             log_fn(f"  Page tile diagnostic: url={bs_page.url}, frames={len(bs_page.frames)}", "dim")
-            log_fn("  ✗ 'Page' tile not found", "error")
+            log_fn("  [ERROR] 'Page' tile not found", "error")
             return False
 
         # Wait for editor URL (contains /edit/)
@@ -782,7 +978,7 @@ class KalturaCategorizer:
                 await bs_page.wait_for_timeout(500)
 
         if not source_opened:
-            log_fn("  ✗ Source Code button not found", "error")
+            log_fn("  [ERROR] Source Code button not found", "error")
             return False
 
         await bs_page.wait_for_timeout(1000)
@@ -858,9 +1054,9 @@ class KalturaCategorizer:
             await bs_page.wait_for_timeout(100)
             await bs_page.keyboard.type(title, delay=30)
             await bs_page.wait_for_timeout(500)
-            log_fn(f"  ✓ Title typed: {title}", "dim")
+            log_fn(f"  [OK] Title typed: {title}", "dim")
         else:
-            log_fn("  ⚠ Title field not found — set manually", "warning")
+            log_fn("  [WARN] Title field not found — set manually", "warning")
 
         # ── Save and Close page ────────────────────────────────────────────────
         for selector in (
@@ -877,10 +1073,10 @@ class KalturaCategorizer:
                 except Exception:
                     pass
                 await bs_page.wait_for_timeout(2000)
-                log_fn(f"  ✓ Saved: {title}", "success")
+                log_fn(f"  [OK] Saved: {title}", "success")
                 return True
 
-        log_fn("  ⚠ Save button not found", "warning")
+        log_fn("  [WARN] Save button not found", "warning")
         return False
 
     async def embed_entries(
@@ -891,9 +1087,14 @@ class KalturaCategorizer:
         log_fn,
         kmc_username: str = "",
         kmc_password: str = "",
+        bs_username: str = "",
+        bs_password: str = "",
+        sso_email: str = "",
+        sso_password: str = "",
     ) -> None:
         """For each entry: get KMC embed code → create Brightspace page."""
         from content_checker import _extract_course_id
+        from browser import wait_for_login
         course_id = _extract_course_id(bs_url)
         if not course_id:
             raise ValueError(f"Could not extract course ID from URL: {bs_url}")
@@ -901,11 +1102,22 @@ class KalturaCategorizer:
 
         async with async_playwright() as p:
             kmc_context, kmc_browser, kmc_page = await self._get_kmc_context(
-                p, kmc_username=kmc_username, kmc_password=kmc_password, log_fn=log_fn
+                p,
+                kmc_username=kmc_username,
+                kmc_password=kmc_password,
+                sso_email=sso_email,
+                sso_password=sso_password,
+                log_fn=log_fn,
             )
             bs_browser = await p.chromium.launch(headless=False, slow_mo=80)
             try:
-                storage = SESSION_FILE if os.path.exists(SESSION_FILE) else None
+                bs_session_exists = os.path.exists(SESSION_FILE)
+                log_fn(f"Brightspace session file exists for page creation: {'yes' if bs_session_exists else 'no'} ({SESSION_FILE})", "dim")
+                if bs_session_exists:
+                    log_fn(f"Brightspace: loading saved session for page creation from {SESSION_FILE}", "dim")
+                else:
+                    log_fn("Brightspace: page creation browser has no saved session to load", "warning")
+                storage = SESSION_FILE if bs_session_exists else None
                 bs_context = await bs_browser.new_context(
                     storage_state=storage,
                     no_viewport=True,
@@ -922,18 +1134,36 @@ class KalturaCategorizer:
                 except Exception as e:
                     log_fn(f"BS goto warning: {e}", "dim")
                 log_fn(f"BS landed on: {bs_page.url}", "dim")
-                if "d2l/home" not in bs_page.url:
-                    log_fn("BS session expired — please run 'Fetch BS Modules' again to refresh login", "error")
-                    return
+                bs_logged_out = (
+                    "sessionExpired=1" in bs_page.url
+                    or "/d2l/login" in bs_page.url
+                    or "d2l/home" not in bs_page.url
+                )
+                if bs_logged_out:
+                    log_fn("Brightspace session appears expired during page creation.", "warning")
+                    log_fn("Brightspace: calling wait_for_login() for page creation recovery.", "dim")
+                    await wait_for_login(
+                        bs_page,
+                        bs_context,
+                        bs_username or None,
+                        bs_password or None,
+                        sso_email or None,
+                        sso_password or None,
+                        log_fn=log_fn,
+                    )
+                    log_fn(f"Brightspace: final URL after page creation login/session recovery: {bs_page.url}", "dim")
+                    if "d2l/home" not in bs_page.url:
+                        log_fn(f"Brightspace: session recovery failed; current URL is {bs_page.url}", "error")
+                        return
 
-                log_fn("✓ Both browsers ready", "success")
+                log_fn("[OK] Both browsers ready", "success")
                 for entry in entries:
                     entry_id = entry["entry_id"]
                     name = entry["name"]
                     section_name = entry.get("section_name", "")
                     module_id = section_map.get(section_name)
                     if not module_id:
-                        log_fn(f"⚠ No module mapped for '{section_name}', skipping {name}", "warning")
+                        log_fn(f"[WARN] No module mapped for '{section_name}', skipping {name}", "warning")
                         continue
                     try:
                         embed_code = await self._get_embed_code(kmc_page, entry_id, log_fn)
@@ -943,14 +1173,15 @@ class KalturaCategorizer:
                             bs_page, base_url, course_id, module_id, name, embed_code, log_fn
                         )
                         if not ok:
-                            log_fn(f"✗ Failed to create page: {name}", "error")
+                            log_fn(f"[ERROR] Failed to create page: {name}", "error")
                     except Exception as e:
-                        log_fn(f"✗ {name}: {e}", "error")
+                        log_fn(f"[ERROR] {name}: {e}", "error")
             finally:
                 try:
                     await kmc_context.storage_state(path=KMC_SESSION_FILE)
+                    log_fn(f"KMC session saved to {KMC_SESSION_FILE}", "dim")
                 except Exception:
-                    pass
+                    log_fn("KMC session save skipped after page creation because the KMC context was unavailable", "dim")
                 await kmc_browser.close()
                 await bs_browser.close()
 
@@ -959,14 +1190,16 @@ class KalturaCategorizer:
         playwright,
         kmc_username: str = "",
         kmc_password: str = "",
+        sso_email: str = "",
+        sso_password: str = "",
         log_fn=None,
     ):
         """Return a logged-in KMC browser context.
 
         Loads kmc_session.json if it exists and is still valid.
-        Otherwise opens a visible browser for SSO login. If kmc_username/
-        kmc_password are provided, auto-fills the Microsoft SSO form once it
-        appears (KMC uses the same SSO tenant as Moodle/Brightspace);
+        Otherwise opens a visible browser for SSO login. If KMC credentials
+        or global SSO credentials are provided, auto-fills the Microsoft SSO
+        form once it appears (KMC uses the same SSO tenant as Moodle/Brightspace);
         otherwise waits indefinitely for the user to log in manually.
         """
         def log(msg, tag="dim"):
@@ -974,40 +1207,164 @@ class KalturaCategorizer:
                 log_fn(msg, tag)
             print(f"[kmc login] {msg}", file=sys.stderr)
 
+        async def current_kmc_state() -> str:
+            if "microsoftonline.com" in page.url:
+                return "microsoft"
+            login_form = page.locator("form.kLoginForm").first
+            if await login_form.count() > 0 and await login_form.is_visible():
+                return "login"
+            if "kmcng/content/entries/list" in page.url:
+                entries_ui = page.locator(
+                    "p-table, tr.kEntry, input[type='text']"
+                )
+                for index in range(await entries_ui.count()):
+                    if await entries_ui.nth(index).is_visible():
+                        return "entries"
+            return "loading"
+
+        async def wait_for_kmc_state(timeout_seconds: int | None = 15) -> str:
+            attempts = 0
+            while timeout_seconds is None or attempts < timeout_seconds:
+                if page.is_closed():
+                    raise RuntimeError("KMC browser was closed before login completed")
+                state = await current_kmc_state()
+                if state != "loading":
+                    return state
+                attempts += 1
+                await page.wait_for_timeout(1000)
+            return await current_kmc_state()
+
+        async def wait_for_kmc_entries() -> None:
+            while True:
+                if page.is_closed():
+                    raise RuntimeError("KMC browser was closed before login completed")
+                if await current_kmc_state() == "entries":
+                    return
+                await page.wait_for_timeout(1000)
+
+        async def try_native_kmc_login() -> bool:
+            form = page.locator("form.kLoginForm").first
+            if await form.count() == 0:
+                return False
+            email_input = form.locator('input:not([type="password"]):not(.kAuth)').first
+            password_input = form.locator('input[type="password"]').first
+            login_button = form.locator('button:has-text("Login")').first
+            if await email_input.count() == 0 or await password_input.count() == 0:
+                return False
+            log("KMC native login form detected; filling saved KMC credentials")
+            await email_input.fill(kmc_username)
+            await password_input.fill(kmc_password)
+            if await login_button.count() > 0:
+                await login_button.click()
+            else:
+                await password_input.press("Enter")
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=15000)
+            except Exception:
+                pass
+            for _ in range(30):
+                state = await current_kmc_state()
+                if state == "entries":
+                    return True
+                if state == "microsoft":
+                    return False
+                await page.wait_for_timeout(1000)
+            return False
+
+        async def click_kmc_sso_link() -> bool:
+            link = page.locator('form.kLoginForm a:has-text("Login with SSO")').first
+            if await link.count() == 0:
+                return False
+            log("KMC native login form detected; opening Login with SSO")
+            await link.click()
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=15000)
+            except Exception:
+                pass
+            return True
+
         browser = await playwright.chromium.launch(headless=False)
         try:
-            storage = KMC_SESSION_FILE if os.path.exists(KMC_SESSION_FILE) else None
+            kmc_session_exists = os.path.exists(KMC_SESSION_FILE)
+            log(f"KMC session file exists: {'yes' if kmc_session_exists else 'no'} ({KMC_SESSION_FILE})")
+            if kmc_session_exists:
+                log(f"KMC: loading saved session from {KMC_SESSION_FILE}")
+            else:
+                log("KMC: launching without saved session")
+            storage = KMC_SESSION_FILE if kmc_session_exists else None
             context = await browser.new_context(storage_state=storage)
             page = await context.new_page()
-            # wait_until="networkidle" ensures redirects settle before we check URL
-            await page.goto(KMC_URL, wait_until="networkidle", timeout=30000)
+            await page.goto(KMC_URL, wait_until="domcontentloaded", timeout=30000)
+            kmc_state = await wait_for_kmc_state(timeout_seconds=15)
+            log(f"KMC: URL after opening KMC_URL: {page.url}")
 
-            if "kmcng/content/entries/list" not in page.url:
-                if kmc_username and kmc_password:
-                    log("KMC session expired — attempting SSO auto-login…")
-                    _sso_attempted = False
-                    for i in range(60):
-                        await page.wait_for_timeout(3000)
-                        url = page.url
-                        if "microsoftonline.com" in url:
-                            if not _sso_attempted:
-                                _sso_attempted = True
-                                await _do_ms_sso_login(page, kmc_username, kmc_password)
-                            continue
-                        if "kmcng/content/entries/list" in url:
-                            break
+            if kmc_state != "entries":
+                log(
+                    f"KMC: entries UI is not ready after navigation (state: {kmc_state}); "
+                    "treating the session as logged out or redirected",
+                    "warning",
+                )
+                ms_username = kmc_username if kmc_username and kmc_password else sso_email
+                ms_password = kmc_password if kmc_username and kmc_password else sso_password
+                credential_source = "KMC credentials" if kmc_username and kmc_password else "global SSO credentials"
+                if ms_username and ms_password:
+                    _login_completed = False
+                    if kmc_username and kmc_password:
+                        try:
+                            _login_completed = await try_native_kmc_login()
+                        except Exception as e:
+                            log(f"KMC native credential login did not complete: {e}", "warning")
+                    if not _login_completed and "microsoftonline.com" not in page.url:
+                        try:
+                            await click_kmc_sso_link()
+                        except Exception as e:
+                            log(f"KMC Login with SSO click did not complete: {e}", "warning")
+                    if _login_completed:
+                        log(f"KMC: final URL after native login attempt: {page.url}")
+                        log("Logged in to KMC.", "success")
+                        await context.storage_state(path=KMC_SESSION_FILE)
+                        log(f"KMC session saved to {KMC_SESSION_FILE}", "success")
                     else:
-                        raise RuntimeError("KMC SSO login timed out after 3 minutes")
-                    log("Logged in to KMC.", "success")
-                    # Persist session immediately on success so fresh cookies are
-                    # saved even if a later step throws before the final save below.
-                    await context.storage_state(path=KMC_SESSION_FILE)
+                        log(f"KMC session expired — attempting Microsoft SSO auto-login using {credential_source}...")
+                    _sso_attempted = False
+                    _sso_completed = False
+                    if not _login_completed:
+                        for i in range(60):
+                            await page.wait_for_timeout(3000)
+                            state = await current_kmc_state()
+                            if state == "microsoft":
+                                if not _sso_attempted:
+                                    _sso_attempted = True
+                                    log("KMC: Microsoft SSO page detected; submitting saved SSO credentials")
+                                    await _do_ms_sso_login(page, ms_username, ms_password)
+                                continue
+                            if state == "entries":
+                                _sso_completed = True
+                                break
+                        if _sso_completed:
+                            log(f"KMC: final URL after SSO attempt: {page.url}")
+                            log("Logged in to KMC.", "success")
+                            # Persist session immediately on success so fresh cookies are
+                            # saved even if a later step throws before the final save below.
+                            await context.storage_state(path=KMC_SESSION_FILE)
+                            log(f"KMC session saved to {KMC_SESSION_FILE}", "success")
+                        else:
+                            log(f"KMC: automatic SSO did not complete; final URL was {page.url}", "warning")
+                            log("KMC: falling back to manual login and waiting for entries list", "warning")
+                            await wait_for_kmc_entries()
+                            log(f"KMC: final URL after manual login: {page.url}")
                 else:
-                    log("No KMC credentials set in Settings — log in manually in the browser.", "warning")
-                    await page.wait_for_url("**/kmcng/content/entries/list**", timeout=0)
+                    log("No KMC or global SSO credentials set in Settings — log in manually in the browser.", "warning")
+                    log("KMC: falling back to manual login and waiting for entries list")
+                    await wait_for_kmc_entries()
+                    log(f"KMC: final URL after manual login: {page.url}")
                 await page.wait_for_timeout(2000)
+            else:
+                log("KMC: already logged in from saved session", "success")
 
+            log(f"KMC: final URL before saving session: {page.url}")
             await context.storage_state(path=KMC_SESSION_FILE)
+            log(f"KMC session saved to {KMC_SESSION_FILE}", "success")
             # Return page so caller can reuse it — avoids opening KMC a second time
             return context, browser, page
         except Exception:

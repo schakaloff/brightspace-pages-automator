@@ -85,6 +85,11 @@ QLineEdit {{
 }}
 QLineEdit:focus {{ border: 1px solid {c['BORDER_ACT']}; }}
 
+QTextEdit {{
+    background-color: {c['BG']}; border: 1px solid {c['BORDER']}; border-radius: 6px;
+    color: {c['TEXT_PRI']}; padding: 8px;
+}}
+
 QCheckBox {{ color: {c['TEXT_PRI']}; font-size: 12px; spacing: 8px; }}
 QCheckBox::indicator {{
     width: 16px; height: 16px; border: 1px solid {c['BORDER_ACT']};
@@ -168,6 +173,9 @@ QFrame[role="card"] {{
     background-color: {c['PANEL']}; border: 1px solid {c['BORDER']}; border-radius: 10px;
 }}
 QFrame[role="card"] QWidget {{ background: transparent; }}
+QFrame[role="card"] QTextEdit {{
+    background-color: {c['BG']}; border: 1px solid {c['BORDER']}; border-radius: 6px;
+}}
 QFrame[role="card"] QLineEdit {{
     background-color: {c['BG']}; border: 1px solid {c['BORDER']}; border-radius: 6px;
 }}

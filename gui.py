@@ -390,10 +390,17 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def closeEvent(self, event):
-        try:
-            self._kaltura.save_state()
-        except Exception:
-            pass
+        for panel in (
+            self._checker,
+            self._collector,
+            self._restyle,
+            self._kaltura,
+            self._h5p,
+        ):
+            try:
+                panel.save_state()
+            except Exception:
+                pass
         self.save_config({
             "claude_api_key": self._claude_key,
             "claude_model": self._claude_model,
