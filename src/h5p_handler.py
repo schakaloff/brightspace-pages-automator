@@ -378,9 +378,20 @@ class H5PHandler:
         return None
 
     async def _recover_list(self, tab, h5p_frame, list_url: str) -> None:
-        """After a failed upload, send the LTI iframe back to the content list
-        so the next item doesn't try to click inside a dead editor page."""
+        """After a failed upload, get back to a live content list so the next
+        item doesn't try to click inside a dead editor page.
+
+        NEVER GET /lti/launch: that endpoint is POST-only and a GET returns
+        405 ("The GET method is not supported for route lti/launch") — which
+        replaces the frame with an error page and cascades the failure to
+        every later item. If the captured URL isn't a real content-list URL
+        (e.g. it's the LTI launch/interstitial), re-discover the live list
+        frame instead of navigating to it.
+        """
         try:
+            if "/lti/launch" in list_url or "/content" not in list_url:
+                await self.find_list_frame(tab)
+                return
             await h5p_frame.goto(list_url, timeout=15000)
             await h5p_frame.locator('tr.content-item').first.wait_for(timeout=8000)
         except Exception:
@@ -971,15 +982,24 @@ class H5PHandler:
             self.log("  ✗ Could not open Insert Stuff / H5P", "error")
             return None
 
-        h5p_frame = None
-        for _ in range(10):
-            for frame in tab.frames:
-                if "h5p.com" in frame.url:
-                    h5p_frame = frame
-                    break
-            if h5p_frame:
-                break
-            await tab.wait_for_timeout(1000)
+        # Grab the H5P frame ONLY once its content list has actually loaded.
+        # Grabbing by URL substring alone can return a frame still parked at
+        # /lti/launch when the LTI launch degrades (e.g. a third-party-cookie
+        # or expired-session hiccup on h5p.com). That poisoned frame later
+        # makes _recover_list GET /lti/launch -> 405, cascading the failure to
+        # every remaining item. find_list_frame verifies the list is present.
+        h5p_frame = await self.find_list_frame(tab)
+        if not h5p_frame:
+            parked = any(
+                "h5p.com" in f.url and "/lti/launch" in f.url for f in tab.frames
+            )
+            if parked:
+                self.log("  ✗ H5P launched but the content list never loaded "
+                         "(frame stuck at /lti/launch).", "error")
+                self.log("    Usually a third-party-cookie or expired H5P session "
+                         "issue — reopen the tool / re-login, then retry.", "warning")
+            else:
+                self.log("  ✗ H5P content list frame not found", "error")
         return h5p_frame
 
     async def embed_in_brightspace(self, context, page, moodle_items, bs_flat, bs_base, course_id) -> None:
