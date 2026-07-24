@@ -6,11 +6,11 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit, QFrame, QScrollArea, QComboBox,
+    QPushButton, QLineEdit, QFrame, QScrollArea,
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 
-from panels._shared import _divider, _form_label, _section_header
+from panels._shared import _divider, _form_label, _section_header, NoScrollComboBox
 
 
 class SettingsPanel(QWidget):
@@ -129,7 +129,7 @@ class SettingsPanel(QWidget):
         layout.addWidget(_form_label("MODEL"))
         layout.addSpacing(6)
 
-        self._model_combo = QComboBox()
+        self._model_combo = NoScrollComboBox()
         self._model_combo.setFixedHeight(40)
         for model_id, label in self.MODELS:
             self._model_combo.addItem(label, model_id)

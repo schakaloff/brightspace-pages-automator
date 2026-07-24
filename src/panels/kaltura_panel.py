@@ -7,13 +7,13 @@ from enum import Enum, auto
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QScrollArea, QCheckBox,
-    QFrame, QComboBox, QMessageBox, QToolButton, QDialog,
+    QFrame, QMessageBox, QToolButton, QDialog,
     QSizePolicy,
 )
 from PySide6.QtCore import QTimer, Qt, Signal
 
 from gui_log import LogWidget
-from panels._shared import _form_label, _section_header, friendly_error
+from panels._shared import _form_label, _section_header, friendly_error, NoScrollComboBox
 
 
 class KalturaState(Enum):
@@ -72,7 +72,7 @@ class VideoGroupWidget(QFrame):
         self.destination_label = QLabel("→ Destination:")
         self.destination_label.setObjectName("destination_label")
         dest_row.addWidget(self.destination_label)
-        self.combo = QComboBox()
+        self.combo = NoScrollComboBox()
         self.combo.addItem("— select module —", None)
         dest_row.addWidget(self.combo, 1)
         layout.addLayout(dest_row)
@@ -143,7 +143,7 @@ class KalturaResultsWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._groups: list[VideoGroupWidget] = []
-        self._combos: dict[str, QComboBox] = {}
+        self._combos: dict[str, NoScrollComboBox] = {}
         self._bs_modules: list[dict] = []
         self._match_scores: dict[str, float] = {}
 

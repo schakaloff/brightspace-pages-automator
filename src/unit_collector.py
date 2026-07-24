@@ -473,17 +473,30 @@ class UnitCollector:
 
         pages_before = set(id(p) for p in page.context.pages)
         clicked = False
-        for ctx in [page, *page.frames]:
-            try:
-                loc = ctx.locator("d2l-button.topic-jump-button, .topic-jump-button")
-                if await loc.count() > 0:
-                    await loc.first.click(timeout=4000)
-                    clicked = True
-                    break
-            except Exception:
-                continue
+        # Video/link pages can render the button late (embedded players keep
+        # the page "loading" long after goto returns) — retry instead of a
+        # single one-shot check.
+        for _ in range(10):
+            for ctx in [page, *page.frames]:
+                try:
+                    loc = ctx.locator("d2l-button.topic-jump-button, .topic-jump-button")
+                    if await loc.count() > 0:
+                        await loc.first.click(timeout=4000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+            if clicked:
+                break
+            await page.wait_for_timeout(1000)
 
         if not clicked:
+            # Fallback: many link topics embed their destination directly
+            # (YouTube player etc.) — read the URL straight off the page.
+            embed_url = self._detect_embedded_media_url(page)
+            if embed_url:
+                self.log(f"  ✓ {label} → {embed_url} (from embedded player)", "success")
+                return embed_url
             self.log(f"  ⚠ Open Link button not found for {label}", "warning")
             return None
 
@@ -503,6 +516,37 @@ class UnitCollector:
 
         self.log(f"  ⚠ No new tab opened for {label}", "warning")
         return None
+
+    _MEDIA_HOSTS = ("youtube.com", "youtube-nocookie.com", "youtu.be", "vimeo.com",
+                    "dailymotion.com", "kaltura.com")
+    _NOISE_HOSTS = ("readspeaker", "google", "gstatic", "doubleclick", "facebook",
+                    "d2l", "brightspace", "okanagancollege")
+
+    def _detect_embedded_media_url(self, page: Page) -> Optional[str]:
+        """Look through the page's embedded frames for an external player
+        (YouTube, Vimeo, ...) and return its address. YouTube embed URLs are
+        converted to regular watch links so readers land on the normal page."""
+        external: list[str] = []
+        try:
+            for frame in page.frames:
+                u = frame.url or ""
+                if "://" not in u:
+                    continue
+                host = u.split("/")[2].lower()
+                if any(m in host for m in self._MEDIA_HOSTS):
+                    external.insert(0, u)  # media hosts take priority
+                elif not any(n in host for n in self._NOISE_HOSTS):
+                    external.append(u)
+        except Exception:
+            return None
+        if not external:
+            return None
+        url = external[0]
+        # youtube.com/embed/VIDEOID?... → youtube.com/watch?v=VIDEOID
+        m = re.search(r"youtube(?:-nocookie)?\.com/embed/([\w-]+)", url)
+        if m:
+            return f"https://www.youtube.com/watch?v={m.group(1)}"
+        return url
 
     async def _collect_html(self, page: Page, url: str, label: str) -> Optional[str]:
         self.log(f"─" * 52, "dim")
@@ -555,10 +599,52 @@ class UnitCollector:
             save_path = self._dl_dir / filename
             await dl.save_as(str(save_path))
             self.log(f"✓ Downloaded: {filename}", "success")
-            return {"label": label, "path": str(save_path), "filename": filename}
+            direct_url = await self._detect_direct_file_url(page)
+            return {
+                "label": label,
+                "path": str(save_path),
+                "filename": filename,
+                "direct_url": direct_url,
+            }
         except Exception as e:
             self.log(f"✗ Download failed for {label}: {e}", "error")
             return None
+
+    async def _detect_direct_file_url(self, page: Page) -> str:
+        """Find the permanent /content/enforced/ URL of the file shown on a
+        file-topic page. Unlike the topic URL, this address lives in Manage
+        Files and keeps working after the topic is deleted from the unit,
+        so it makes a durable fallback link target."""
+        try:
+            for frame in page.frames:
+                url = frame.url or ""
+                if "/content/enforced/" in url:
+                    return url.split("?")[0]
+            src = await page.evaluate("""() => {
+                function find(root, depth) {
+                    if (depth > 6) return null;
+                    for (const f of root.querySelectorAll('iframe')) {
+                        const s = f.getAttribute('src') || '';
+                        if (s.includes('/content/enforced/')) return s;
+                    }
+                    for (const el of root.querySelectorAll('*')) {
+                        if (el.shadowRoot) {
+                            const r = find(el.shadowRoot, depth + 1);
+                            if (r) return r;
+                        }
+                    }
+                    return null;
+                }
+                return find(document, 0);
+            }""")
+            if src:
+                if src.startswith("/"):
+                    base = "/".join(page.url.split("/")[:3])
+                    src = base + src
+                return src.split("?")[0]
+        except Exception:
+            pass
+        return ""
 
     def _html_from_zip(self, zip_path: str) -> Optional[str]:
         import zipfile
@@ -1340,14 +1426,27 @@ class UnitCollector:
                     )
                     link_count += 1
                 elif result["file"]:
-                    # The file already exists as a Brightspace topic (we downloaded
-                    # it from there), so keep its original URL for the link fallback
-                    # used when Insert Stuff can't embed it.
+                    # Keep both fallback link targets for when Insert Stuff can't
+                    # embed the file: direct_url (permanent Manage Files address,
+                    # set during download) and topic_url (dies if topic deleted).
                     fi = result["file"]
                     fi.setdefault("topic_url", topic.get("url", ""))
                     fi.setdefault("topic_label", topic["label"])
                     file_items.append(fi)
                     file_count += 1
+                else:
+                    # Nothing could be collected — never drop a topic silently:
+                    # link to the original topic so its content stays reachable.
+                    self.log(
+                        f"⚠ Nothing collected for '{topic['label']}' — "
+                        "adding a link to the original topic instead.",
+                        "warning",
+                    )
+                    sections.append(
+                        f'<p><strong>{safe}:</strong> '
+                        f'<a href="{topic["url"]}">{topic["url"]}</a></p>\n'
+                    )
+                    link_count += 1
 
             # ── Phase 3: one persistent editor session — append all, save once ─
             tab = await context.new_page()
@@ -1371,9 +1470,10 @@ class UnitCollector:
                             await self._editor_cursor_end(tab)
                             if await self._insert_file(tab, f):
                                 continue
-                            # Fallback: the file is already a topic in this unit, so
-                            # link to it rather than failing the whole unit.
-                            fallback_url = f.get("topic_url") or ""
+                            # Fallback: prefer the file's permanent Manage Files
+                            # address (survives topic deletion); only if that
+                            # wasn't detected, link to the topic itself.
+                            fallback_url = f.get("direct_url") or f.get("topic_url") or ""
                             if not fallback_url:
                                 self.log(
                                     f"  ⚠ Could not insert {f['filename']} and no "

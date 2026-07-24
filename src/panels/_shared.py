@@ -1,9 +1,22 @@
 import re
 
-from PySide6.QtWidgets import QFrame, QLabel, QWidget, QHBoxLayout, QVBoxLayout, QPushButton
+from PySide6.QtWidgets import QFrame, QLabel, QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QComboBox
 from PySide6.QtCore import Qt
 
 import gui_styles
+
+
+class NoScrollComboBox(QComboBox):
+    """QComboBox that ignores mouse-wheel scrolling while its popup is closed,
+    so scrolling a parent panel over a dropdown doesn't silently change its
+    selected value. Scrolling still works normally to move through options
+    once the dropdown is open."""
+
+    def wheelEvent(self, event):
+        if self.view().isVisible():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
 
 
 _ERROR_PATTERNS = [
