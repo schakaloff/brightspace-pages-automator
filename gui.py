@@ -62,9 +62,10 @@ class MainWindow(QMainWindow):
 
         self._sidebar = Sidebar([
             (1, "checker", "Checker"),
-            (2, "collect", "Collect"),
-            (3, "restyle", "Restyle"),
             (4, "kaltura", "Kaltura"),
+            (2, "collect", "Collect"),
+            (None, None, "Optional"),
+            (3, "restyle", "Restyle"),
             (5, "h5p", "H5P"),
         ])
         self._sidebar.step_clicked.connect(self._on_step)

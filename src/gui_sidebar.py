@@ -154,8 +154,34 @@ class Sidebar(QWidget):
             5: "Step 5 — H5P: Download H5P activities from Moodle and paste them into matching Brightspace modules.",
         }
 
-        # Step buttons
+        # Step buttons (a (None, None, "Label") entry renders a section divider instead)
+        self._section_dividers: list[QWidget] = []
+        self._section_labels: list[QLabel] = []
         for number, icon_name, label in steps:
+            if number is None:
+                top_div = QWidget()
+                top_div.setFixedHeight(1)
+                top_div.setStyleSheet(f"background:{gui_styles.current['BORDER']};")
+                self._section_dividers.append(top_div)
+                layout.addSpacing(6)
+                layout.addWidget(top_div)
+
+                header = QLabel(label)
+                header.setStyleSheet(
+                    f"color:{gui_styles.current['TEXT_SEC']};font-size:13px;"
+                    f"font-weight:700;padding:6px 12px 2px 12px;"
+                )
+                self._section_labels.append(header)
+                layout.addWidget(header)
+
+                bot_div = QWidget()
+                bot_div.setFixedHeight(1)
+                bot_div.setStyleSheet(f"background:{gui_styles.current['BORDER']};")
+                self._section_dividers.append(bot_div)
+                layout.addWidget(bot_div)
+                layout.addSpacing(4)
+                continue
+
             btn = StepButton(number, icon_name, label)
             btn.setToolTip(_step_tooltips.get(number, ""))
             btn.clicked.connect(lambda _=False, n=number: self.step_clicked.emit(n))
@@ -173,6 +199,7 @@ class Sidebar(QWidget):
         # Settings button
         self._settings_btn = QPushButton("Settings")
         self._settings_btn.setProperty("class", "step-btn")
+        self._settings_btn.setStyleSheet("font-size:13px; font-weight:700;")
         self._settings_btn.setFixedHeight(44)
         self._settings_btn.setToolTip("Configure credentials, Claude API key, and app appearance.")
         self._settings_btn.clicked.connect(self.settings_clicked)
@@ -185,6 +212,10 @@ class Sidebar(QWidget):
         self._lbl_bot.setStyleSheet(f"color:{c['TEXT_PRI']};font-size:13px;font-weight:700;")
         self._div_top.setStyleSheet(f"background:{c['BORDER']};")
         self._div_bot.setStyleSheet(f"background:{c['BORDER']};")
+        for div in self._section_dividers:
+            div.setStyleSheet(f"background:{c['BORDER']};")
+        for lbl in self._section_labels:
+            lbl.setStyleSheet(f"color:{c['TEXT_SEC']};font-size:13px;font-weight:700;padding:6px 12px 2px 12px;")
         for btn in self._step_buttons.values():
             btn.update()
 
