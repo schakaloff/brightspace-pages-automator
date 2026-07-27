@@ -938,9 +938,15 @@ class UnitCollector:
                     return False
                 if not info or not info.get("visible") or not info.get("id"):
                     return False
+                # Already correct — never type into it a second time. Without this,
+                # a retry for the *other* field re-types this one and (if the
+                # select-all doesn't land) appends, producing repeated link text.
+                if info.get("value") == value:
+                    return True
                 loc = frame.locator(f'#{info["id"]}')
                 await loc.click()
                 await loc.press("Control+A")
+                await loc.press("Delete")
                 await page.keyboard.type(value, delay=20)
                 await page.wait_for_timeout(200)
                 after = await frame.evaluate(_JS_RESOLVE_FIELD, label_text)
@@ -961,6 +967,10 @@ class UnitCollector:
             display_name = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", raw_name)
             clicked_insert_on_error = False
             filled_before_error_click = False
+            # Tracked across attempts so a field that already succeeded is never
+            # re-typed because the other one is still failing.
+            link_ok = False
+            alt_ok = False
             for _ in range(10):
                 await page.wait_for_timeout(500)
 
@@ -969,8 +979,10 @@ class UnitCollector:
                         if frame == page.main_frame:
                             continue
                         try:
-                            link_ok = await _fill_labeled_field(frame, "Link Text", display_name)
-                            alt_ok = await _fill_labeled_field(frame, "Alternate Text", display_name)
+                            if not link_ok:
+                                link_ok = await _fill_labeled_field(frame, "Link Text", display_name)
+                            if not alt_ok:
+                                alt_ok = await _fill_labeled_field(frame, "Alternate Text", display_name)
                             if link_ok and alt_ok:
                                 filled_before_error_click = True
                                 self.log(f"  ✓ Set link text + alt text: {display_name}", "dim")
@@ -1044,13 +1056,17 @@ class UnitCollector:
             # commit for these fields.
             if not filled_before_error_click:
                 filled = False
+                link_ok = False
+                alt_ok = False
                 for _ in range(10):
                     for frame in page.frames:
                         if frame == page.main_frame:
                             continue
                         try:
-                            link_ok = await _fill_labeled_field(frame, "Link Text", display_name)
-                            alt_ok = await _fill_labeled_field(frame, "Alternate Text", display_name)
+                            if not link_ok:
+                                link_ok = await _fill_labeled_field(frame, "Link Text", display_name)
+                            if not alt_ok:
+                                alt_ok = await _fill_labeled_field(frame, "Alternate Text", display_name)
                             if link_ok and alt_ok:
                                 filled = True
                                 break
