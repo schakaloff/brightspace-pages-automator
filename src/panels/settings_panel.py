@@ -20,7 +20,8 @@ class SettingsPanel(QWidget):
     model_changed = Signal(str)
 
     MODELS = [
-        ("claude-opus-4-5", "Opus 4.5 — highest quality, slower/pricier"),
+        ("claude-opus-5", "Opus 5 — highest quality, slower/pricier"),
+        ("claude-opus-4-5", "Opus 4.5 — previous Opus, same price"),
         ("claude-sonnet-5", "Sonnet 5 — best quality/cost balance (recommended)"),
         ("claude-haiku-4-5", "Haiku 4.5 — cheapest/fastest"),
     ]

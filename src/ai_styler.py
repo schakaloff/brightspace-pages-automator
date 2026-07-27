@@ -116,12 +116,16 @@ _PROMPTS_DIR = (
     else Path(__file__).parent.parent / "prompts"
 )
 DEFAULT_MODEL = "claude-sonnet-5"
-_MAX_TOKENS = 8192
+# The model's real output ceiling is 128k; 64k is a generous working limit that
+# still leaves room in a single pass. Values this large require the streaming
+# API — a plain messages.create() would hit the SDK's HTTP timeout first.
+_MAX_TOKENS = 64000
 _MAX_RETRIES = 3
 _RETRY_DELAY = 8  # seconds between retries on overload
 
 # USD per 1M tokens (input, output) — from Anthropic's published pricing.
 _PRICING_USD_PER_MTOK = {
+    "claude-opus-5":    (5.00, 25.00),
     "claude-opus-4-5":  (5.00, 25.00),
     "claude-sonnet-5":  (3.00, 15.00),
     "claude-haiku-4-5": (1.00, 5.00),
@@ -182,11 +186,12 @@ def apply_style(
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             log(f"🤖 {model} — attempt {attempt}/{_MAX_RETRIES} (theme: {theme_name})", "info")
-            response = client.messages.create(
+            with client.messages.stream(
                 model=model,
                 max_tokens=_MAX_TOKENS,
                 messages=[{"role": "user", "content": prompt}],
-            )
+            ) as stream:
+                response = stream.get_final_message()
 
             if response.stop_reason == "max_tokens":
                 log(
