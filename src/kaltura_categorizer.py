@@ -9,6 +9,7 @@ from playwright.async_api import async_playwright
 from config import USERDATA_DIR, SESSION_FILE
 from automator import _find_locator_any_frame
 from browser import _do_ms_sso_login
+from js_helpers import _norm
 
 KMC_URL = "https://kmc.cap2.ovp.kaltura.com/index.php/kmcng/content/entries/list"
 KMC_SESSION_FILE = str(USERDATA_DIR / "kmc_session.json")
@@ -607,6 +608,122 @@ class KalturaCategorizer:
             modules = result.get("modules") or []
             log(f"TOC returned {len(modules)} module(s)")
             return modules
+        finally:
+            await browser.close()
+            await p.stop()
+
+    _TOC_MODULES_JS = """async (courseId) => {
+        const resp = await fetch(
+            `/d2l/api/le/1.0/${courseId}/content/toc`,
+            {credentials: 'include'}
+        );
+        if (!resp.ok) return {error: resp.status + ' ' + resp.statusText, modules: null};
+        const toc = await resp.json();
+        const modules = [];
+        function collect(arr) {
+            for (const m of (arr || [])) {
+                modules.push({id: String(m.ModuleId), title: m.Title || '(unnamed)'});
+                collect(m.Modules);
+            }
+        }
+        collect(toc.Modules || []);
+        return {error: null, modules};
+    }"""
+
+    async def create_modules(
+        self,
+        names: list,
+        bs_url: str,
+        bs_username: str = "",
+        bs_password: str = "",
+        sso_email: str = "",
+        sso_password: str = "",
+        log_fn=None,
+    ) -> dict:
+        """Create the named units in Brightspace and return {name: module_id}.
+
+        Names matching an existing module reuse it instead of creating a
+        duplicate. Ids come from re-reading the TOC after creation rather than
+        from the editor URL — the TOC is the same source the dropdown was built
+        from, so ids are guaranteed to line up.
+
+        A name missing from the returned dict failed to create; the caller
+        should skip the videos bound to it and carry on with the rest.
+        """
+        def log(msg, tag="dim"):
+            if log_fn:
+                log_fn(msg, tag)
+            print(f"[bs units] {msg}", file=sys.stderr)
+
+        from content_checker import _extract_course_id
+        from browser import launch_browser, wait_for_login
+        from bs_units import create_unit, resolve_new_module_names
+
+        wanted = [n.strip() for n in names if (n or "").strip()]
+        if not wanted:
+            return {}
+
+        course_id = _extract_course_id(bs_url)
+        if not course_id:
+            raise ValueError(f"Could not extract course ID from URL: {bs_url}")
+        base_url = "/".join(bs_url.split("/")[:3])
+
+        p, browser, context, page = await launch_browser(log_fn=log)
+        try:
+            await wait_for_login(
+                page, context,
+                bs_username or None,
+                bs_password or None,
+                sso_email or None,
+                sso_password or None,
+                log_fn=log,
+            )
+
+            async def read_modules():
+                try:
+                    await page.goto(
+                        f"{base_url}/d2l/le/content/{course_id}/home",
+                        wait_until="domcontentloaded", timeout=30000,
+                    )
+                except Exception:
+                    pass
+                result = await page.evaluate(self._TOC_MODULES_JS, course_id)
+                if not result or result.get("error"):
+                    err = (result or {}).get("error", "no response")
+                    log(f"TOC API error: {err}", "error")
+                    return []
+                return result.get("modules") or []
+
+            existing = await read_modules()
+            reuse, to_create = resolve_new_module_names(wanted, existing)
+
+            for name, mod_id in reuse.items():
+                log(f"  ↷ '{name}' already exists — using it", "dim")
+
+            if not to_create:
+                return dict(reuse)
+
+            log(f"Creating {len(to_create)} new module(s)…", "step")
+            created_any = False
+            for name in to_create:
+                if await create_unit(page, base_url, course_id, name, log):
+                    created_any = True
+
+            resolved = dict(reuse)
+            if created_any:
+                after = await read_modules()
+                by_norm = {_norm(m["title"]): m for m in after}
+                for name in to_create:
+                    match = by_norm.get(_norm(name))
+                    if match:
+                        resolved[name] = match["id"]
+                    else:
+                        log(f"  ✗ '{name}' not found in Brightspace after creation", "error")
+            else:
+                for name in to_create:
+                    log(f"  ✗ '{name}' was not created", "error")
+
+            return resolved
         finally:
             await browser.close()
             await p.stop()

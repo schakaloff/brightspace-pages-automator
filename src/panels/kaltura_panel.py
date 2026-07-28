@@ -8,12 +8,23 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QScrollArea, QCheckBox,
     QFrame, QMessageBox, QToolButton, QDialog,
-    QSizePolicy,
+    QSizePolicy, QInputDialog,
 )
 from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtGui import QGuiApplication
 
 from gui_log import LogWidget
 from panels._shared import _form_label, _section_header, friendly_error, NoScrollComboBox
+
+
+# Marker for the "create a new module" dropdown row. A selected pending module
+# stores (NEW_MODULE_SENTINEL, name); existing modules store a plain id string,
+# so the two are always distinguishable downstream.
+NEW_MODULE_SENTINEL = "__NEW__"
+NEW_MODULE_LABEL = "➕ Create new module…"
+
+# Qt's "no maximum" sentinel. Not exported by PySide6, so spelled out here.
+_QWIDGETSIZE_MAX = 16777215
 
 
 class KalturaState(Enum):
@@ -146,6 +157,7 @@ class KalturaResultsWidget(QWidget):
         self._combos: dict[str, NoScrollComboBox] = {}
         self._bs_modules: list[dict] = []
         self._match_scores: dict[str, float] = {}
+        self._last_combo_index: dict[NoScrollComboBox, int] = {}
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -188,6 +200,7 @@ class KalturaResultsWidget(QWidget):
         self._groups.clear()
         self._combos.clear()
         self._match_scores.clear()
+        self._last_combo_index.clear()
         self.selected_count_changed.emit(0)
 
     def set_entries(self, entries: list[dict]):
@@ -202,20 +215,74 @@ class KalturaResultsWidget(QWidget):
             self._results_layout.insertWidget(insert_at, group)
             insert_at += 1
             self._groups.append(group)
-            if section:
-                self._combos[section] = group.combo
+            # A section with no usable name still needs a working destination —
+            # skipping it here left its combo unregistered, so section_map()
+            # dropped it and the videos were silently never created.
+            key = section or "(unnamed section)"
+            group.section_name = key
+            self._combos[key] = group.combo
+            self._last_combo_index[group.combo] = 0
+            group.combo.currentIndexChanged.connect(
+                lambda idx, s=key, c=group.combo: self._on_combo_changed(s, c, idx)
+            )
         if self._bs_modules:
             self.set_modules(self._bs_modules)
         self._emit_selected_count_changed()
 
     def set_modules(self, modules: list[dict]):
         self._bs_modules = modules
-        for combo in self._combos.values():
+        for section, combo in self._combos.items():
             while combo.count() > 1:
                 combo.removeItem(1)
             for mod in modules:
                 combo.addItem(mod["title"], mod["id"])
+            combo.addItem(NEW_MODULE_LABEL, NEW_MODULE_SENTINEL)
         self._emit_selected_count_changed()
+
+    def _on_combo_changed(self, section: str, combo: NoScrollComboBox, index: int):
+        """Turn the '➕ Create new module…' row into a named pending module.
+
+        The sentinel row is only ever a trigger — it is swapped for a real row
+        carrying ("__NEW__", name) so section_map can tell pending modules from
+        existing ids. Cancelling restores the prior selection so the user is not
+        left sitting on the trigger row.
+        """
+        if combo.itemData(index) != NEW_MODULE_SENTINEL:
+            self._last_combo_index[combo] = index
+            return
+
+        previous = self._last_combo_index.get(combo, 0)
+        default = section if section and not section.startswith("(unnamed section") else "Kaltura Videos"
+        name, ok = QInputDialog.getText(
+            self, "New Brightspace module",
+            "Name for the new module:",
+            QLineEdit.EchoMode.Normal, default,
+        )
+        name = (name or "").strip()
+        if not ok or not name:
+            combo.setCurrentIndex(previous)
+            return
+
+        # Reuse an existing module outright if the typed name already matches one —
+        # creating a second module with the same title gives two identical choices.
+        for i in range(combo.count()):
+            data = combo.itemData(i)
+            if isinstance(data, str) and combo.itemText(i).strip().lower() == name.lower():
+                combo.setCurrentIndex(i)
+                self._last_combo_index[combo] = i
+                return
+
+        pending_label = f"➕ New: {name}"
+        existing = combo.findText(pending_label)
+        if existing >= 0:
+            combo.setCurrentIndex(existing)
+            self._last_combo_index[combo] = existing
+            return
+
+        insert_at = combo.count() - 1  # keep the trigger row last
+        combo.insertItem(insert_at, pending_label, (NEW_MODULE_SENTINEL, name))
+        combo.setCurrentIndex(insert_at)
+        self._last_combo_index[combo] = insert_at
 
     def autosuggest(self):
         if not self._combos or not self._bs_modules:
@@ -225,7 +292,7 @@ class KalturaResultsWidget(QWidget):
         for name, (module, score) in matches.items():
             self._match_scores[name] = score if module is not None else 0
             combo = self._combos.get(name)
-            if combo is None or combo.currentData() is not None:
+            if combo is None or self._is_real_destination(combo.currentData()):
                 continue
             if module is None or score < 75:
                 continue
@@ -235,10 +302,18 @@ class KalturaResultsWidget(QWidget):
             combo.setCurrentIndex(idx)
         self._emit_selected_count_changed()
 
+    @staticmethod
+    def _is_real_destination(data) -> bool:
+        """True for an existing module id or a named pending module.
+
+        The bare sentinel is the unclicked trigger row, not a destination.
+        """
+        return data is not None and data != NEW_MODULE_SENTINEL
+
     def apply_default_selection(self):
         for group in self._groups:
             score = self._match_scores.get(group.section_name, 0)
-            has_dest = group.combo.currentData() is not None
+            has_dest = self._is_real_destination(group.combo.currentData())
             if has_dest and score >= 90:
                 group.set_needs_review(False)
                 group.set_all_checked(True)
@@ -255,12 +330,28 @@ class KalturaResultsWidget(QWidget):
             if cb.isChecked()
         ]
 
-    def section_map(self) -> dict[str, str]:
-        return {
-            name: combo.currentData()
-            for name, combo in self._combos.items()
-            if combo.currentData() is not None
-        }
+    def section_map(self) -> dict:
+        """{section: module_id} — pending modules appear as (NEW_MODULE_SENTINEL, name).
+
+        The bare sentinel (the unclicked trigger row) is not a destination and is
+        excluded, so a user who opens the dialog and cancels does not end up with
+        a section that looks mapped.
+        """
+        result = {}
+        for name, combo in self._combos.items():
+            data = combo.currentData()
+            if self._is_real_destination(data):
+                result[name] = data
+        return result
+
+    def pending_module_names(self) -> list:
+        """Names of modules the user asked to create, in group order."""
+        names = []
+        for value in self.section_map().values():
+            if isinstance(value, tuple) and value[0] == NEW_MODULE_SENTINEL:
+                if value[1] not in names:
+                    names.append(value[1])
+        return names
 
     def selected_count(self) -> int:
         return len(self.selected_entries())
@@ -271,9 +362,15 @@ class KalturaResultsWidget(QWidget):
     def has_modules(self) -> bool:
         return bool(self._bs_modules)
 
-    def set_scroll_height(self, minimum: int, maximum: int):
+    def set_scroll_height(self, minimum: int, maximum: int = 0):
+        """Bound the results list. `maximum` of 0 means uncapped.
+
+        An uncapped list lets the dialog give the results area whatever height
+        is going, which is what makes the window resizable down to laptop
+        heights instead of being pinned open by a tall minimum.
+        """
         self._results_scroll.setMinimumHeight(minimum)
-        self._results_scroll.setMaximumHeight(maximum)
+        self._results_scroll.setMaximumHeight(maximum if maximum else _QWIDGETSIZE_MAX)
 
     def _emit_selected_count_changed(self, *_args):
         self.selected_count_changed.emit(self.selected_count())
@@ -285,7 +382,24 @@ class KalturaResultsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Kaltura Results")
-        self.resize(760, 620)
+        # Fit the screen actually in use. A hardcoded 760x620 overflowed laptop
+        # displays, and because the window opened taller than the desktop the
+        # Close/Create buttons at the bottom could sit off-screen entirely.
+        available = None
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+        if available is not None:
+            self.resize(
+                min(760, int(available.width() * 0.9)),
+                min(620, int(available.height() * 0.85)),
+            )
+        else:
+            self.resize(760, 620)
+        # Floor low enough to stay usable on short screens; the results list and
+        # log both scroll, so nothing is lost by shrinking.
+        self.setMinimumSize(460, 320)
+        self.setSizeGripEnabled(True)
         self._running = False
 
         layout = QVBoxLayout(self)
@@ -303,7 +417,7 @@ class KalturaResultsDialog(QDialog):
         layout.addWidget(self._summary)
 
         self.results = KalturaResultsWidget()
-        self.results.set_scroll_height(420, 520)
+        self.results.set_scroll_height(180)
         self.results.selected_count_changed.connect(self._update_create_button)
         layout.addWidget(self.results, 1)
 
@@ -830,12 +944,19 @@ class KalturaPanel(QWidget):
             self._log.append_log("Map sections to modules first.", "warning")
             return
 
+        pending_names = self._results.pending_module_names()
         module_count = len(set(section_map.values()))
+        new_note = (
+            f"\n{len(pending_names)} new module(s) will be created first: "
+            + ", ".join(pending_names) + "\n"
+            if pending_names else ""
+        )
         confirm = QMessageBox.warning(
             self,
             "Create Brightspace Pages?",
             f"This will create {len(entries)} page(s) in Brightspace, "
-            f"across {module_count} mapped module(s).\n\n"
+            f"across {module_count} mapped module(s).\n"
+            f"{new_note}\n"
             "This writes directly to the live Brightspace course — it cannot be undone automatically.\n\n"
             "Proceed?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
@@ -860,9 +981,41 @@ class KalturaPanel(QWidget):
         def worker():
             try:
                 from kaltura_categorizer import KalturaCategorizer
-                asyncio.run(KalturaCategorizer().embed_entries(
+                cat = KalturaCategorizer()
+
+                resolved_map = dict(section_map)
+                if pending_names:
+                    q.put((f"Creating {len(pending_names)} new Brightspace module(s)…", "step"))
+                    created = asyncio.run(cat.create_modules(
+                        pending_names,
+                        bs_url,
+                        bs_username=bs_user,
+                        bs_password=bs_pass,
+                        sso_email=sso_email,
+                        sso_password=sso_pass,
+                        log_fn=lambda msg, tag="dim": q.put((msg, tag)),
+                    ))
+                    # Swap pending markers for real ids. A name missing from
+                    # `created` failed, so its sections are dropped rather than
+                    # passed on as a tuple embed_entries cannot use.
+                    for section, value in list(resolved_map.items()):
+                        if not isinstance(value, tuple):
+                            continue
+                        new_id = created.get(value[1])
+                        if new_id:
+                            resolved_map[section] = new_id
+                        else:
+                            q.put((f"Skipping '{section}' — module '{value[1]}' was not created", "error"))
+                            resolved_map.pop(section)
+
+                if not resolved_map:
+                    q.put(("No usable destinations — nothing created.", "error"))
+                    q.put(("__CAT_DONE__", None))
+                    return
+
+                asyncio.run(cat.embed_entries(
                     entries,
-                    section_map,
+                    resolved_map,
                     bs_url,
                     log_fn=lambda msg, tag="info": q.put((msg, tag)),
                     kmc_username=kmc_user,
