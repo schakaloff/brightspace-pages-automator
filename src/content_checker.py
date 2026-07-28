@@ -59,6 +59,30 @@ def _flatten_toc(modules: list, parent: str = "") -> list:
     return items
 
 
+_BS_FILE_EXT_RE = re.compile(
+    r'\.(pdf|pptx?|docx?|xlsx?|csv|txt|rtf|zip|mp[34]|m4v|mov|wav|png|jpe?g|gif)(?:[?#]|$)',
+    re.IGNORECASE,
+)
+
+
+def _is_bs_file_topic(item: dict) -> bool:
+    """Best-effort check that a Brightspace TOC item is a real file topic.
+
+    Title equality alone is not enough: a PDF named "Unit 3 - Records" can be
+    hidden by a Brightspace HTML page/topic titled "Unit 3 Records".
+    """
+    if not item or item.get("kind") != "TOPIC":
+        return False
+    url = item.get("url", "") or ""
+    type_id = str(item.get("type_id", "") or "").lower()
+    topic_type = str(item.get("topic_type", "") or "").lower()
+    if "file" in type_id and "html" not in type_id:
+        return True
+    if topic_type == "file":
+        return True
+    return bool(_BS_FILE_EXT_RE.search(url))
+
+
 # ── Moodle structured scraper JS (same logic as style_migrator) ───────────────
 
 _JS_MOODLE_ITEMS = """() => {
@@ -383,7 +407,17 @@ class ContentChecker:
                         if (!url) continue; // sub-module, already in modules list
                         const title = (c.Title || c.title || '').trim();
                         const id    = c.Id ?? c.id ?? c.TopicId ?? null;
-                        if (title) items.push({ kind: 'TOPIC', title, module: mod.title, url, id });
+                        const typeId = c.TypeIdentifier ?? c.typeIdentifier ?? c.TypeId ?? c.Type ?? '';
+                        const topicType = c.TopicType ?? c.topicType ?? '';
+                        if (title) items.push({
+                            kind: 'TOPIC',
+                            title,
+                            module: mod.title,
+                            url,
+                            id,
+                            type_id: typeId,
+                            topic_type: topicType
+                        });
                     }
                 }
                 return items;
@@ -635,6 +669,9 @@ class ContentChecker:
         import json as _json
 
         bs_module_by_title = {i["title"]: i for i in (bs_flat or []) if i["kind"] == "MODULE"}
+        bs_by_norm: dict = {}
+        for i in bs_flat or []:
+            bs_by_norm.setdefault(_norm(i.get("title", "")), []).append(i)
         section_to_bs: dict = {}
         for r in results:
             if r.get("type") == "SECTION" and r.get("matched"):
@@ -646,6 +683,42 @@ class ContentChecker:
         def _bs_target(r):
             sec = section_to_bs.get(r.get("section", ""), {})
             return sec.get("id"), sec.get("title", r.get("section", ""))
+
+        def _matched_title(r: dict) -> str:
+            matched = r.get("matched")
+            if isinstance(matched, (tuple, list)):
+                return matched[0] if matched else ""
+            return matched or ""
+
+        def _find_bs_match(r: dict) -> dict:
+            title = _matched_title(r) if r.get("status") != "missing" else r.get("name", "")
+            matches = bs_by_norm.get(_norm(title), [])
+            if not matches:
+                return {}
+            wanted_kind = r.get("matched_kind")
+            if wanted_kind:
+                kind_matches = [m for m in matches if m.get("kind") == wanted_kind]
+                if kind_matches:
+                    matches = kind_matches
+            file_matches = [m for m in matches if _is_bs_file_topic(m)]
+            if file_matches:
+                return file_matches[0]
+            topic_matches = [m for m in matches if m.get("kind") == "TOPIC"]
+            return (topic_matches or matches)[0]
+
+        def _file_payload(r: dict, matched_item: dict = None, reason: str = "") -> dict:
+            matched_item = matched_item or {}
+            return {
+                "name":            r["name"],
+                "section":         r.get("section", ""),
+                "href":            r["href"],
+                "bs_module_id":    _bs_target(r)[0],
+                "bs_module_title": _bs_target(r)[1],
+                "matched_title":   _matched_title(r) or matched_item.get("title", ""),
+                "score":           r.get("score", 100 if r.get("status") == "exact" else "?"),
+                "matched_kind":    matched_item.get("kind", r.get("matched_kind", "")),
+                "match_reason":    reason,
+            }
 
         missing_files = [
             {
@@ -671,9 +744,10 @@ class ContentChecker:
                 "href":            r["href"],
                 "bs_module_id":    _bs_target(r)[0],
                 "bs_module_title": _bs_target(r)[1],
-                "matched_title":   r.get("matched") or "",
+                "matched_title":   _matched_title(r),
                 "score":           r.get("score", 80),
                 "matched_kind":    r.get("matched_kind", "TOPIC"),
+                "match_reason":    "fuzzy title match; file not verified",
             }
             for r in results
             if r.get("status") == "fuzzy"
@@ -681,11 +755,55 @@ class ContentChecker:
             and r.get("href")
         ]
 
+        moodle_file_results = [
+            r for r in results
+            if r.get("type") == "FILE"
+            and r.get("href")
+        ]
+        if moodle_file_results:
+            self.log("", "dim")
+            self.log(f"File check: {len(moodle_file_results)} Moodle FILE item(s)", "step")
+
+        review_seen = {(f["name"], f.get("href", "")) for f in review_candidates}
+        for r in moodle_file_results:
+            if r.get("embedded"):
+                parent = r.get("parent_topic") or r.get("section") or "Moodle page/label"
+                self.log(
+                    f"  FILE {r['name']} -> embedded in {parent}; handled by link scan/re-link",
+                    "warning",
+                )
+                continue
+            matched_item = _find_bs_match(r)
+            matched_title = _matched_title(r) or matched_item.get("title", "")
+            matched_desc = (
+                f"{matched_item.get('kind', '?')} \"{matched_item.get('title', matched_title)}\""
+                if matched_item or matched_title else "none"
+            )
+            is_file_match = _is_bs_file_topic(matched_item)
+            needs_action = r.get("status") == "missing" or not is_file_match
+            self.log(
+                f"  FILE {r['name']} -> {matched_desc}; "
+                f"{'needs download/import' if needs_action else 'file exists'}",
+                "warning" if needs_action else "success",
+            )
+
+            if (
+                needs_action
+                and r.get("status") in {"exact", "found_in_search", "found_in_content"}
+                and (r["name"], r.get("href", "")) not in review_seen
+            ):
+                review_candidates.append(_file_payload(
+                    r,
+                    matched_item,
+                    "matched title/text is not a verified Brightspace file topic",
+                ))
+                review_seen.add((r["name"], r.get("href", "")))
+
         # Drop review items that are already an exact-title duplicate in their
         # target module — nothing to review, nothing to upload.
         review_files = []
         for f in review_candidates:
-            if f["bs_module_id"] and await self._verify_topic_in_module(
+            if not f.get("match_reason") and f["bs_module_id"] and await self._verify_topic_in_module(
                 bs_page, course_id, f["bs_module_id"], f["name"]
             ):
                 self.log(f"  ↷ '{f['name']}' already in Brightspace — skipping review", "dim")
@@ -698,7 +816,23 @@ class ContentChecker:
         if missing_files:
             self.log(f"📥 {len(missing_files)} missing FILE(s)", "step")
         if review_files:
-            self.log(f"⚠ {len(review_files)} fuzzy-matched FILE(s) need review", "step")
+            self.log(f"⚠ {len(review_files)} FILE(s) need review", "step")
+        if not getattr(self, "do_pdf_upload", True):
+            self.log("File upload is turned off. Manual download/import needed:", "warning")
+            for f in missing_files + review_files:
+                target = f.get("bs_module_title") or f.get("section") or "no matching Brightspace unit"
+                reason = f.get("match_reason") or "not found in Brightspace"
+                self.log(f"  - {f['name']} -> {target} ({reason})", "warning")
+            return
+
+        if not self.on_file_checklist:
+            self.log("Files need attention, but no checklist UI is available. Manual next steps:", "warning")
+            for f in missing_files + review_files:
+                target = f.get("bs_module_title") or f.get("section") or "no matching Brightspace unit"
+                self.log(f"  - Download from Moodle: {f['name']}", "warning")
+                self.log(f"    Import/upload into Brightspace unit: {target}", "warning")
+            return
+
         self.log("  Waiting for your selection…", "step")
         self.on_file_checklist(_json.dumps({"missing": missing_files, "review": review_files}))
 
@@ -747,6 +881,11 @@ class ContentChecker:
                 await self._download_and_upload_missing(context, bs_page, course_id, cached_from_disk)
             else:
                 self.log("  ↷ No cached files found in downloads folder.", "dim")
+                self.log("  No files selected. Manual next steps:", "warning")
+                for f in missing_files + review_files:
+                    target = f.get("bs_module_title") or f.get("section") or "no matching Brightspace unit"
+                    self.log(f"    - Download from Moodle: {f['name']}", "warning")
+                    self.log(f"      Import/upload into Brightspace unit: {target}", "warning")
             return
 
         await self._download_and_upload_missing(context, bs_page, course_id, selected)
@@ -2968,7 +3107,7 @@ class ContentChecker:
             missing_files = [r for r in results if r.get("status") == "missing" and r.get("type") == "FILE"]
             self.log(f"DEBUG: {len(moodle_files)} FILE items in results, {len(missing_files)} marked missing", "dim")
 
-            if self.on_file_checklist and getattr(self, "do_pdf_upload", True):
+            if self.on_file_checklist:
                 t0 = time.time()
                 await self._offer_missing_file_download(context, page, course_id, results, bs_flat)
                 self._summary["timings"]["File download + upload"] = time.time() - t0

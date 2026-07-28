@@ -142,6 +142,8 @@ class FileChecklistDialog(QDialog):
             if f.get("matched_title"):
                 kind_tag = " [module/section title only]" if f.get("matched_kind") == "MODULE" else ""
                 label += f"  →  matched \"{f['matched_title']}\" ({f.get('score', '?')}%){kind_tag}"
+            if f.get("match_reason"):
+                label += f"  [{f['match_reason']}]"
             cb = QCheckBox(label)
             cb.setChecked(default_checked)
             cb.toggled.connect(self._update_count)

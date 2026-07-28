@@ -76,7 +76,7 @@ class CheckerPanel(QWidget):
         full_run_act = run_menu.addAction("Full Run")
         full_run_act.triggered.connect(self._start_run)
 
-        h5p_act = run_menu.addAction("H5P Upload Only")
+        h5p_act = run_menu.addAction("H5P — Insert Only (already uploaded)")
         h5p_act.triggered.connect(self._start_phase_b)
 
         run_menu.addSeparator()
