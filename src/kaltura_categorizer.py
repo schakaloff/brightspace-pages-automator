@@ -14,6 +14,38 @@ KMC_URL = "https://kmc.cap2.ovp.kaltura.com/index.php/kmcng/content/entries/list
 KMC_SESSION_FILE = str(USERDATA_DIR / "kmc_session.json")
 MOODLE_SESSION_FILE = str(USERDATA_DIR / "moodle_session.json")
 
+# Moodle renders section 0 ("General") with a heading element that is present but
+# blank (`data-sectionname=" "`). Testing the element alone leaves sectionName as
+# "", which downstream reads as "no section" and blocks both auto-matching and
+# manual assignment. Resolve on the *text*, and give every blank section a
+# distinct label so several of them stay separately selectable in the UI.
+SECTION_NAMES_JS = r"""
+    const SECTION_SEL = 'li.section, li.section.main';
+    const sectionTitleText = sec => {
+        if (!sec) return '';
+        const h = sec.querySelector(
+            'h3[data-for="section_title"] > a, h4[data-for="section_title"] > a, '
+            + 'h3.sectionname > a, h4.sectionname > a'
+        ) || sec.querySelector(
+            'h3[data-for="section_title"], h4[data-for="section_title"], '
+            + 'h3.sectionname, h4.sectionname, .sectionname, h3, h4'
+        );
+        return h ? (h.textContent || '').replace(/\s+/g, ' ').trim() : '';
+    };
+    const blankSectionNames = (() => {
+        const blanks = [...document.querySelectorAll(SECTION_SEL)]
+            .filter(sec => !sectionTitleText(sec));
+        const map = new Map();
+        blanks.forEach((sec, i) => map.set(
+            sec,
+            blanks.length > 1 ? '(unnamed section ' + (i + 1) + ')' : '(unnamed section)'
+        ));
+        return map;
+    })();
+    const sectionNameOf = sec =>
+        sectionTitleText(sec) || blankSectionNames.get(sec) || '(unnamed section)';
+"""
+
 
 class KalturaCategorizer:
 
@@ -130,6 +162,7 @@ class KalturaCategorizer:
                 # Kaltura players can be embedded directly in labels/section summaries on
                 # the course page, without a kalvidres/page/book activity link.
                 course_embeds = await page.evaluate(r"""() => {
+                    """ + SECTION_NAMES_JS + r"""
                     const cleanText = value => (value || '').replace(/\s+/g, ' ').trim();
                     const entryIdFromSrc = src => {
                         const match = (src || '').match(/entryid(?:%2F|\/|=|%3D)+([01]_[a-z0-9_]+)/i);
@@ -142,20 +175,8 @@ class KalturaCategorizer:
                         const entryId = entryIdFromSrc(frame.getAttribute('src') || frame.src);
                         if (!entryId) return;
 
-                        const section = frame.closest('li.section, li.section.main, [data-for="section"]');
-                        const heading = section && (
-                            section.querySelector(
-                                'h3[data-for="section_title"] > a, h4[data-for="section_title"] > a, '
-                                + 'h3.sectionname > a, h4.sectionname > a'
-                            )
-                            || section.querySelector(
-                                'h3[data-for="section_title"], h4[data-for="section_title"], '
-                                + 'h3.sectionname, h4.sectionname'
-                            )
-                        );
-                        const sectionName = cleanText(
-                            heading ? heading.textContent : '(unnamed section)'
-                        );
+                        const section = frame.closest(SECTION_SEL);
+                        const sectionName = sectionNameOf(section);
 
                         const activity = frame.closest(
                             '.activity-altcontent, .contentwithoutlink, .activity-description'
@@ -240,11 +261,11 @@ class KalturaCategorizer:
                         embed["name"] = player_title
 
                 # Collect kalvidres links, mod/page links, and mod/book links (pages/books may embed Kaltura)
-                link_data = await page.evaluate("""() => {
+                link_data = await page.evaluate(r"""() => {
+                    """ + SECTION_NAMES_JS + r"""
                     const map = {};
-                    document.querySelectorAll('li.section, li.section.main').forEach(section => {
-                        const heading = section.querySelector('.sectionname, h3, h4');
-                        const sectionName = heading ? heading.textContent.trim() : '(unnamed section)';
+                    document.querySelectorAll(SECTION_SEL).forEach(section => {
+                        const sectionName = sectionNameOf(section);
                         section.querySelectorAll(
                             'a[href*="mod/kalvidres/view.php"], a[href*="mod/page/view.php"], a[href*="mod/book/view.php"]'
                         ).forEach(a => {

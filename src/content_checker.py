@@ -680,7 +680,20 @@ class ContentChecker:
                 bs_mod   = bs_module_by_title.get(bs_title, {})
                 section_to_bs[r["name"]] = {"id": bs_mod.get("id"), "title": bs_title}
 
+        # Moodle folders arrive in Brightspace as empty modules of the same name
+        # (created by the .mbz import). Files scraped out of a folder carry the
+        # folder name in `parent_topic`, so route them into that module instead
+        # of the folder's parent section.
+        bs_module_by_norm = {
+            _norm(i["title"]): i for i in (bs_flat or []) if i["kind"] == "MODULE"
+        }
+
         def _bs_target(r):
+            parent = (r.get("parent_topic") or "").strip()
+            if parent:
+                mod = bs_module_by_norm.get(_norm(parent))
+                if mod and mod.get("id"):
+                    return mod["id"], mod.get("title", parent)
             sec = section_to_bs.get(r.get("section", ""), {})
             return sec.get("id"), sec.get("title", r.get("section", ""))
 

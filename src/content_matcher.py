@@ -9,6 +9,11 @@ from typing import Optional
 # prefix), not a similarity score, so it must not read as a confident match.
 _CONTAINMENT_SCORE = 80
 
+# Confidence for a match inferred by elimination rather than by name. Sits in the
+# same REVIEW band as containment: high enough to pre-fill the destination, below
+# the 90 auto-accept line, so the UI still flags it for a human to confirm.
+_ELIMINATION_SCORE = 85
+
 
 def _norm(text: str) -> str:
     """Lowercase + decode HTML entities so &amp; == & in comparisons."""
@@ -125,6 +130,20 @@ def match_sections(section_names: list, bs_modules: list) -> dict:
             results[name] = (bs_by_norm[contained], _CONTAINMENT_SCORE)
             continue
         results[name] = (None, 0)
+
+    # Last resort — match by elimination. A Moodle section with a blank name (or
+    # one the .mbz import renamed on the way in, e.g. "" → "Introduction") shares
+    # no text with its Brightspace module, so no amount of name comparison can
+    # pair them. If exactly one section and one module are left over once every
+    # name-based match has been made, they can only belong to each other.
+    # Two or more unmatched on either side is genuinely ambiguous: leave those
+    # alone so the user picks them by hand.
+    unmatched = [n for n, (mod, _) in results.items() if mod is None]
+    claimed_ids = {mod["id"] for mod, _ in results.values() if mod is not None}
+    unclaimed = [m for m in bs_modules if m["id"] not in claimed_ids]
+    if len(unmatched) == 1 and len(unclaimed) == 1:
+        results[unmatched[0]] = (unclaimed[0], _ELIMINATION_SCORE)
+
     return results
 
 
