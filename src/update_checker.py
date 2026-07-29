@@ -15,6 +15,7 @@ from pathlib import Path
 
 REPO = "schakaloff/brightspace-pages-automator"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
+LATEST_WINDOWS_INSTALLER = "BrightspacePagesAutomator-Setup-Latest.exe"
 
 
 def _resource_path(*parts) -> Path:
@@ -36,28 +37,28 @@ def get_my_build_tag() -> str:
 
 def _pick_asset(assets: list) -> dict | None:
     suffix = ".exe" if sys.platform == "win32" else ".dmg"
+    if sys.platform == "win32":
+        for asset in assets:
+            if asset.get("name") == LATEST_WINDOWS_INSTALLER:
+                return asset
     for asset in assets:
         if asset.get("name", "").endswith(suffix):
             return asset
     return None
 
 
-def check_for_update() -> dict | None:
-    """Returns a dict with tag/body/html_url/asset info if a newer build is
-    published, or None if we're up to date / running from source / offline."""
-    my_tag = get_my_build_tag()
-    if not my_tag:
-        return None
-
+def _fetch_latest_release() -> dict | None:
     try:
         req = urllib.request.Request(API_URL, headers={"Accept": "application/vnd.github+json"})
         with urllib.request.urlopen(req, timeout=10) as resp:
-            release = json.loads(resp.read().decode("utf-8"))
+            return json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, ValueError):
         return None
 
+
+def _release_info(release: dict, force_install: bool = False) -> dict | None:
     latest_tag = release.get("tag_name", "")
-    if not latest_tag or latest_tag == my_tag:
+    if not latest_tag:
         return None
 
     asset = _pick_asset(release.get("assets", []))
@@ -67,7 +68,31 @@ def check_for_update() -> dict | None:
         "html_url": release.get("html_url", ""),
         "asset_url": asset.get("browser_download_url") if asset else None,
         "asset_name": asset.get("name") if asset else None,
+        "force_install": force_install,
     }
+
+
+def check_for_update(force_install: bool = False) -> dict | None:
+    """Returns a dict with tag/body/html_url/asset info if a newer build is
+    published, or None if we're up to date / running from source / offline.
+
+    force_install=True deliberately returns the latest release even when the
+    current build tag matches, so users can repair a stale or broken install by
+    reinstalling the newest installer.
+    """
+    my_tag = get_my_build_tag()
+    if not my_tag and not force_install:
+        return None
+
+    release = _fetch_latest_release()
+    if not release:
+        return None
+
+    latest_tag = release.get("tag_name", "")
+    if not force_install and (not latest_tag or latest_tag == my_tag):
+        return None
+
+    return _release_info(release, force_install=force_install)
 
 
 def download_asset(url: str, dest_path: Path, progress_cb=None) -> None:

@@ -73,7 +73,7 @@ class UpdateBadge(QToolButton):
                 f"Update available: {self._release.get('tag', '')}\nClick to install."
             )
         else:
-            self.setToolTip("You're up to date.\nClick to check again.")
+            self.setToolTip("You're up to date.\nClick to reinstall the latest version.")
         self.update()
 
     # ── painting ─────────────────────────────────────────────────────────────

@@ -4,6 +4,15 @@ Add a new `## X.Y.Z` section here whenever you bump `VERSION` in `gui.py`.
 The matching section is pulled into the GitHub Release notes automatically,
 and shown to users in the in-app "Update available" dialog.
 
+## 0.8.1
+- Added a visible progress bar to the self-update flow.
+- Fixed silent self-updates by launching the installer only after the app has
+  fully closed, so the running executable can be replaced.
+- Added an "install latest anyway" recovery path from the update badge for
+  users whose install says it is current but still behaves like an older build.
+- Published a stable latest-installer download link so reinstalling from the
+  website always gets the newest Windows build.
+
 ## 0.8.0
 - Added full Moodle → Brightspace migration pipeline in the Checker tab:
   scrapes Moodle course structure, compares against Brightspace via D2L API,

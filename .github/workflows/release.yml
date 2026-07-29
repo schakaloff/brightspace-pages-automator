@@ -39,6 +39,13 @@ jobs:
         run: choco install innosetup -y
       - run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ needs.get-version.outputs.version }} installer\windows.iss
+      - name: Add stable latest installer filename
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem installer\output\BrightspacePagesAutomator-Setup-*.exe |
+            Where-Object { $_.Name -ne "BrightspacePagesAutomator-Setup-Latest.exe" } |
+            Select-Object -First 1
+          Copy-Item $installer.FullName installer\output\BrightspacePagesAutomator-Setup-Latest.exe
       - uses: actions/upload-artifact@v4
         with:
           name: windows-installer

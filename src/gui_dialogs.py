@@ -308,7 +308,11 @@ class UpdateDialog(QDialog):
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(10)
 
-        title = QLabel(f"New version available: {self._release.get('tag', '')}")
+        if self._release.get("force_install"):
+            title_text = f"Install latest version: {self._release.get('tag', '')}"
+        else:
+            title_text = f"New version available: {self._release.get('tag', '')}"
+        title = QLabel(title_text)
         title.setStyleSheet("font-size:16px; font-weight:bold;")
         layout.addWidget(title)
 
@@ -358,7 +362,12 @@ class UpdateDialog(QDialog):
         later_btn.setFixedHeight(38)
         later_btn.clicked.connect(self.reject)
 
-        self._update_btn = QPushButton("Restart && Update")
+        button_text = (
+            "Restart && Install"
+            if self._release.get("force_install")
+            else "Restart && Update"
+        )
+        self._update_btn = QPushButton(button_text)
         self._update_btn.setFixedHeight(38)
         self._update_btn.clicked.connect(self._on_update)
 
@@ -437,7 +446,12 @@ class UpdateDialog(QDialog):
         self._progress.setValue(0)
         self._progress.hide()
         self._update_btn.setEnabled(True)
-        self._update_btn.setText("Restart && Update")
+        button_text = (
+            "Restart && Install"
+            if self._release.get("force_install")
+            else "Restart && Update"
+        )
+        self._update_btn.setText(button_text)
 
     def _quit_app(self):
         """Close via the main window so its closeEvent runs.

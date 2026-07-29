@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QStackedWidget
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QStackedWidget, QMessageBox
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QIcon, QPixmap
 
@@ -16,7 +16,7 @@ import gui_styles
 from gui_sidebar import Sidebar, StepButton
 from gui_icons import make_icon
 
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 _CONFIG_PATH = Path(__file__).parent / "user_config.json"
 
 
@@ -387,21 +387,33 @@ class MainWindow(QMainWindow):
 
         self._run_update_check()
 
-    def _run_update_check(self):
-        threading.Thread(target=self._update_worker, daemon=True).start()
+    def _run_update_check(self, force_install: bool = False):
+        threading.Thread(
+            target=self._update_worker, args=(force_install,), daemon=True
+        ).start()
 
-    def _update_worker(self):
+    def _update_worker(self, force_install: bool = False):
         from update_checker import check_for_update
         try:
-            release = check_for_update()
+            release = check_for_update(force_install=force_install)
         except Exception:
             release = None
-        self._update_q.put(release)
+        self._update_q.put((force_install, release))
 
     def _update_poll(self):
         try:
-            release = self._update_q.get_nowait()
+            force_install, release = self._update_q.get_nowait()
         except queue.Empty:
+            return
+        if force_install:
+            if release:
+                self._show_update_dialog(release)
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Update check failed",
+                    "Could not reach the latest installer. Check your internet connection and try again.",
+                )
             return
         # check_for_update returns None when up to date, offline, or running
         # from source. Offline must not clear a badge we already earned.
@@ -413,7 +425,7 @@ class MainWindow(QMainWindow):
         if release:
             self._show_update_dialog(release)
         else:
-            self._run_update_check()
+            self._run_update_check(force_install=True)
 
     def _show_update_dialog(self, release: dict):
         from gui_dialogs import UpdateDialog
