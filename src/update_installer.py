@@ -48,12 +48,15 @@ def wait_then_install_script(
         'set "LOG=%TEMP%\\BrightspacePagesAutomator-update.log"',
         'set "SETUPLOG=%TEMP%\\BrightspacePagesAutomator-setup.log"',
         f'>> "%LOG%" echo [%DATE% %TIME%] Waiting for app PID {pid}',
-        ":wait_for_app",
-        f'tasklist /FI "PID eq {pid}" 2>NUL | findstr /C:"{pid}" >NUL',
-        "if not errorlevel 1 (",
-        "  timeout /t 1 /nobreak >NUL",
-        "  goto wait_for_app",
-        ")",
+        # Wait-Process blocks until the pid exits and returns at once if it is
+        # already gone. The previous `tasklist | findstr` poll could hang
+        # indefinitely on the pipe, leaving a stuck console and no install.
+        # -Timeout caps the wait so a wedged app can never block the update
+        # forever; we continue regardless, since Setup closes the app anyway.
+        'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '
+        f'"try {{ Wait-Process -Id {pid} -Timeout 120 -ErrorAction Stop }} catch {{ }}" '
+        '>NUL 2>&1',
+        '>> "%LOG%" echo [%DATE% %TIME%] App exited, continuing',
         "timeout /t 1 /nobreak >NUL",
         '>> "%LOG%" echo [%DATE% %TIME%] Running installer "%INSTALLER%"',
         f'"%INSTALLER%" {args}',
@@ -101,9 +104,11 @@ def launch_after_current_process_exits(installer_path: Path) -> None:
         newline="",
     )
 
-    creationflags = 0
-    creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    creationflags |= getattr(subprocess, "DETACHED_PROCESS", 0)
+    # CREATE_NO_WINDOW only. It and DETACHED_PROCESS are mutually exclusive in
+    # CreateProcess, and passing both surfaced a visible console window running
+    # the wait loop. CREATE_NO_WINDOW still gives the helper a (hidden) console,
+    # which timeout/tasklist need in order to work at all.
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
     subprocess.Popen(
         ["cmd.exe", "/d", "/c", str(helper_path)],
