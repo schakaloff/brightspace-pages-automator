@@ -10,7 +10,10 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+
+from config import RELAUNCH_SWITCH
 
 
 def installer_args() -> list[str]:
@@ -18,11 +21,12 @@ def installer_args() -> list[str]:
         "/SILENT",
         "/SUPPRESSMSGBOXES",
         "/NORESTART",
+        RELAUNCH_SWITCH,
     ]
 
 
-def _ps_single_quote(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
+def _cmd_value(value: str) -> str:
+    return value.replace("^", "^^").replace("&", "^&").replace("<", "^<").replace(">", "^>").replace("|", "^|")
 
 
 def wait_then_install_script(
@@ -30,25 +34,53 @@ def wait_then_install_script(
     pid: int,
     relaunch_path: Path | None = None,
 ) -> str:
-    args = ", ".join(_ps_single_quote(arg) for arg in installer_args())
-    script = (
-        "$ErrorActionPreference = 'Stop'; "
-        f"Wait-Process -Id {pid} -ErrorAction SilentlyContinue; "
-        "Start-Sleep -Milliseconds 400; "
-        f"Start-Process -FilePath {_ps_single_quote(str(installer_path))} "
-        f"-ArgumentList @({args}) -WindowStyle Hidden -Wait; "
-    )
+    app_path = str(relaunch_path or "")
+    app_dir = str(relaunch_path.parent) if relaunch_path is not None else ""
+    app_name = relaunch_path.name if relaunch_path is not None else ""
+    args = " ".join(installer_args()) + ' /LOG="%SETUPLOG%"'
+    lines = [
+        "@echo off",
+        "setlocal",
+        f'set "INSTALLER={_cmd_value(str(installer_path))}"',
+        f'set "APP={_cmd_value(app_path)}"',
+        f'set "APPDIR={_cmd_value(app_dir)}"',
+        f'set "APPNAME={_cmd_value(app_name)}"',
+        'set "LOG=%TEMP%\\BrightspacePagesAutomator-update.log"',
+        'set "SETUPLOG=%TEMP%\\BrightspacePagesAutomator-setup.log"',
+        f'>> "%LOG%" echo [%DATE% %TIME%] Waiting for app PID {pid}',
+        ":wait_for_app",
+        f'tasklist /FI "PID eq {pid}" 2>NUL | findstr /C:"{pid}" >NUL',
+        "if not errorlevel 1 (",
+        "  timeout /t 1 /nobreak >NUL",
+        "  goto wait_for_app",
+        ")",
+        "timeout /t 1 /nobreak >NUL",
+        '>> "%LOG%" echo [%DATE% %TIME%] Running installer "%INSTALLER%"',
+        f'"%INSTALLER%" {args}',
+        'set "SETUP_EXIT=%ERRORLEVEL%"',
+        '>> "%LOG%" echo [%DATE% %TIME%] Installer exited %SETUP_EXIT%',
+        "timeout /t 2 /nobreak >NUL",
+    ]
     if relaunch_path is not None:
-        app_path = str(relaunch_path)
-        app_dir = str(relaunch_path.parent)
-        script += (
-            "Start-Sleep -Milliseconds 700; "
-            f"if (Test-Path -LiteralPath {_ps_single_quote(app_path)}) {{ "
-            f"Start-Process -FilePath {_ps_single_quote(app_path)} "
-            f"-WorkingDirectory {_ps_single_quote(app_dir)} "
-            "}"
-        )
-    return script
+        lines += [
+            'tasklist /FI "IMAGENAME eq %APPNAME%" 2>NUL | findstr /I /C:"%APPNAME%" >NUL',
+            "if errorlevel 1 (",
+            '  if exist "%APP%" (',
+            '    >> "%LOG%" echo [%DATE% %TIME%] Relaunching "%APP%"',
+            '    start "" /D "%APPDIR%" "%APP%"',
+            "  ) else (",
+            '    >> "%LOG%" echo [%DATE% %TIME%] App path missing "%APP%"',
+            "  )",
+            ") else (",
+            '  >> "%LOG%" echo [%DATE% %TIME%] App already running',
+            ")",
+        ]
+    lines += [
+        "endlocal",
+        'del "%~f0"',
+        "",
+    ]
+    return "\r\n".join(lines)
 
 
 def launch_after_current_process_exits(installer_path: Path) -> None:
@@ -58,19 +90,18 @@ def launch_after_current_process_exits(installer_path: Path) -> None:
         return
 
     relaunch_path = Path(sys.executable) if getattr(sys, "frozen", False) else None
+    helper_path = Path(tempfile.gettempdir()) / f"BrightspacePagesAutomator-update-{os.getpid()}.cmd"
+    helper_path.write_text(
+        wait_then_install_script(installer_path, os.getpid(), relaunch_path),
+        encoding="utf-8",
+    )
+
     creationflags = 0
     creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
     creationflags |= getattr(subprocess, "DETACHED_PROCESS", 0)
 
     subprocess.Popen(
-        [
-            "powershell.exe",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            wait_then_install_script(installer_path, os.getpid(), relaunch_path),
-        ],
+        ["cmd.exe", "/d", "/c", str(helper_path)],
         close_fds=True,
         creationflags=creationflags,
     )

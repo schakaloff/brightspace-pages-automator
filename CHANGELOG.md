@@ -4,6 +4,11 @@ Add a new `## X.Y.Z` section here whenever you bump `VERSION` in `gui.py`.
 The matching section is pulled into the GitHub Release notes automatically,
 and shown to users in the in-app "Update available" dialog.
 
+## 0.8.3
+- Reworked the self-update restart helper to use a logged Windows batch helper
+  that waits for the app to close, runs the installer with Inno relaunch
+  enabled, and starts the app again if the installer did not.
+
 ## 0.8.2
 - Fixed the post-update restart by closing from the main window after the
   installer handoff and relaunching the app from the detached update helper
