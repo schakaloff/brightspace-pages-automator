@@ -365,6 +365,23 @@ class PageAutomator:
             self.log("✗ Could not extract HTML — skipping", "error")
             return False
 
+        # Unit Collector's assembled pages restyle far better than single topic pages
+        # under the same prompt — the difference is the <h2>label</h2> section header
+        # it prepends to every topic, which gives Claude a clear anchor to build a
+        # "card" around. A lone page's raw source has no such heading, so the prompt
+        # (which assumes card-per-section layout) has nothing to hang the design on.
+        # Mirror that scaffold here for single-page restyles.
+        heading = label
+        if not heading:
+            try:
+                heading = await page.evaluate("() => document.title || ''")
+                heading = heading.split(" - ")[0].strip()
+            except Exception:
+                heading = ""
+        if heading:
+            escaped = heading.replace("<", "&lt;").replace(">", "&gt;")
+            source_html = f"<h2>{escaped}</h2>\n{source_html}"
+
         from ai_styler import apply_style, DEFAULT_MODEL
         styled_html, usage = await asyncio.to_thread(
             apply_style,
