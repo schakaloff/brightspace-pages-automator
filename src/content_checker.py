@@ -12,9 +12,12 @@ Testable modes:
 """
 import asyncio
 import difflib
+import hashlib
 import html as html_module
+import json as _json_mod
 import os
 import re
+from collections import Counter
 import threading
 import time
 from pathlib import Path
@@ -81,6 +84,75 @@ def _is_bs_file_topic(item: dict) -> bool:
     if topic_type == "file":
         return True
     return bool(_BS_FILE_EXT_RE.search(url))
+
+
+# Scrape sanity guard — a Moodle scrape where most items carry one identical
+# name is a broken DOM read, not real course data (see the "Subsection" incident:
+# 52 of 65 FILE items scraped as "Subsection", which then uploaded as duplicates).
+_DUP_NAME_FRACTION = 0.20
+_DUP_NAME_MIN      = 10
+
+
+def _duplicate_name_scan(items: list) -> Optional[dict]:
+    """Detect a scrape where one name dominates. Returns details dict, or None if sane.
+
+    Checked over FILE items and over all non-SECTION items separately — a bad read
+    can corrupt only the resource rows or every row, and either is a hard stop.
+    Legitimate repeats (two copies of one handbook, a run of "Kaltura Video"
+    placeholders) sit far below the fraction threshold.
+    """
+    def _worst(subset: list, scope: str) -> Optional[dict]:
+        names = [str(i.get("name", "")).strip() for i in subset if str(i.get("name", "")).strip()]
+        if len(names) < _DUP_NAME_MIN:
+            return None
+        name, count = Counter(names).most_common(1)[0]
+        if count >= _DUP_NAME_MIN and (count / len(names)) > _DUP_NAME_FRACTION:
+            return {"scope": scope, "name": name, "count": count,
+                    "considered": len(names), "fraction": count / len(names)}
+        return None
+
+    files = [i for i in items if i.get("type") == "FILE"]
+    others = [i for i in items if i.get("type") != "SECTION"]
+    return _worst(files, "FILE items") or _worst(others, "all non-SECTION items")
+
+
+def _file_digest(path: Path) -> str:
+    """SHA-256 of a file's bytes, streamed so large files stay cheap."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _collision_safe_path(save_dir: Path, stem: str, suffix: str, source: Path) -> Path:
+    """Pick a target path for `source` renamed to `stem + suffix` inside save_dir.
+
+    Two Moodle items can carry the same scraped name (and a bad scrape can give
+    every item the same name). Reusing an existing file just because the name
+    matches uploads the wrong content, so an existing target is only reused when
+    its bytes are identical to `source`; otherwise the name is suffixed _1, _2, …
+    """
+    candidate = save_dir / (stem + suffix)
+    if not candidate.exists():
+        return candidate
+    try:
+        source_digest = _file_digest(source)
+    except OSError:
+        source_digest = None
+
+    n = 0
+    while True:
+        if source_digest is not None:
+            try:
+                if _file_digest(candidate) == source_digest:
+                    return candidate      # same source, already renamed — reuse
+            except OSError:
+                pass
+        n += 1
+        candidate = save_dir / f"{stem}_{n}{suffix}"
+        if not candidate.exists():
+            return candidate
 
 
 # ── Moodle structured scraper JS (same logic as style_migrator) ───────────────
@@ -938,14 +1010,19 @@ class ContentChecker:
                 if local.exists():
                     # Rename to match the Moodle item name so Brightspace shows
                     # the correct title (e.g. "Chapter 9 PowerPoint.pptx" not "Chapter_009.pptx")
-                    safe_name = re.sub(r'[<>:"/\\|?*]', '', f["name"]).strip()
-                    correct = local.parent / (safe_name + local.suffix)
+                    safe_name = re.sub(r'[<>:"/\\|?*]', '', f["name"]).strip() or local.stem
+                    original = local
+                    correct = _collision_safe_path(local.parent, safe_name, local.suffix, local)
                     if correct != local:
                         if not correct.exists():
                             import shutil
                             shutil.copy2(str(local), str(correct))
                         local = correct
-                    self.log(f"    ℹ Using cached: {local.name}", "dim")
+                    self.log(
+                        f"    ℹ Using cached: {original.name} | item name: {f['name']} | "
+                        f"upload as: {local.name}",
+                        "dim",
+                    )
                     downloaded.append((local, f))
                 else:
                     self.log(f"    ✗ Cached path missing: {local}", "error")
@@ -993,13 +1070,19 @@ class ContentChecker:
                     self.log(f"    ✓ Downloaded: {filename}", "success")
 
                 # Rename to Moodle item name so Brightspace topic title is correct
-                safe_name = re.sub(r'[<>:"/\\|?*]', '', f["name"]).strip()
-                correct = save_dir / (safe_name + local.suffix)
+                safe_name = re.sub(r'[<>:"/\\|?*]', '', f["name"]).strip() or local.stem
+                original = local
+                correct = _collision_safe_path(save_dir, safe_name, local.suffix, local)
                 if correct != local and not correct.exists():
                     import shutil
                     shutil.copy2(str(local), str(correct))
                 if correct.exists():
                     local = correct
+                self.log(
+                    f"    ↳ downloaded: {original.name} | item name: {f['name']} | "
+                    f"upload as: {local.name}",
+                    "dim",
+                )
 
                 downloaded.append((local, f))
             except Exception as e:
@@ -1854,6 +1937,15 @@ class ContentChecker:
                 await tab.close()
                 return None
 
+            # ── Scrape sanity guard ───────────────────────────────────────────
+            # Abort before any download/upload if the scrape looks corrupt.
+            # Returning None stops the run in run() before compare/download/upload.
+            suspect = _duplicate_name_scan(items)
+            if suspect:
+                await self._abort_bad_scrape(tab, items, suspect)
+                await tab.close()
+                return None
+
             # Deep scan: (1) scan label bodies on the course page itself,
             # (2) navigate to each PAGE topic for its body HTML,
             # (3) navigate into each FOLDER activity to list its files
@@ -1975,6 +2067,66 @@ class ContentChecker:
             except Exception:
                 pass
             return None
+
+    async def _abort_bad_scrape(self, tab, items: list, suspect: dict) -> None:
+        """Log a loud failure and dump evidence for a scrape that failed the guard.
+
+        Called only from the sanity guard in _scrape_moodle; the caller returns
+        None straight after, so nothing is downloaded or uploaded.
+        """
+        file_count = sum(1 for i in items if i.get("type") == "FILE")
+        self.log("", "error")
+        self.log("=" * 52, "error")
+        self.log("✗ ABORTED — Moodle scrape looks corrupt", "error")
+        self.log(f"   Most repeated name : \"{suspect['name']}\"", "error")
+        self.log(f"   Repeated           : {suspect['count']} of "
+                 f"{suspect['considered']} {suspect['scope']} "
+                 f"({suspect['fraction'] * 100:.0f}%)", "error")
+        self.log(f"   Total items scraped: {len(items)}", "error")
+        self.log(f"   Total FILE items   : {file_count}", "error")
+        self.log("   Nothing was downloaded or uploaded — aborted to prevent", "error")
+        self.log("   duplicate/bad Brightspace topics.", "error")
+        self.log("   Re-run the check; if it repeats, send the evidence file below.", "error")
+
+        # Evidence dump — best effort, never let this hide the abort itself
+        try:
+            debug_dir = Path(__file__).parent.parent / "downloads" / "debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+
+            page_url, page_title, page_html = tab.url, "", ""
+            try:
+                page_title = await tab.title()
+                page_html = await tab.content()
+            except Exception as e:
+                page_title = f"(unavailable: {e})"
+
+            evidence = {
+                "timestamp":     stamp,
+                "moodle_url":    page_url,
+                "page_title":    page_title,
+                "trigger":       suspect,
+                "total_items":   len(items),
+                "file_items":    file_count,
+                "type_counts":   dict(Counter(i.get("type", "?") for i in items)),
+                "name_counts":   Counter(
+                    str(i.get("name", "")).strip()
+                    for i in items if i.get("type") != "SECTION"
+                ).most_common(25),
+                "items":         items,
+            }
+            json_path = debug_dir / f"bad-scrape-{stamp}.json"
+            json_path.write_text(_json_mod.dumps(evidence, indent=2), encoding="utf-8")
+            self.log(f"   Evidence: {json_path}", "error")
+
+            if page_html:
+                html_path = debug_dir / f"bad-scrape-{stamp}.html"
+                html_path.write_text(page_html, encoding="utf-8")
+                self.log(f"   Page HTML: {html_path}", "error")
+        except Exception as e:
+            self.log(f"   ⚠ Could not write evidence file: {e}", "warning")
+
+        self.log("=" * 52, "error")
 
     async def _download_moodle_files(self, tab, items: list) -> None:
         """
