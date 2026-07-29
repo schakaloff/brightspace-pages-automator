@@ -399,9 +399,16 @@ class UpdateDialog(QDialog):
         release = self._release
         try:
             import tempfile
-            from update_checker import download_asset
+            from update_checker import download_asset, log_update_event
             tmp_dir = Path(tempfile.gettempdir())
             installer_path = tmp_dir / release["asset_name"]
+            log_update_event(
+                "Update selected: "
+                f"latest_build={release.get('tag')} "
+                f"asset_name={release.get('asset_name')} "
+                f"asset_url={release.get('asset_url')} "
+                f"download_path={installer_path}"
+            )
 
             self._status_changed.emit("Downloading update…")
             def _on_pct(pct):
@@ -414,10 +421,15 @@ class UpdateDialog(QDialog):
             # Servers that omit Content-Length never call progress_cb — make
             # sure the bar still reflects a finished download.
             self._progress_changed.emit(100)
+            self._status_changed.emit("Update downloaded")
+            log_update_event(f"Update downloaded: {installer_path}")
 
-            self._status_changed.emit("Closing app to install…")
+            self._status_changed.emit("Applying update")
+            log_update_event("Applying update: launching detached helper")
             from update_installer import launch_after_current_process_exits
             launch_after_current_process_exits(installer_path)
+            self._status_changed.emit("Restarting app")
+            log_update_event("Restarting app: closing current process")
             self._install_started.emit()
         except Exception as e:
             self._install_failed.emit(str(e))
@@ -426,7 +438,7 @@ class UpdateDialog(QDialog):
 
     def _on_status_changed(self, text: str):
         self._status_lbl.setText(text)
-        if text.startswith("Closing"):
+        if text.startswith("Applying") or text.startswith("Restarting"):
             self._progress.setRange(0, 0)
 
     def _on_progress_changed(self, pct: int):
@@ -435,12 +447,12 @@ class UpdateDialog(QDialog):
         self._progress.setValue(pct)
 
     def _on_install_started(self):
-        self._status_lbl.setText("Closing to finish the update…")
+        self._status_lbl.setText("Restarting app")
         self._install_started_flag = True
         self.accept()
 
     def _on_install_failed(self, message: str):
-        self._status_lbl.setText(f"⚠  Update failed: {message}")
+        self._status_lbl.setText(f"Update failed: {message}")
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
         self._progress.hide()

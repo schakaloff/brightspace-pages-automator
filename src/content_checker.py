@@ -342,6 +342,7 @@ class ContentChecker:
         self.moodle_username        = moodle_username
         self.moodle_password        = moodle_password
         self._summary               = {}
+        self._debug_log_path        = self._init_debug_log()
         self._h5p = H5PHandler(
             log=self.log,
             eval_in_any_frame=self._eval_in_any_frame,
@@ -354,10 +355,36 @@ class ContentChecker:
             should_stop=lambda: self.stop_flag[0],
         )
 
+    def _init_debug_log(self) -> Optional[Path]:
+        try:
+            debug_dir = Path(__file__).parent.parent / "downloads" / "debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            path = debug_dir / "checker-live.log"
+            with path.open("a", encoding="utf-8") as f:
+                f.write("\n" + "=" * 72 + "\n")
+                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Checker run started\n")
+                f.write(f"Brightspace URL: {self.bs_url}\n")
+                f.write(f"Moodle URL: {self.moodle_url}\n")
+            return path
+        except Exception:
+            return None
+
+    def _write_debug_log(self, msg: str, tag: str) -> None:
+        path = getattr(self, "_debug_log_path", None)
+        if not path:
+            return
+        try:
+            with path.open("a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%H:%M:%S')}] [{tag}] {msg}\n")
+        except Exception:
+            pass
+
     def _make_log_filter(self, log_fn: Callable) -> Callable:
         """Wrap log function to filter out verbose messages."""
         def filtered_log(msg: str, tag: str = "info"):
+            self._write_debug_log(msg, tag)
             if not self._verbose and tag in ("dim", "info"):
+                log_fn(msg, "detail")
                 return
             log_fn(msg, tag)
         return filtered_log
@@ -975,6 +1002,7 @@ class ContentChecker:
             await loop.run_in_executor(None, self.file_checklist_event.wait)
 
         selected = list(self.file_checklist_result) if self.file_checklist_result else []
+        self.log(f"  File checklist returned {len(selected)} selected item(s).", "step")
         if not selected:
             if not getattr(self, "do_pdf_upload", True):
                 self.log("  ↷ Skipped — PDF upload disabled.", "dim")
@@ -1036,6 +1064,7 @@ class ContentChecker:
         # Per-course subfolder so re-runs and multiple courses stay separate
         save_dir = Path("downloads") / "files" / course_id
         save_dir.mkdir(parents=True, exist_ok=True)
+        self.log(f"   Debug log: {getattr(self, '_debug_log_path', '')}", "detail")
 
         self.log("─" * 52, "dim")
         self.log(f"📥 Downloading {len(files)} file(s) from Moodle…", "step")
@@ -1051,7 +1080,13 @@ class ContentChecker:
                 return
             name  = f["name"]
             href  = f["href"]
-            self.log(f"  [{idx}/{len(files)}] {name}", "info")
+            self.log(f"  [{idx}/{len(files)}] Downloading Moodle file: {name}", "step")
+            self.log(f"      href: {href}", "detail")
+            self.log(
+                f"      target Brightspace unit: {f.get('bs_module_title') or '(no match)'} "
+                f"({f.get('bs_module_id') or 'no module id'})",
+                "detail",
+            )
 
             # Fast-path: file already identified from local cache — skip Moodle entirely
             if f.get("cached_path"):
@@ -1079,10 +1114,12 @@ class ContentChecker:
 
             tab = await context.new_page()
             try:
+                self.log("      opening Moodle file tab", "detail")
                 try:
                     await tab.goto(href, wait_until="domcontentloaded", timeout=20000)
-                except Exception:
-                    pass
+                    self.log(f"      initial page loaded: {tab.url}", "detail")
+                except Exception as e:
+                    self.log(f"      initial navigation did not load a page: {str(e).splitlines()[0]}", "detail")
                 await tab.wait_for_timeout(300)
 
                 dl_href = href
@@ -1101,16 +1138,19 @@ class ContentChecker:
                 if "pluginfile.php" in dl_href and "forcedownload" not in dl_href:
                     dl_href += ("&" if "?" in dl_href else "?") + "forcedownload=1"
 
+                self.log(f"      waiting for browser download: {dl_href}", "detail")
                 async with tab.expect_download(timeout=30000) as dl_info:
                     try:
                         await tab.goto(dl_href, wait_until="domcontentloaded", timeout=20000)
                     except Exception as _nav_err:
                         if "Download is starting" not in str(_nav_err):
                             raise
+                        self.log("      browser reported download is starting", "detail")
 
                 dl       = await dl_info.value
-                filename = dl.suggested_filename
+                filename = dl.suggested_filename or re.sub(r'[^\w\s\-.]', '', name).strip()[:80] or "downloaded-file"
                 local    = save_dir / filename
+                self.log(f"      suggested filename: {filename}", "detail")
 
                 if local.exists():
                     self.log(f"    ℹ Already cached: {filename} — reusing", "dim")
@@ -2092,6 +2132,10 @@ class ContentChecker:
                 if self.h5p_ready_event:
                     loop = asyncio.get_event_loop()
                     await loop.run_in_executor(None, self.h5p_ready_event.wait)
+                self.log(
+                    f"  H5P choice received: {'skip' if getattr(self, 'h5p_skip_flag', None) and self.h5p_skip_flag[0] else 'download'}",
+                    "step",
+                )
 
             # H5P: enable download on each activity so files can be fetched
             h5p_skipped = (
@@ -2101,7 +2145,9 @@ class ContentChecker:
             if h5p_skipped:
                 self.log("  ⏭ H5P download skipped.", "dim")
             else:
+                self.log("  Starting H5P download preparation...", "step")
                 await self._h5p.enable_downloads(context, items)
+                self.log("  Finished H5P download preparation.", "step")
 
             await tab.close()
             n_items = sum(1 for i in items if i["type"] != "SECTION")

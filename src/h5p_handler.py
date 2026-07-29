@@ -65,7 +65,9 @@ class H5PHandler:
             safe_name = re.sub(r'[^\w\s\-]', '', name).strip()[:80]
             save_path = save_dir / f"{safe_name}.h5p"
 
-            self.log(f"  [{idx}/{len(h5p_items)}] {name}", "info")
+            self.log(f"  [{idx}/{len(h5p_items)}] Preparing H5P download: {name}", "step")
+            self.log(f"      href: {url}", "detail")
+            self.log(f"      save path: {save_path}", "detail")
 
             if save_path.exists():
                 self.log(f"    ℹ Already downloaded — skipping", "dim")
@@ -76,17 +78,22 @@ class H5PHandler:
             tab = await context.new_page()
             try:
                 # Step 1: navigate to H5P activity
+                self.log("      opening H5P activity page", "detail")
                 await tab.goto(url, wait_until="domcontentloaded", timeout=20000)
+                self.log(f"      loaded: {tab.url}", "detail")
                 await tab.wait_for_timeout(1000)
 
                 # Step 2: navigate to Settings (strip &return=1 so Save and display goes to view.php)
                 self.log(f"    → Going to Settings…", "dim")
                 settings = tab.locator('a[href*="modedit.php?update="]')
-                if await settings.count() == 0:
+                settings_count = await settings.count()
+                self.log(f"      settings links found: {settings_count}", "detail")
+                if settings_count == 0:
                     self.log(f"    ⚠ No Settings link — check teacher access", "warning")
                     continue
                 settings_href = await settings.first.get_attribute("href")
                 settings_href = re.sub(r'&return=\d+', '', settings_href)
+                self.log(f"      settings href: {settings_href}", "detail")
                 await tab.goto(settings_href, wait_until="domcontentloaded", timeout=15000)
                 await tab.wait_for_timeout(800)
 

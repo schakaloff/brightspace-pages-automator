@@ -8,19 +8,35 @@ exact build tag (baked into the bundle at build time as BUILD_VERSION)
 against the latest published release tag — not a semver comparison.
 """
 import json
+import tempfile
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 REPO = "schakaloff/brightspace-pages-automator"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 LATEST_WINDOWS_INSTALLER = "BrightspacePagesAutomator-Setup-Latest.exe"
+UPDATE_LOG_NAME = "BrightspacePagesAutomator-update.log"
 
 
 def _resource_path(*parts) -> Path:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent.parent))
     return base.joinpath(*parts)
+
+
+def update_log_path() -> Path:
+    return Path(tempfile.gettempdir()) / UPDATE_LOG_NAME
+
+
+def log_update_event(message: str) -> None:
+    try:
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with update_log_path().open("a", encoding="utf-8") as f:
+            f.write(f"[{stamp}] {message}\n")
+    except Exception:
+        pass
 
 
 def get_my_build_tag() -> str:
@@ -81,24 +97,45 @@ def check_for_update(force_install: bool = False) -> dict | None:
     reinstalling the newest installer.
     """
     my_tag = get_my_build_tag()
+    log_update_event(
+        "Update check: "
+        f"frozen={getattr(sys, 'frozen', False)} "
+        f"platform={sys.platform} "
+        f"executable={sys.executable} "
+        f"current_build={my_tag or '(source/unversioned)'} "
+        f"force_install={force_install}"
+    )
     if not my_tag and not force_install:
+        log_update_event("Update check skipped: running from source/unversioned build")
         return None
 
     release = _fetch_latest_release()
     if not release:
+        log_update_event("Update check failed: could not fetch latest release")
         return None
 
     latest_tag = release.get("tag_name", "")
+    info = _release_info(release, force_install=force_install)
+    log_update_event(
+        "Update check latest: "
+        f"latest_build={latest_tag or '(missing)'} "
+        f"asset_name={(info or {}).get('asset_name')} "
+        f"asset_url={(info or {}).get('asset_url')}"
+    )
     if not force_install and (not latest_tag or latest_tag == my_tag):
+        log_update_event("Update check result: up to date")
         return None
 
-    return _release_info(release, force_install=force_install)
+    log_update_event("Update check result: update available")
+    return info
 
 
 def download_asset(url: str, dest_path: Path, progress_cb=None) -> None:
+    log_update_event(f"Download started: url={url} dest={dest_path}")
     req = urllib.request.Request(url, headers={"Accept": "application/octet-stream"})
     with urllib.request.urlopen(req, timeout=30) as resp:
         total = int(resp.headers.get("Content-Length", 0))
+        log_update_event(f"Download response: content_length={total or 'unknown'}")
         read = 0
         with open(dest_path, "wb") as f:
             while True:
@@ -109,3 +146,4 @@ def download_asset(url: str, dest_path: Path, progress_cb=None) -> None:
                 read += len(chunk)
                 if progress_cb and total:
                     progress_cb(int(read * 100 / total))
+    log_update_event(f"Download finished: dest={dest_path} bytes={dest_path.stat().st_size}")

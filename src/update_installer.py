@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 
 from config import RELAUNCH_SWITCH
+from update_checker import log_update_event
 
 
 def installer_args() -> list[str]:
@@ -69,6 +70,7 @@ def wait_then_install_script(
             'tasklist /FI "IMAGENAME eq %APPNAME%" 2>NUL | findstr /I /C:"%APPNAME%" >NUL',
             "if errorlevel 1 (",
             '  if exist "%APP%" (',
+            '    >> "%LOG%" echo [%DATE% %TIME%] Restart command start "" /D "%APPDIR%" "%APP%"',
             '    >> "%LOG%" echo [%DATE% %TIME%] Relaunching "%APP%"',
             '    start "" /D "%APPDIR%" "%APP%"',
             "  ) else (",
@@ -89,6 +91,7 @@ def wait_then_install_script(
 def launch_after_current_process_exits(installer_path: Path) -> None:
     """Start a detached helper that waits for this app, then runs Setup."""
     if sys.platform != "win32":
+        log_update_event(f"Launching installer directly: {installer_path}")
         subprocess.Popen([str(installer_path)])
         return
 
@@ -103,6 +106,10 @@ def launch_after_current_process_exits(installer_path: Path) -> None:
         encoding="utf-8",
         newline="",
     )
+    log_update_event(f"Installer helper written: {helper_path}")
+    log_update_event(f"Installer path: {installer_path}")
+    log_update_event(f"Restart target: {relaunch_path or '(none; source run)'}")
+    log_update_event(f"Helper launch command: cmd.exe /d /c {helper_path}")
 
     # CREATE_NO_WINDOW only. It and DETACHED_PROCESS are mutually exclusive in
     # CreateProcess, and passing both surfaced a visible console window running
@@ -110,8 +117,9 @@ def launch_after_current_process_exits(installer_path: Path) -> None:
     # which timeout/tasklist need in order to work at all.
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-    subprocess.Popen(
+    proc = subprocess.Popen(
         ["cmd.exe", "/d", "/c", str(helper_path)],
         close_fds=True,
         creationflags=creationflags,
     )
+    log_update_event(f"Installer helper launched: pid={proc.pid}")
