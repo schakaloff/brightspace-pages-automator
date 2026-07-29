@@ -4,6 +4,11 @@ Add a new `## X.Y.Z` section here whenever you bump `VERSION` in `gui.py`.
 The matching section is pulled into the GitHub Release notes automatically,
 and shown to users in the in-app "Update available" dialog.
 
+## 0.8.2
+- Fixed the post-update restart by closing from the main window after the
+  installer handoff and relaunching the app from the detached update helper
+  after the installer finishes.
+
 ## 0.8.1
 - Added a visible progress bar to the self-update flow.
 - Fixed silent self-updates by launching the installer only after the app has

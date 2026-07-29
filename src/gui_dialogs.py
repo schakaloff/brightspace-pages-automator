@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QWidget, QCheckBox, QSpinBox,
     QFrame, QProgressBar,
 )
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, Signal
 
 
 # ── FileChecklistDialog ───────────────────────────────────────────────────────
@@ -288,6 +288,7 @@ class UpdateDialog(QDialog):
         super().__init__(parent)
         self._release = release
         self._parent_window = parent
+        self._install_started_flag = False
 
         self.setWindowTitle("Update available")
         self.setMinimumSize(420, 240)
@@ -435,10 +436,8 @@ class UpdateDialog(QDialog):
 
     def _on_install_started(self):
         self._status_lbl.setText("Closing to finish the update…")
+        self._install_started_flag = True
         self.accept()
-        # Safe here: this runs on the GUI thread, which has an event loop. The
-        # pause lets Setup get going before we release the .exe.
-        QTimer.singleShot(1200, self._quit_app)
 
     def _on_install_failed(self, message: str):
         self._status_lbl.setText(f"⚠  Update failed: {message}")
@@ -453,16 +452,5 @@ class UpdateDialog(QDialog):
         )
         self._update_btn.setText(button_text)
 
-    def _quit_app(self):
-        """Close via the main window so its closeEvent runs.
-
-        QApplication.quit() only stops the event loop — closeEvent never fires,
-        which would skip panel.save_state() and save_config() and quietly lose
-        the user's entered URLs and API key on every update.
-        """
-        window = self._parent_window
-        if window is not None and hasattr(window, "close"):
-            window.close()
-            return
-        from PySide6.QtWidgets import QApplication
-        QApplication.quit()
+    def install_started(self) -> bool:
+        return self._install_started_flag

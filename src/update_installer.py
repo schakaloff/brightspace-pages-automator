@@ -12,15 +12,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from config import RELAUNCH_SWITCH
-
 
 def installer_args() -> list[str]:
     return [
         "/SILENT",
         "/SUPPRESSMSGBOXES",
         "/NORESTART",
-        RELAUNCH_SWITCH,
     ]
 
 
@@ -28,15 +25,30 @@ def _ps_single_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def wait_then_install_script(installer_path: Path, pid: int) -> str:
+def wait_then_install_script(
+    installer_path: Path,
+    pid: int,
+    relaunch_path: Path | None = None,
+) -> str:
     args = ", ".join(_ps_single_quote(arg) for arg in installer_args())
-    return (
+    script = (
         "$ErrorActionPreference = 'Stop'; "
         f"Wait-Process -Id {pid} -ErrorAction SilentlyContinue; "
         "Start-Sleep -Milliseconds 400; "
         f"Start-Process -FilePath {_ps_single_quote(str(installer_path))} "
-        f"-ArgumentList @({args}) -WindowStyle Hidden"
+        f"-ArgumentList @({args}) -WindowStyle Hidden -Wait; "
     )
+    if relaunch_path is not None:
+        app_path = str(relaunch_path)
+        app_dir = str(relaunch_path.parent)
+        script += (
+            "Start-Sleep -Milliseconds 700; "
+            f"if (Test-Path -LiteralPath {_ps_single_quote(app_path)}) {{ "
+            f"Start-Process -FilePath {_ps_single_quote(app_path)} "
+            f"-WorkingDirectory {_ps_single_quote(app_dir)} "
+            "}"
+        )
+    return script
 
 
 def launch_after_current_process_exits(installer_path: Path) -> None:
@@ -45,6 +57,7 @@ def launch_after_current_process_exits(installer_path: Path) -> None:
         subprocess.Popen([str(installer_path)])
         return
 
+    relaunch_path = Path(sys.executable) if getattr(sys, "frozen", False) else None
     creationflags = 0
     creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
     creationflags |= getattr(subprocess, "DETACHED_PROCESS", 0)
@@ -56,7 +69,7 @@ def launch_after_current_process_exits(installer_path: Path) -> None:
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            wait_then_install_script(installer_path, os.getpid()),
+            wait_then_install_script(installer_path, os.getpid(), relaunch_path),
         ],
         close_fds=True,
         creationflags=creationflags,

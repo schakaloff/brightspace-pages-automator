@@ -22,7 +22,7 @@ import gui_styles
 from gui_sidebar import Sidebar, StepButton
 from gui_icons import make_icon
 
-VERSION = "0.8.1"
+VERSION = "0.8.2"
 _CONFIG_PATH = Path(__file__).parent / "user_config.json"
 
 
@@ -526,6 +526,10 @@ class MainWindow(QMainWindow):
         from gui_dialogs import UpdateDialog
         dlg = UpdateDialog(release, self)
         dlg.exec()
+        if dlg.install_started():
+            # Close from the main window after the modal dialog returns. The
+            # window owns closeEvent/save_state, and it outlives the dialog.
+            QTimer.singleShot(300, self.close)
 
     # ── Overlay placement ────────────────────────────────────
     def resizeEvent(self, event):
