@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QWidget, QCheckBox, QSpinBox,
     QFrame,
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 
 
 # ── FileChecklistDialog ───────────────────────────────────────────────────────
@@ -271,7 +271,19 @@ class PagesDialog(QDialog):
 # ── UpdateDialog ──────────────────────────────────────────────────────────────
 
 class UpdateDialog(QDialog):
-    """Shows release notes and offers Skip / Later / Update Now actions."""
+    """Offers the update and, on accept, installs it and closes the app.
+
+    The download runs on a worker thread, so every hand-off back to the GUI goes
+    through these signals. QTimer.singleShot cannot be used from a plain
+    threading.Thread: the timer is created in the calling thread, which has no
+    Qt event loop, so it never fires — not even with a 0ms delay. That silently
+    broke the whole update flow (status never advanced, the app never closed,
+    and the installer could not replace the running .exe).
+    """
+
+    _status_changed = Signal(str)
+    _install_started = Signal()
+    _install_failed = Signal(str)
 
     def __init__(self, release: dict, parent=None):
         super().__init__(parent)
@@ -283,6 +295,11 @@ class UpdateDialog(QDialog):
         self.resize(460, 280)
         self.setModal(True)
         self._build()
+
+        # Queued across the thread boundary by Qt, unlike QTimer.singleShot.
+        self._status_changed.connect(self._on_status_changed)
+        self._install_started.connect(self._on_install_started)
+        self._install_failed.connect(self._on_install_failed)
 
     def _build(self):
         from update_notes import note_for
@@ -349,6 +366,7 @@ class UpdateDialog(QDialog):
         threading.Thread(target=self._run_update, daemon=True).start()
 
     def _run_update(self):
+        """Worker thread. Talks to the GUI only through signals."""
         release = self._release
         try:
             import tempfile
@@ -356,21 +374,19 @@ class UpdateDialog(QDialog):
             tmp_dir = Path(tempfile.gettempdir())
             installer_path = tmp_dir / release["asset_name"]
 
-            def set_status(text):
-                QTimer.singleShot(0, lambda: self._status_lbl.setText(text))
-
-            set_status("Downloading update…")
+            self._status_changed.emit("Downloading update…")
             download_asset(
                 release["asset_url"], installer_path,
-                progress_cb=lambda pct: set_status(f"Downloading update… {pct}%"),
+                progress_cb=lambda pct: self._status_changed.emit(
+                    f"Downloading update… {pct}%"
+                ),
             )
-            set_status("Installing…")
+
+            self._status_changed.emit("Installing…")
             import subprocess
-            # CLOSEAPPLICATIONS/RESTARTAPPLICATIONS let Inno shut us down and
-            # bring us back; quitting ourselves below is what actually frees the
-            # .exe, since Windows will not let the installer overwrite a running
-            # binary. Without the quit, the install silently did nothing and the
-            # user had to close the app by hand.
+            # The app must exit before Setup can overwrite its own .exe. We close
+            # ourselves once this returns; AppMutex + CLOSEAPPLICATIONS are the
+            # backstop, and /RELAUNCH=yes is what reopens us afterwards.
             from config import RELAUNCH_SWITCH
             subprocess.Popen(
                 [
@@ -379,13 +395,26 @@ class UpdateDialog(QDialog):
                 ],
                 close_fds=True,
             )
-            set_status("Closing to finish the update…")
-            QTimer.singleShot(0, self.accept)
-            QTimer.singleShot(1200, self._quit_app)
+            self._install_started.emit()
         except Exception as e:
-            QTimer.singleShot(0, lambda: self._status_lbl.setText(f"⚠  Update failed: {e}"))
-            QTimer.singleShot(0, lambda: self._update_btn.setEnabled(True))
-            QTimer.singleShot(0, lambda: self._update_btn.setText("Restart && Update"))
+            self._install_failed.emit(str(e))
+
+    # ── GUI-thread slots ─────────────────────────────────────────────────────
+
+    def _on_status_changed(self, text: str):
+        self._status_lbl.setText(text)
+
+    def _on_install_started(self):
+        self._status_lbl.setText("Closing to finish the update…")
+        self.accept()
+        # Safe here: this runs on the GUI thread, which has an event loop. The
+        # pause lets Setup get going before we release the .exe.
+        QTimer.singleShot(1200, self._quit_app)
+
+    def _on_install_failed(self, message: str):
+        self._status_lbl.setText(f"⚠  Update failed: {message}")
+        self._update_btn.setEnabled(True)
+        self._update_btn.setText("Restart && Update")
 
     def _quit_app(self):
         """Close via the main window so its closeEvent runs.
