@@ -4,13 +4,19 @@ import os
 import queue
 import sys
 import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QStackedWidget, QMessageBox
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QHBoxLayout, QStackedWidget,
+    QMessageBox, QSplashScreen,
+)
+from PySide6.QtCore import Qt, QTimer, QEventLoop
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QPainterPath
+
+MIN_SPLASH_MS = 5000
 
 import gui_styles
 from gui_sidebar import Sidebar, StepButton
@@ -25,9 +31,84 @@ def _resource_path(*parts) -> Path:
     return base.joinpath(*parts)
 
 
+def _load_saved_theme() -> str:
+    try:
+        return json.loads(_CONFIG_PATH.read_text(encoding="utf-8")).get("theme", "dark")
+    except Exception:
+        return "dark"
+
+
+def _splash_icon_pixmap() -> QPixmap | None:
+    try:
+        from icon_art import draw_app_icon
+        from PIL.ImageQt import ImageQt
+        return QPixmap.fromImage(ImageQt(draw_app_icon(64)))
+    except Exception:
+        return None
+
+
+_SPLASH_ICON = None  # decoded once, reused across every progress-bar frame
+
+
+def _build_splash_pixmap(progress: float = 0.0) -> QPixmap:
+    """Themed loading card — icon, title, and a progress bar that fills as
+    the app finishes loading (see MIN_SPLASH_MS in __main__)."""
+    global _SPLASH_ICON
+    if _SPLASH_ICON is None:
+        _SPLASH_ICON = _splash_icon_pixmap()
+
+    c = gui_styles.current
+    w, h = 360, 240
+    pm = QPixmap(w, h)
+    pm.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    # Card
+    painter.setPen(QColor(c["BORDER_ACT"]))
+    painter.setBrush(QColor(c["PANEL"]))
+    painter.drawRoundedRect(1, 1, w - 2, h - 2, 16, 16)
+
+    # Brand accent stripe along the top, clipped to the card's rounded top
+    clip = QPainterPath()
+    clip.addRoundedRect(1, 1, w - 2, h - 2, 16, 16)
+    painter.save()
+    painter.setClipPath(clip)
+    painter.fillRect(1, 1, w - 2, 5, QColor(c["OC_TEAL"]))
+    painter.restore()
+
+    if _SPLASH_ICON is not None:
+        painter.drawPixmap((w - 64) // 2, 26, _SPLASH_ICON)
+
+    painter.setPen(QColor(c["TEXT_PRI"]))
+    title_font = QFont("Segoe UI", 12)
+    title_font.setBold(True)
+    painter.setFont(title_font)
+    painter.drawText(0, 100, w, 24, Qt.AlignmentFlag.AlignHCenter, "Brightspace Pages Automator")
+
+    painter.setPen(QColor(c["TEXT_SEC"]))
+    ver_font = QFont("Segoe UI", 9)
+    painter.setFont(ver_font)
+    painter.drawText(0, 124, w, 18, Qt.AlignmentFlag.AlignHCenter, f"v{VERSION}")
+
+    # Progress bar
+    bar_x, bar_y, bar_w, bar_h = 40, 156, w - 80, 5
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(c["BORDER"]))
+    painter.drawRoundedRect(bar_x, bar_y, bar_w, bar_h, 2.5, 2.5)
+    fill_w = max(bar_h, bar_w * min(max(progress, 0.0), 1.0))
+    painter.setBrush(QColor(c["OC_TEAL"]))
+    painter.drawRoundedRect(bar_x, bar_y, fill_w, bar_h, 2.5, 2.5)
+
+    painter.end()
+    return pm
+
+
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, splash: QSplashScreen | None = None):
         super().__init__()
+        self._splash = splash
         self.setWindowTitle("Brightspace Pages Automator")
         self.setMinimumSize(720, 560)
         self.resize(860, 640)
@@ -35,12 +116,25 @@ class MainWindow(QMainWindow):
         self._claude_model = ""
         self._chromium_ready = False
         self._set_window_icon()
+        self._report_progress("Loading interface…")
         self._build_ui()
+        self._report_progress("Loading credentials…")
         self._load_api_key()
         self._start_chromium_check()
         self._start_update_check()
         saved_theme = self.load_config().get("theme", "dark")
         self.set_theme(saved_theme)
+        self._report_progress("Ready")
+
+    def _report_progress(self, message: str):
+        if self._splash is None:
+            return
+        self._splash.showMessage(
+            message,
+            Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
+            QColor(gui_styles.current["TEXT_SEC"]),
+        )
+        QApplication.instance().processEvents()
 
     # ── Window icon (PIL → QPixmap) ──────────────────────────
     def _set_window_icon(self):
@@ -84,6 +178,7 @@ class MainWindow(QMainWindow):
         self._update_badge.show()
 
         # Panels imported lazily to keep imports fast
+        self._report_progress("Loading panels…")
         from panels.checker_panel import CheckerPanel
         from panels.collector_panel import CollectorPanel
         from panels.restyle_panel import RestylePanel
@@ -510,7 +605,32 @@ if __name__ == "__main__":
     # installer's AppMutex check is how it knows we are running.
     _app_mutex = _claim_app_mutex()
 
+    gui_styles.set_theme(_load_saved_theme())
     app.setStyleSheet(gui_styles.get_stylesheet())
-    win = MainWindow()
+
+    splash = QSplashScreen(_build_splash_pixmap(progress=0.0))
+    splash.show()
+    app.processEvents()
+    _splash_shown_at = time.monotonic()
+
+    def _tick_splash_progress():
+        elapsed_ms = (time.monotonic() - _splash_shown_at) * 1000
+        splash.setPixmap(_build_splash_pixmap(progress=elapsed_ms / MIN_SPLASH_MS))
+
+    _progress_timer = QTimer()
+    _progress_timer.timeout.connect(_tick_splash_progress)
+    _progress_timer.start(30)
+
+    win = MainWindow(splash=splash)
+
+    remaining_ms = MIN_SPLASH_MS - (time.monotonic() - _splash_shown_at) * 1000
+    if remaining_ms > 0:
+        _wait_loop = QEventLoop()
+        QTimer.singleShot(int(remaining_ms), _wait_loop.quit)
+        _wait_loop.exec()
+
+    _progress_timer.stop()
+    splash.setPixmap(_build_splash_pixmap(progress=1.0))
     win.show()
+    splash.finish(win)
     sys.exit(app.exec())
