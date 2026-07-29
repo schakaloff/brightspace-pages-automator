@@ -21,10 +21,28 @@ class StepButton(QPushButton):
         self._icon_name = icon_name
         self._label     = label
         self._state     = self.LOCKED
-        self.setFixedHeight(52)
+        self._hovered   = False
+        self._show_dot  = True
+        self.setFixedHeight(50)
         self.setProperty("class", "step-btn")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFlat(True)
         self._apply_state()
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def set_show_dot(self, show: bool):
+        """Settings is not a workflow step, so it carries no status dot."""
+        self._show_dot = show
+        self.update()
 
     def set_state(self, state: str):
         if state == self._state:
@@ -43,17 +61,55 @@ class StepButton(QPushButton):
         self.style().polish(self)
 
     def paintEvent(self, event):
-        super().paintEvent(event)
+        # Painted entirely here rather than by the stylesheet: the active row is
+        # a rounded card, which QSS cannot express on a QPushButton without
+        # fighting the frame it draws. super().paintEvent is skipped for the
+        # same reason — it would draw a square background under the card.
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
         locked = self._state == self.LOCKED
+        active = self._state == self.ACTIVE
+        c = gui_styles.current
+        accent = gui_styles.accent()
+
+        pad = 8
+        card = QRectF(pad, 2, w - pad * 2, h - 4)
+
+        if active:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(c["PANEL"]))
+            p.drawRoundedRect(card, 8, 8)
+            p.setBrush(QColor(accent))
+            p.drawRoundedRect(QRectF(card.left(), card.top() + 11, 3,
+                                     card.height() - 22), 2, 2)
+        elif self._hovered and not locked:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(c["PANEL"]))
+            p.setOpacity(0.55)
+            p.drawRoundedRect(card, 8, 8)
+            p.setOpacity(1.0)
+
+        # Icon tile
+        icon_color = accent if active else (
+            c["TEXT_FAINT"] if locked else gui_styles.sidebar_label()
+        )
+        tile = QRectF(pad + 14, (h - 28) / 2, 28, 28)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(c["BG"] if active else c["PANEL"]))
+        p.setOpacity(0.5 if locked else 1.0)
+        p.drawRoundedRect(tile, 7, 7)
+        if self._icon_name:
+            from gui_icons import make_pixmap
+            px = make_pixmap(self._icon_name, icon_color, 16)
+            p.drawPixmap(int(tile.center().x() - 8),
+                         int(tile.center().y() - 8), px)
+        p.setOpacity(1.0)
 
         # Label
-        label_x = 12
-        c = gui_styles.current
-        label_color = c["TEXT_PRI"] if self._state == self.ACTIVE else (
-            c["TEXT_FAINT"] if locked else c["TEXT_SEC"]
+        label_x = int(tile.right()) + 12
+        label_color = c["TEXT_PRI"] if active else (
+            c["TEXT_FAINT"] if locked else gui_styles.sidebar_label()
         )
         lf = QFont()
         lf.setPointSize(9)
@@ -61,16 +117,19 @@ class StepButton(QPushButton):
         p.setPen(QPen(QColor(label_color)))
         p.setFont(lf)
         p.setOpacity(0.4 if locked else 1.0)
-        p.drawText(QRect(label_x, 0, w - label_x - 28, h),
+        p.drawText(QRect(label_x, 0, w - label_x - 26, h),
                    Qt.AlignmentFlag.AlignVCenter, self._label)
         p.setOpacity(1.0)
 
         # Status indicator
-        dot_x = w - 16
+        if not self._show_dot:
+            p.end()
+            return
+        dot_x = w - 18
         dot_y = h // 2
         dot_r = 4
         if self._state == self.DONE:
-            p.setBrush(QBrush(QColor(c["DONE"])))
+            p.setBrush(QBrush(QColor(gui_styles.status_done())))
             p.setPen(Qt.PenStyle.NoPen)
             p.drawEllipse(dot_x - dot_r, dot_y - dot_r, dot_r * 2, dot_r * 2)
         elif self._state == self.RUNNING:
@@ -159,27 +218,18 @@ class Sidebar(QWidget):
         self._section_labels: list[QLabel] = []
         for number, icon_name, label in steps:
             if number is None:
-                top_div = QWidget()
-                top_div.setFixedHeight(1)
-                top_div.setStyleSheet(f"background:{gui_styles.current['BORDER']};")
-                self._section_dividers.append(top_div)
-                layout.addSpacing(6)
-                layout.addWidget(top_div)
-
-                header = QLabel(label)
+                # Was two 1px rules wrapping the label, i.e. five widgets per
+                # heading. Letter-spaced small caps with space above separates
+                # the groups on its own and reads far quieter.
+                layout.addSpacing(14)
+                header = QLabel(label.upper())
                 header.setStyleSheet(
-                    f"color:{gui_styles.current['TEXT_SEC']};font-size:13px;"
-                    f"font-weight:700;padding:6px 12px 2px 12px;"
+                    f"color:{gui_styles.sidebar_header()};font-size:9px;"
+                    f"font-weight:700;letter-spacing:1.4px;"
+                    f"padding:0px 12px 6px 22px;"
                 )
                 self._section_labels.append(header)
                 layout.addWidget(header)
-
-                bot_div = QWidget()
-                bot_div.setFixedHeight(1)
-                bot_div.setStyleSheet(f"background:{gui_styles.current['BORDER']};")
-                self._section_dividers.append(bot_div)
-                layout.addWidget(bot_div)
-                layout.addSpacing(4)
                 continue
 
             btn = StepButton(number, icon_name, label)
@@ -195,16 +245,17 @@ class Sidebar(QWidget):
         self._div_bot.setFixedHeight(1)
         self._div_bot.setStyleSheet(f"background:{gui_styles.current['BORDER']};")
         layout.addWidget(self._div_bot)
+        layout.addSpacing(6)
 
-        # Settings button
-        self._settings_btn = QPushButton("Settings")
-        self._settings_btn.setProperty("class", "step-btn")
-        self._settings_btn.setStyleSheet("font-size:13px; font-weight:700;")
-        self._settings_btn.setFixedHeight(44)
+        # Settings — a StepButton with no number so it matches the tiles above
+        # instead of sitting flush against the divider as bare text.
+        self._settings_btn = StepButton(0, "settings", "Settings")
+        self._settings_btn.set_state(StepButton.PENDING)
+        self._settings_btn.set_show_dot(False)
         self._settings_btn.setToolTip("Configure credentials, Claude API key, and app appearance.")
         self._settings_btn.clicked.connect(self.settings_clicked)
         layout.addWidget(self._settings_btn)
-        layout.addSpacing(4)
+        layout.addSpacing(8)
 
     def refresh_theme(self):
         c = gui_styles.current
@@ -215,9 +266,13 @@ class Sidebar(QWidget):
         for div in self._section_dividers:
             div.setStyleSheet(f"background:{c['BORDER']};")
         for lbl in self._section_labels:
-            lbl.setStyleSheet(f"color:{c['TEXT_SEC']};font-size:13px;font-weight:700;padding:6px 12px 2px 12px;")
+            lbl.setStyleSheet(
+                f"color:{gui_styles.sidebar_header()};font-size:9px;font-weight:700;"
+                f"letter-spacing:1.4px;padding:0px 12px 6px 22px;"
+            )
         for btn in self._step_buttons.values():
             btn.update()
+        self._settings_btn.update()
 
     def set_step_state(self, number: int, state: str):
         if number in self._step_buttons:
@@ -230,7 +285,8 @@ class Sidebar(QWidget):
         if number is not None and number in self._step_buttons:
             if self._step_buttons[number].get_state() != StepButton.LOCKED:
                 self._step_buttons[number].set_state(StepButton.ACTIVE)
-        is_settings = number is None
-        self._settings_btn.setProperty("active", is_settings)
-        self._settings_btn.style().unpolish(self._settings_btn)
-        self._settings_btn.style().polish(self._settings_btn)
+        # Settings is a hand-painted StepButton now, so its look comes from
+        # state rather than the QSS "active" property.
+        self._settings_btn.set_state(
+            StepButton.ACTIVE if number is None else StepButton.PENDING
+        )

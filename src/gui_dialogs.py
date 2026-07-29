@@ -279,13 +279,13 @@ class UpdateDialog(QDialog):
         self._parent_window = parent
 
         self.setWindowTitle("Update available")
-        self.setMinimumSize(520, 360)
-        self.resize(520, 420)
+        self.setMinimumSize(420, 240)
+        self.resize(460, 280)
         self.setModal(True)
         self._build()
 
     def _build(self):
-        from gui_log import LogWidget
+        from update_notes import note_for
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -295,9 +295,20 @@ class UpdateDialog(QDialog):
         title.setStyleSheet("font-size:16px; font-weight:bold;")
         layout.addWidget(title)
 
-        notes = LogWidget()
-        notes.append_log(self._release.get("body", ""), "info")
-        layout.addWidget(notes, 1)
+        # One line instead of a changelog. Nobody running this tool needs a diff;
+        # the honest notes stay on the GitHub release for whoever is debugging.
+        joke = QLabel(note_for(self._release.get("tag", "")))
+        joke.setWordWrap(True)
+        joke.setStyleSheet("font-size:13px; padding:10px 0;")
+        layout.addWidget(joke, 1)
+
+        warning = QLabel(
+            "⚠  Updating closes the app and stops anything it is currently running "
+            "— scans, uploads and open browser windows will be cancelled."
+        )
+        warning.setWordWrap(True)
+        warning.setStyleSheet("font-size:11px; color:#ffd75e;")
+        layout.addWidget(warning)
 
         self._status_lbl = QLabel("")
         self._status_lbl.setProperty("role", "dim")
@@ -307,17 +318,14 @@ class UpdateDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
 
-        skip_btn = QPushButton("Skip this version")
-        skip_btn.setProperty("variant", "secondary")
-        skip_btn.setFixedHeight(38)
-        skip_btn.clicked.connect(self._on_skip)
+        btn_row.addStretch()
 
-        later_btn = QPushButton("Remind me later")
+        later_btn = QPushButton("Not now")
         later_btn.setProperty("variant", "secondary")
         later_btn.setFixedHeight(38)
         later_btn.clicked.connect(self.reject)
 
-        self._update_btn = QPushButton("Update Now")
+        self._update_btn = QPushButton("Restart && Update")
         self._update_btn.setFixedHeight(38)
         self._update_btn.clicked.connect(self._on_update)
 
@@ -325,15 +333,9 @@ class UpdateDialog(QDialog):
             self._update_btn.setEnabled(False)
             self._status_lbl.setText("No installer found in this release.")
 
-        btn_row.addWidget(skip_btn)
         btn_row.addWidget(later_btn)
         btn_row.addWidget(self._update_btn)
         layout.addLayout(btn_row)
-
-    def _on_skip(self):
-        if self._parent_window and hasattr(self._parent_window, "save_config"):
-            self._parent_window.save_config({"skipped_update_tag": self._release.get("tag", "")})
-        self.reject()
 
     def _on_update(self):
         release = self._release
@@ -364,12 +366,37 @@ class UpdateDialog(QDialog):
             )
             set_status("Installing…")
             import subprocess
+            # CLOSEAPPLICATIONS/RESTARTAPPLICATIONS let Inno shut us down and
+            # bring us back; quitting ourselves below is what actually frees the
+            # .exe, since Windows will not let the installer overwrite a running
+            # binary. Without the quit, the install silently did nothing and the
+            # user had to close the app by hand.
+            from config import RELAUNCH_SWITCH
             subprocess.Popen(
-                [str(installer_path), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+                [
+                    str(installer_path), "/SILENT", "/SUPPRESSMSGBOXES",
+                    "/CLOSEAPPLICATIONS", "/NORESTART", RELAUNCH_SWITCH,
+                ],
                 close_fds=True,
             )
+            set_status("Closing to finish the update…")
             QTimer.singleShot(0, self.accept)
+            QTimer.singleShot(1200, self._quit_app)
         except Exception as e:
             QTimer.singleShot(0, lambda: self._status_lbl.setText(f"⚠  Update failed: {e}"))
             QTimer.singleShot(0, lambda: self._update_btn.setEnabled(True))
-            QTimer.singleShot(0, lambda: self._update_btn.setText("Update Now"))
+            QTimer.singleShot(0, lambda: self._update_btn.setText("Restart && Update"))
+
+    def _quit_app(self):
+        """Close via the main window so its closeEvent runs.
+
+        QApplication.quit() only stops the event loop — closeEvent never fires,
+        which would skip panel.save_state() and save_config() and quietly lose
+        the user's entered URLs and API key on every update.
+        """
+        window = self._parent_window
+        if window is not None and hasattr(window, "close"):
+            window.close()
+            return
+        from PySide6.QtWidgets import QApplication
+        QApplication.quit()

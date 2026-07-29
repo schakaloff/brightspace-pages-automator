@@ -54,6 +54,84 @@ LIGHT = {
 current = dict(DARK)
 
 
+# Brand orange is only ~2.1:1 against the light theme's surfaces — too weak for
+# thin strokes and small text. On light backgrounds a darkened orange keeps the
+# hue while staying legible. One definition, used by the sidebar and the update
+# badge so they cannot drift apart.
+ACCENT_ON_LIGHT = "#b85c00"
+
+
+def is_light() -> bool:
+    """Perceptual lightness of the current background."""
+    bg = current.get("BG", "#0d0d12").lstrip("#")
+    r, g, b = (int(bg[i:i + 2], 16) for i in (0, 2, 4))
+    return (0.299 * r + 0.587 * g + 0.114 * b) > 140
+
+
+def accent() -> str:
+    """Attention colour that stays visible in whichever theme is active."""
+    return ACCENT_ON_LIGHT if is_light() else current["OC_ORANGE"]
+
+
+# The sidebar sits on SIDEBAR, which is darker than BG in dark and lighter than
+# BG in light. TEXT_SEC/TEXT_FAINT are tuned against PANEL and fall short there:
+# measured 3.56:1 for idle labels and 1.80:1 for section headers. These are
+# picked against the sidebar surface specifically.
+_SIDEBAR_LABEL = {"dark": "#a2abc4", "light": "#50556b"}
+_SIDEBAR_HEADER = {"dark": "#767e9c", "light": "#6a6f86"}
+_STATUS_DONE = {"dark": "#22c55e", "light": "#0f7a37"}
+
+
+def _theme_key() -> str:
+    return "light" if is_light() else "dark"
+
+
+def sidebar_label() -> str:
+    """Idle step label — needs 4.5:1 as small bold text."""
+    return _SIDEBAR_LABEL[_theme_key()]
+
+
+def sidebar_header() -> str:
+    """Section heading — small caps, needs at least 3:1."""
+    return _SIDEBAR_HEADER[_theme_key()]
+
+
+def status_done() -> str:
+    """Done dot; the stock green is only 2.8:1 on the light sidebar."""
+    return _STATUS_DONE[_theme_key()]
+
+
+def check_png_path() -> str:
+    """Path to the checkbox tick, rendering it if a QApplication exists.
+
+    Always white: the indicator behind it is filled with OC_TEAL_MID in both
+    themes, dark enough for white to read clearly.
+
+    This module builds APP_STYLESHEET at import time, which happens before
+    QApplication is constructed. Touching QPixmap that early aborts the process,
+    so the render is skipped until there is a GUI app; get_stylesheet() is called
+    again after startup, which is when the file actually gets written.
+    """
+    from pathlib import Path
+    import os
+
+    base = (Path(os.environ["APPDATA"]) / "BrightspaceAutomator"
+            if os.name == "nt"
+            else Path.home() / ".local" / "share" / "BrightspaceAutomator")
+    path = base / "check.png"
+
+    try:
+        from PySide6.QtGui import QGuiApplication
+        if QGuiApplication.instance() is not None:
+            from gui_icons import write_png
+            write_png("check", "#ffffff", 16, path)
+    except Exception:
+        pass
+
+    # QSS urls need forward slashes even on Windows.
+    return str(path).replace("\\", "/")
+
+
 def set_theme(name: str):
     current.update(DARK if name == "dark" else LIGHT)
 
@@ -95,7 +173,11 @@ QCheckBox::indicator {{
     width: 16px; height: 16px; border: 1px solid {c['BORDER_ACT']};
     border-radius: 3px; background-color: {c['PANEL']};
 }}
-QCheckBox::indicator:checked {{ background-color: {c['OC_TEAL']}; border-color: {c['OC_TEAL']}; }}
+QCheckBox::indicator:checked {{
+    background-color: {c['OC_TEAL_MID']}; border-color: {c['OC_TEAL_MID']};
+    image: url("{check_png_path()}");
+}}
+QCheckBox::indicator:hover {{ border-color: {c['OC_TEAL_MID']}; }}
 
 QPushButton {{
     background-color: {c['OC_TEAL']}; color: #ffffff; border: none;
@@ -156,6 +238,16 @@ QToolButton::menu-button {{
 QToolButton::menu-arrow {{
     width: 10px; height: 10px;
 }}
+
+/* The generic QToolButton rule above paints a filled teal pill with 18px of
+   horizontal padding. On the 30x30 corner badge that covers the icon entirely
+   and shows as a solid square, so reset it to a bare icon with a hover tint. */
+QToolButton#update_badge {{
+    background-color: transparent; border: none;
+    padding: 0px; margin: 0px; border-radius: 15px;
+}}
+QToolButton#update_badge:hover {{ background-color: {c['LOCKED_BG']}; }}
+QToolButton#update_badge:pressed {{ background-color: {c['BORDER_ACT']}; }}
 
 QMenu {{
     background-color: {c['PANEL']}; border: 1px solid {c['BORDER_ACT']};

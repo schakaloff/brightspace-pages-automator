@@ -19,6 +19,11 @@ SolidCompression=yes
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 DisableProgramGroupPage=yes
+; The running app holds a mutex with this name (see APP_MUTEX_NAME in
+; src/config.py). It lets Setup detect a live instance instead of failing to
+; overwrite a locked .exe. Both names must stay in sync.
+AppMutex=BrightspacePagesAutomator.SingleInstance
+CloseApplications=yes
 
 [Files]
 Source: "..\dist\BrightspacePagesAutomator\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
@@ -34,3 +39,13 @@ Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "A
 [Run]
 Filename: "{app}\install_browsers.bat"; StatusMsg: "Installing Chromium browser (one-time, ~2 min)..."; Flags: runhidden waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+; Reopens the app after a silent self-update. The entry above is skipifsilent,
+; so without this one "Restart & Update" would only ever close the app. Gated on
+; /RELAUNCH so a normal silent install by an admin stays silent.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: WantsRelaunch
+
+[Code]
+function WantsRelaunch(): Boolean;
+begin
+  Result := CompareText(ExpandConstant('{param:RELAUNCH|no}'), 'yes') = 0;
+end;

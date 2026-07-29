@@ -76,6 +76,13 @@ class MainWindow(QMainWindow):
         self._stack.setObjectName("content")
         root.addWidget(self._stack, 1)
 
+        # Parented to the central widget so it floats over whichever page is
+        # showing — see gui_update_badge for why this is not in the layout.
+        from gui_update_badge import UpdateBadge
+        self._update_badge = UpdateBadge(central)
+        self._update_badge.clicked_with_update.connect(self._on_update_badge_clicked)
+        self._update_badge.show()
+
         # Panels imported lazily to keep imports fast
         from panels.checker_panel import CheckerPanel
         from panels.collector_panel import CollectorPanel
@@ -207,6 +214,7 @@ class MainWindow(QMainWindow):
         gui_styles.set_theme(name)
         QApplication.instance().setStyleSheet(gui_styles.get_stylesheet())
         self._sidebar.refresh_theme()
+        self._update_badge.refresh_theme()
         self._settings.mark_active_theme(name)
         # Refresh log widgets in each panel
         for panel in (self._checker, self._collector, self._restyle, self._kaltura, self._h5p):
@@ -361,34 +369,70 @@ class MainWindow(QMainWindow):
         dlg.show()
 
     # ── Update check ─────────────────────────────────────────
+    # Nothing here ever interrupts the user. A check result only lights up the
+    # corner badge; the dialog opens when the badge is clicked and never before.
+    _RECHECK_MS = 30 * 60 * 1000
+
     def _start_update_check(self):
         self._update_q = queue.Queue()
         self._update_timer = QTimer(self)
         self._update_timer.timeout.connect(self._update_poll)
         self._update_timer.start(2000)
+
+        # Releases can land while the app sits open for hours, so keep looking
+        # instead of checking once at launch.
+        self._recheck_timer = QTimer(self)
+        self._recheck_timer.timeout.connect(self._run_update_check)
+        self._recheck_timer.start(self._RECHECK_MS)
+
+        self._run_update_check()
+
+    def _run_update_check(self):
         threading.Thread(target=self._update_worker, daemon=True).start()
 
     def _update_worker(self):
         from update_checker import check_for_update
-        release = check_for_update()
-        if not release:
-            return
-        if self.load_config().get("skipped_update_tag") == release["tag"]:
-            return
+        try:
+            release = check_for_update()
+        except Exception:
+            release = None
         self._update_q.put(release)
 
     def _update_poll(self):
         try:
             release = self._update_q.get_nowait()
-            self._show_update_dialog(release)
-            self._update_timer.stop()
         except queue.Empty:
-            pass
+            return
+        # check_for_update returns None when up to date, offline, or running
+        # from source. Offline must not clear a badge we already earned.
+        if release or not self._update_badge.has_update():
+            self._update_badge.set_release(release)
+
+    def _on_update_badge_clicked(self):
+        release = self._update_badge.release()
+        if release:
+            self._show_update_dialog(release)
+        else:
+            self._run_update_check()
 
     def _show_update_dialog(self, release: dict):
         from gui_dialogs import UpdateDialog
         dlg = UpdateDialog(release, self)
         dlg.exec()
+
+    # ── Overlay placement ────────────────────────────────────
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reposition_badge()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._reposition_badge()
+
+    def _reposition_badge(self):
+        badge = getattr(self, "_update_badge", None)
+        if badge is not None:
+            badge.reposition()
 
     def closeEvent(self, event):
         for panel in (
@@ -410,6 +454,29 @@ class MainWindow(QMainWindow):
         os._exit(0)
 
 
+def _claim_app_mutex():
+    """Hold the named mutex the Inno installer looks for via AppMutex.
+
+    Without this the installer cannot tell the app is running, so it neither
+    closes it nor waits for it, and silently fails to overwrite the locked .exe.
+    Returns the handle (which must stay referenced) or None off Windows.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        from config import APP_MUTEX_NAME
+        # restype must be set: the default c_int truncates a 64-bit HANDLE, which
+        # yields a handle that cannot be closed or checked.
+        create = ctypes.windll.kernel32.CreateMutexW
+        create.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+        create.restype = wintypes.HANDLE
+        return create(None, False, APP_MUTEX_NAME)
+    except Exception:
+        return None
+
+
 if __name__ == "__main__":
     if sys.platform == "win32" and sys.stdout is not None:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -426,6 +493,11 @@ if __name__ == "__main__":
             app.quit()
             del app
             os.execv(sys.executable, [sys.executable] + sys.argv)
+    # Claimed after the HiDPI re-exec above so the handle belongs to the process
+    # that actually sticks around. Held for the lifetime of the app: the
+    # installer's AppMutex check is how it knows we are running.
+    _app_mutex = _claim_app_mutex()
+
     app.setStyleSheet(gui_styles.get_stylesheet())
     win = MainWindow()
     win.show()

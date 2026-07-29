@@ -19,76 +19,137 @@ def _make_pixmap(size: int, draw_fn, color: str) -> QPixmap:
                      Qt.TransformationMode.SmoothTransformation)
 
 
-def _checker(p, s, c):
-    pen = QPen(c, 1.8); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
-    r = s * 0.28
-    cx = s / 2
-    cy = s / 2
-    p.drawEllipse(QRectF(cx - r - 2, cy - r, r * 2, r * 2))
-    p.drawEllipse(QRectF(cx - r + 2, cy - r, r * 2, r * 2))
-
-
-def _collect(p, s, c):
-    pen = QPen(c, 1.8); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
-    w = s * 0.65; h = s * 0.14
-    for i, yo in enumerate([0, s * 0.23, s * 0.46]):
-        x = (s - w) / 2 + i * 1.5
-        y = s * 0.18 + yo
-        path = QPainterPath()
-        path.addRoundedRect(QRectF(x, y, w - i * 1.5, h), 2, 2)
-        p.drawPath(path)
-
-
-def _restyle(p, s, c):
-    pen = QPen(c, 2.2); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawLine(QPointF(s * 0.2, s * 0.8), QPointF(s * 0.72, s * 0.28))
-    sq = s * 0.13
-    p.setBrush(QBrush(c)); p.setPen(Qt.PenStyle.NoPen)
-    p.drawRect(QRectF(s * 0.72 - sq / 2, s * 0.28 - sq / 2, sq, sq))
-
-
-def _kaltura(p, s, c):
-    pen = QPen(c, 1.8)
+def _stroke(p, c, w=1.7):
+    """Shared stroke setup — every glyph uses the same weight and joins."""
+    pen = QPen(c, w)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     p.setPen(pen)
     p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawRoundedRect(QRectF(s * 0.1, s * 0.2, s * 0.8, s * 0.6), 3, 3)
-    p.setBrush(QBrush(c))
+
+
+def _checker(p, s, c):
+    """Page with a folded corner plus a tick — content verified."""
+    _stroke(p, c)
+    doc = QPainterPath()
+    doc.moveTo(QPointF(s * 0.18, s * 0.10))
+    doc.lineTo(QPointF(s * 0.55, s * 0.10))
+    doc.lineTo(QPointF(s * 0.74, s * 0.29))
+    doc.lineTo(QPointF(s * 0.74, s * 0.60))
+    doc.lineTo(QPointF(s * 0.18, s * 0.60))
+    doc.closeSubpath()
+    p.drawPath(doc)
+    fold = QPainterPath()
+    fold.moveTo(QPointF(s * 0.55, s * 0.10))
+    fold.lineTo(QPointF(s * 0.55, s * 0.29))
+    fold.lineTo(QPointF(s * 0.74, s * 0.29))
+    p.drawPath(fold)
+    tick = QPainterPath()
+    tick.moveTo(QPointF(s * 0.38, s * 0.74))
+    tick.lineTo(QPointF(s * 0.54, s * 0.90))
+    tick.lineTo(QPointF(s * 0.90, s * 0.54))
+    _stroke(p, c, 2.1)
+    p.drawPath(tick)
+
+
+def _collect(p, s, c):
+    """Two sheets folding down into one wider page."""
+    _stroke(p, c)
+    p.drawRoundedRect(QRectF(s * 0.14, s * 0.10, s * 0.44, s * 0.16), 2, 2)
+    p.drawRoundedRect(QRectF(s * 0.14, s * 0.34, s * 0.44, s * 0.16), 2, 2)
+    p.drawRoundedRect(QRectF(s * 0.14, s * 0.62, s * 0.72, s * 0.28), 3, 3)
+    _stroke(p, c, 1.9)
+    p.drawLine(QPointF(s * 0.76, s * 0.14), QPointF(s * 0.76, s * 0.44))
+    head = QPainterPath()
+    head.moveTo(QPointF(s * 0.66, s * 0.34))
+    head.lineTo(QPointF(s * 0.76, s * 0.46))
+    head.lineTo(QPointF(s * 0.86, s * 0.34))
+    p.drawPath(head)
+
+
+def _spark(p, cx, cy, r):
+    path = QPainterPath()
+    path.moveTo(QPointF(cx, cy - r))
+    path.quadTo(QPointF(cx + r * 0.2, cy - r * 0.2), QPointF(cx + r, cy))
+    path.quadTo(QPointF(cx + r * 0.2, cy + r * 0.2), QPointF(cx, cy + r))
+    path.quadTo(QPointF(cx - r * 0.2, cy + r * 0.2), QPointF(cx - r, cy))
+    path.quadTo(QPointF(cx - r * 0.2, cy - r * 0.2), QPointF(cx, cy - r))
+    p.drawPath(path)
+
+
+def _restyle(p, s, c):
+    """Wand and sparkles — an AI restyle."""
+    _stroke(p, c, 2.0)
+    p.drawLine(QPointF(s * 0.14, s * 0.88), QPointF(s * 0.58, s * 0.44))
     p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(c))
+    _spark(p, s * 0.72, s * 0.28, s * 0.21)
+    _spark(p, s * 0.38, s * 0.18, s * 0.11)
+    _spark(p, s * 0.88, s * 0.64, s * 0.10)
+
+
+def _check(p, s, c):
+    """Tick for QCheckBox::indicator:checked, which otherwise has no glyph."""
+    _stroke(p, c, 2.4)
+    path = QPainterPath()
+    path.moveTo(QPointF(s * 0.20, s * 0.52))
+    path.lineTo(QPointF(s * 0.42, s * 0.74))
+    path.lineTo(QPointF(s * 0.80, s * 0.26))
+    p.drawPath(path)
+
+
+def _kaltura(p, s, c):
+    """Film frame with sprocket holes and a play head."""
+    _stroke(p, c)
+    p.drawRoundedRect(QRectF(s * 0.10, s * 0.22, s * 0.80, s * 0.56), 3, 3)
+    p.drawLine(QPointF(s * 0.10, s * 0.36), QPointF(s * 0.23, s * 0.36))
+    p.drawLine(QPointF(s * 0.10, s * 0.64), QPointF(s * 0.23, s * 0.64))
+    p.drawLine(QPointF(s * 0.77, s * 0.36), QPointF(s * 0.90, s * 0.36))
+    p.drawLine(QPointF(s * 0.77, s * 0.64), QPointF(s * 0.90, s * 0.64))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(c))
     p.drawPolygon(QPolygonF([
-        QPointF(s * 0.38, s * 0.35),
-        QPointF(s * 0.38, s * 0.65),
-        QPointF(s * 0.68, s * 0.50),
+        QPointF(s * 0.42, s * 0.38),
+        QPointF(s * 0.42, s * 0.62),
+        QPointF(s * 0.64, s * 0.50),
     ]))
 
 
 def _h5p(p, s, c):
-    pen = QPen(c, 1.8)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    p.setPen(pen)
-    p.setBrush(Qt.BrushStyle.NoBrush)
+    """Puzzle piece — the shape already associated with H5P."""
+    _stroke(p, c)
     path = QPainterPath()
-    path.addRoundedRect(QRectF(s * 0.15, s * 0.15, s * 0.7, s * 0.7), 3, 3)
-    bump = s * 0.14
-    path.addEllipse(QRectF(s / 2 - bump / 2, s * 0.15 - bump / 2, bump, bump))
+    path.moveTo(QPointF(s * 0.14, s * 0.32))
+    path.lineTo(QPointF(s * 0.38, s * 0.32))
+    path.cubicTo(QPointF(s * 0.32, s * 0.12), QPointF(s * 0.64, s * 0.12),
+                 QPointF(s * 0.58, s * 0.32))
+    path.lineTo(QPointF(s * 0.84, s * 0.32))
+    path.lineTo(QPointF(s * 0.84, s * 0.56))
+    path.cubicTo(QPointF(s * 0.98, s * 0.50), QPointF(s * 0.98, s * 0.76),
+                 QPointF(s * 0.84, s * 0.70))
+    path.lineTo(QPointF(s * 0.84, s * 0.88))
+    path.lineTo(QPointF(s * 0.14, s * 0.88))
+    path.closeSubpath()
     p.drawPath(path)
 
 
 def _settings(p, s, c):
-    p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(c))
+    """Gear with a real centre hole — the old solid star blurred into a blob."""
     cx, cy = s / 2, s / 2
-    outer, inner = s * 0.38, s * 0.17
+    outer, inner = s * 0.40, s * 0.27
     pts = []
     for i in range(16):
         angle = math.radians(i * 22.5 - 90)
         r = outer if i % 2 == 0 else inner
         pts.append(QPointF(cx + r * math.cos(angle), cy + r * math.sin(angle)))
-    p.drawPolygon(QPolygonF(pts))
+    ring = QPainterPath()
+    ring.addPolygon(QPolygonF(pts))
+    ring.closeSubpath()
+    hole = QPainterPath()
+    hole.addEllipse(QRectF(cx - s * 0.13, cy - s * 0.13, s * 0.26, s * 0.26))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(c))
+    p.drawPath(ring.subtracted(hole))
 
 
 def _run(p, s, c):
@@ -139,11 +200,40 @@ def _running(p, s, c):
     p.drawArc(QRectF(m, m, s - 2 * m, s - 2 * m), 90 * 16, -270 * 16)
 
 
+def _update(p, s, c):
+    """Arrow descending into a tray — the universal 'update is ready'.
+
+    Same 1.8px round-capped stroke as the sidebar glyphs so it does not read as
+    a foreign element when parked in the corner of the window.
+    """
+    pen = QPen(c, 1.8)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+
+    cx = s / 2
+    p.drawLine(QPointF(cx, s * 0.14), QPointF(cx, s * 0.58))
+    head = QPainterPath()
+    head.moveTo(QPointF(cx - s * 0.17, s * 0.39))
+    head.lineTo(QPointF(cx, s * 0.58))
+    head.lineTo(QPointF(cx + s * 0.17, s * 0.39))
+    p.drawPath(head)
+
+    tray = QPainterPath()
+    tray.moveTo(QPointF(s * 0.20, s * 0.66))
+    tray.lineTo(QPointF(s * 0.20, s * 0.84))
+    tray.lineTo(QPointF(s * 0.80, s * 0.84))
+    tray.lineTo(QPointF(s * 0.80, s * 0.66))
+    p.drawPath(tray)
+
+
 _FNS = {
     "checker": _checker, "collect": _collect, "restyle": _restyle,
     "kaltura": _kaltura, "h5p": _h5p,
     "settings": _settings, "run": _run, "next": _next_arrow,
     "done": _done, "locked": _locked, "running": _running,
+    "update": _update, "check": _check,
 }
 
 
@@ -153,3 +243,19 @@ def make_pixmap(name: str, color: str, size: int = 16) -> QPixmap:
 
 def make_icon(name: str, color: str, size: int = 16) -> QIcon:
     return QIcon(make_pixmap(name, color, size))
+
+
+def write_png(name: str, color: str, size: int, path) -> bool:
+    """Render a glyph to a PNG on disk.
+
+    Qt stylesheets can only reference images by URL, so a QSS-driven glyph (the
+    checkbox tick) has to exist as a file. Drawing it here keeps it in the same
+    QPainter set as everything else instead of shipping a separate asset.
+    """
+    try:
+        from pathlib import Path
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return make_pixmap(name, color, size).save(str(path), "PNG")
+    except Exception:
+        return False
