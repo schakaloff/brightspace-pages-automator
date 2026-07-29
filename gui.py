@@ -22,7 +22,7 @@ import gui_styles
 from gui_sidebar import Sidebar, StepButton
 from gui_icons import make_icon
 
-VERSION = "0.8.3"
+VERSION = "0.8.4"
 _CONFIG_PATH = Path(__file__).parent / "user_config.json"
 
 
