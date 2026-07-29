@@ -1304,6 +1304,7 @@ class UnitCollector:
                 return False
 
             await self._paste_html(page, styled_html)
+            await page.wait_for_timeout(1500)
             if not await self._close_source_dialog(page):
                 return False
             return await self._save_and_close(page)
