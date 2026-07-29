@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QWidget, QCheckBox, QSpinBox,
-    QFrame,
+    QFrame, QProgressBar,
 )
 from PySide6.QtCore import Qt, QTimer, Signal
 
@@ -274,14 +274,13 @@ class UpdateDialog(QDialog):
     """Offers the update and, on accept, installs it and closes the app.
 
     The download runs on a worker thread, so every hand-off back to the GUI goes
-    through these signals. QTimer.singleShot cannot be used from a plain
-    threading.Thread: the timer is created in the calling thread, which has no
-    Qt event loop, so it never fires — not even with a 0ms delay. That silently
-    broke the whole update flow (status never advanced, the app never closed,
-    and the installer could not replace the running .exe).
+    through these signals. The actual installer is launched by a detached helper
+    that waits for this app to exit first; starting Setup while AppMutex is still
+    held can make silent updates exit without replacing anything.
     """
 
     _status_changed = Signal(str)
+    _progress_changed = Signal(int)
     _install_started = Signal()
     _install_failed = Signal(str)
 
@@ -298,6 +297,7 @@ class UpdateDialog(QDialog):
 
         # Queued across the thread boundary by Qt, unlike QTimer.singleShot.
         self._status_changed.connect(self._on_status_changed)
+        self._progress_changed.connect(self._on_progress_changed)
         self._install_started.connect(self._on_install_started)
         self._install_failed.connect(self._on_install_failed)
 
@@ -326,6 +326,22 @@ class UpdateDialog(QDialog):
         warning.setWordWrap(True)
         warning.setStyleSheet("font-size:11px; color:#ffd75e;")
         layout.addWidget(warning)
+
+        # Hidden until Restart & Update is pressed — then it is the primary
+        # "something is happening" indicator. Percent mode while downloading,
+        # indeterminate sweep while the installer takes over (no percent there).
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        self._progress.setTextVisible(True)
+        self._progress.setFixedHeight(16)
+        self._progress.setStyleSheet(
+            "QProgressBar { background:#1c2530; border:1px solid #2c3947;"
+            "  border-radius:8px; font-size:10px; color:#e6edf3; text-align:center; }"
+            "QProgressBar::chunk { background:#0ea5e9; border-radius:7px; }"
+        )
+        self._progress.hide()
+        layout.addWidget(self._progress)
 
         self._status_lbl = QLabel("")
         self._status_lbl.setProperty("role", "dim")
@@ -363,6 +379,9 @@ class UpdateDialog(QDialog):
 
         self._update_btn.setEnabled(False)
         self._update_btn.setText("Updating…")
+        self._status_lbl.setText("Preparing update…")
+        self._progress.setRange(0, 0)
+        self._progress.show()
         threading.Thread(target=self._run_update, daemon=True).start()
 
     def _run_update(self):
@@ -375,26 +394,20 @@ class UpdateDialog(QDialog):
             installer_path = tmp_dir / release["asset_name"]
 
             self._status_changed.emit("Downloading update…")
+            def _on_pct(pct):
+                self._progress_changed.emit(pct)
+                self._status_changed.emit(f"Downloading update… {pct}%")
             download_asset(
                 release["asset_url"], installer_path,
-                progress_cb=lambda pct: self._status_changed.emit(
-                    f"Downloading update… {pct}%"
-                ),
+                progress_cb=_on_pct,
             )
+            # Servers that omit Content-Length never call progress_cb — make
+            # sure the bar still reflects a finished download.
+            self._progress_changed.emit(100)
 
-            self._status_changed.emit("Installing…")
-            import subprocess
-            # The app must exit before Setup can overwrite its own .exe. We close
-            # ourselves once this returns; AppMutex + CLOSEAPPLICATIONS are the
-            # backstop, and /RELAUNCH=yes is what reopens us afterwards.
-            from config import RELAUNCH_SWITCH
-            subprocess.Popen(
-                [
-                    str(installer_path), "/SILENT", "/SUPPRESSMSGBOXES",
-                    "/CLOSEAPPLICATIONS", "/NORESTART", RELAUNCH_SWITCH,
-                ],
-                close_fds=True,
-            )
+            self._status_changed.emit("Closing app to install…")
+            from update_installer import launch_after_current_process_exits
+            launch_after_current_process_exits(installer_path)
             self._install_started.emit()
         except Exception as e:
             self._install_failed.emit(str(e))
@@ -403,6 +416,13 @@ class UpdateDialog(QDialog):
 
     def _on_status_changed(self, text: str):
         self._status_lbl.setText(text)
+        if text.startswith("Closing"):
+            self._progress.setRange(0, 0)
+
+    def _on_progress_changed(self, pct: int):
+        if self._progress.maximum() == 0:
+            self._progress.setRange(0, 100)
+        self._progress.setValue(pct)
 
     def _on_install_started(self):
         self._status_lbl.setText("Closing to finish the update…")
@@ -413,6 +433,9 @@ class UpdateDialog(QDialog):
 
     def _on_install_failed(self, message: str):
         self._status_lbl.setText(f"⚠  Update failed: {message}")
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        self._progress.hide()
         self._update_btn.setEnabled(True)
         self._update_btn.setText("Restart && Update")
 
