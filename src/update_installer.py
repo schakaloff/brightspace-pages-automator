@@ -91,9 +91,14 @@ def launch_after_current_process_exits(installer_path: Path) -> None:
 
     relaunch_path = Path(sys.executable) if getattr(sys, "frozen", False) else None
     helper_path = Path(tempfile.gettempdir()) / f"BrightspacePagesAutomator-update-{os.getpid()}.cmd"
+    # newline="" is required: the script already joins its lines with \r\n, and
+    # the default translation would turn every one of those into \r\r\n. cmd.exe
+    # mis-parses the multi-line if/goto block that results, so the helper spins
+    # in its wait loop forever and Setup is never launched.
     helper_path.write_text(
         wait_then_install_script(installer_path, os.getpid(), relaunch_path),
         encoding="utf-8",
+        newline="",
     )
 
     creationflags = 0
