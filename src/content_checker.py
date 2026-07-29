@@ -175,6 +175,56 @@ _JS_MOODLE_ITEMS = """() => {
         modtype_h5pactivity:  'EXTERNAL',
     };
 
+    // Moodle appends a screen-reader-only activity-type word to the link text
+    // ("EA 113 Course Outline<span class=accesshide> File</span>"). Those words
+    // are what leaked out as item names when the real name could not be found —
+    // a whole course scraping as "Subsection" is that failure, not real data.
+    const TYPE_WORDS = new Set([
+        'file', 'subsection', 'assignment', 'quiz', 'url', 'page', 'book',
+        'forum', 'folder', 'label', 'text and media area', 'external tool',
+        'h5p', 'zoom meeting', 'attendance', 'feedback', 'choice', 'glossary',
+        'lesson', 'wiki', 'workshop', 'survey', 'scorm package', 'database',
+    ]);
+
+    // Only look at nodes belonging to THIS activity. Moodle 4.5+ nests activities
+    // inside subsection wrappers, so an unscoped querySelector can walk into a
+    // child activity — or grab the wrapper's own link — and return its text.
+    function ownQuery(activity, selector) {
+        for (const el of activity.querySelectorAll(selector)) {
+            if (el.closest('li.activity') === activity) return el;
+        }
+        return null;
+    }
+
+    // textContent minus screen-reader-only nodes.
+    function visibleText(el) {
+        const clone = el.cloneNode(true);
+        clone.querySelectorAll('.accesshide, .visually-hidden, .sr-only, .hidden')
+             .forEach(n => n.remove());
+        return clone.textContent.replace(/\\s+/g, ' ').trim();
+    }
+
+    function activityName(activity) {
+        const candidates = [];
+        const nameEl = ownQuery(activity, '.instancename')
+                    || ownQuery(activity, '.activityname a')
+                    || ownQuery(activity, 'a.aalink, a.stretched-link')
+                    || ownQuery(activity, 'a');
+        if (nameEl) candidates.push(visibleText(nameEl));
+
+        // Fallbacks for when the visible name is empty or is only a type word.
+        const anchor = ownQuery(activity, 'a');
+        if (anchor) {
+            candidates.push((anchor.getAttribute('aria-label') || '').trim());
+            candidates.push((anchor.getAttribute('title') || '').trim());
+        }
+
+        for (const c of candidates) {
+            if (c && c.length > 1 && !TYPE_WORDS.has(c.toLowerCase())) return c;
+        }
+        return null;
+    }
+
     function labelInfo(activity) {
         const body = activity.querySelector(
             '.contentafterlink, .description, .no-overflow, .labelcontent, .activitybody'
@@ -229,14 +279,13 @@ _JS_MOODLE_ITEMS = """() => {
             const matched = cls.find(c => TYPES[c]);
             if (!matched) return;
             let type = TYPES[matched];
-            const anchor = activity.querySelector('a');
+            const anchor = ownQuery(activity, 'a');
             let name, href = anchor ? anchor.href : '';
             if (matched === 'modtype_label') {
                 const info = labelInfo(activity);
                 type = info.type; name = info.name;
             } else {
-                const nameEl = activity.querySelector('.instancename, .activityname a, a');
-                name = nameEl ? nameEl.textContent.trim().replace(/\\s{2,}.*$/, '').trim() : '(unnamed)';
+                name = activityName(activity) || '(unnamed)';
             }
             result.push({ type, name, href, hint: matched });
         });
