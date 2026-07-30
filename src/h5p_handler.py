@@ -390,6 +390,100 @@ class H5PHandler:
             await tab.wait_for_timeout(1000)
         return None
 
+    # The content list is server-rendered and paginated (default 50 per page),
+    # so querying the DOM once only ever sees page 1. Verified live 2026-07-30:
+    # 50 rows on page 1, 14 on page 2, 11 titles reachable only from page 2 —
+    # every one of those read as "not in cloud" and got re-uploaded.
+    # Page 1 is a <span class="page-link">; other pages are real <a> links.
+    _COLLECT_TITLES_JS = """() => {
+        function clean(el) {
+            return (el.textContent || '').replace(/\\s+/g, ' ').trim();
+        }
+        var titles = [];
+        // a.fable-title is the only clean title node; .content-title glues the
+        // content type on, and td a also returns Clone/Move/Delete links.
+        var links = document.querySelectorAll('tr.content-item a.fable-title');
+        if (!links.length) links = document.querySelectorAll('a.fable-title');
+        for (var i = 0; i < links.length; i++) {
+            var t = clean(links[i]);
+            if (t) titles.push(t);
+        }
+        var hrefs = [];
+        var pages = document.querySelectorAll('ul.pagination a.page-link[href*="page="]');
+        for (var j = 0; j < pages.length; j++) {
+            var h = pages[j].href;
+            if (h && hrefs.indexOf(h) === -1) hrefs.push(h);
+        }
+        return {
+            titles: titles,
+            pageHrefs: hrefs,
+            rowCount: document.querySelectorAll('tr.content-item').length
+        };
+    }"""
+
+    async def _collect_cloud_titles(self, tab, h5p_frame, max_pages: int = 20) -> list:
+        """Every title in the H5P cloud library, walking all pager pages.
+
+        Returns the frame to the page it started on so the caller can keep using
+        it for uploads.
+        """
+        start_url = h5p_frame.url
+        titles: list = []
+        seen: set = set()
+        visited: set = {start_url}
+        pending: list = []
+        pages = 0
+
+        while pages < max_pages:
+            data = await h5p_frame.evaluate(self._COLLECT_TITLES_JS)
+            pages += 1
+            page_titles = (data or {}).get("titles") or []
+            new = 0
+            for title in page_titles:
+                key = re.sub(r'\s+', ' ', title).strip().lower()
+                if key and key not in seen:
+                    seen.add(key)
+                    titles.append(title)
+                    new += 1
+            self.log(
+                f"    page {pages}: {(data or {}).get('rowCount', 0)} row(s), "
+                f"{len(page_titles)} title(s), {new} new",
+                "dim",
+            )
+
+            for href in (data or {}).get("pageHrefs") or []:
+                if href not in visited and href not in pending:
+                    pending.append(href)
+            if not pending:
+                break
+
+            next_url = pending.pop(0)
+            visited.add(next_url)
+            try:
+                await h5p_frame.goto(next_url, timeout=15000)
+                await tab.wait_for_timeout(1500)
+            except Exception as e:
+                self.log(
+                    f"    ⚠ Could not open {next_url[:80]}: {str(e).splitlines()[0]}",
+                    "warning",
+                )
+                break
+
+        if pages >= max_pages and pending:
+            self.log(
+                f"    ⚠ Stopped after {max_pages} pages — some cloud titles not scanned.",
+                "warning",
+            )
+
+        if h5p_frame.url != start_url:
+            try:
+                await h5p_frame.goto(start_url, timeout=15000)
+                await tab.wait_for_timeout(1000)
+            except Exception as e:
+                self.log(f"    ⚠ Could not return to page 1: {e}", "warning")
+
+        return titles
+
     async def _click_when_ready(self, owner, selector: str, label: str, timeout: int = 10000) -> bool:
         """Click a locator after visible/enabled checks, with enough context to debug timeouts."""
         url = getattr(owner, "url", "") or ""
@@ -432,6 +526,58 @@ class H5PHandler:
                 "error",
             )
             return False
+
+    async def _native_click_in_frames(self, tab, selector: str, label: str) -> bool:
+        """Trusted click on the first frame containing `selector`.
+
+        D2L dropdowns (Create New) don't open from a JS .click() on the inner
+        shadow button — that skips the browser's focus/pointer machinery, so the
+        tile chooser never renders and the caller reports "Page tile not found".
+        Playwright's CSS engine pierces open shadow roots, and its click fires
+        real events. Callers keep the JS click as a fallback.
+        """
+        for frame in tab.frames:
+            try:
+                loc = frame.locator(selector).first
+                if not await frame.locator(selector).count():
+                    continue
+                await loc.wait_for(state="visible", timeout=3000)
+                await loc.click(timeout=5000)
+                self.log(f"  ✓ {label}: native click", "dim")
+                return True
+            except Exception:
+                # Element present but unclickable (covered/animating) — try a
+                # real mouse press at its centre before giving up on this frame.
+                try:
+                    box = await frame.locator(selector).first.bounding_box()
+                    if box:
+                        await tab.mouse.click(
+                            box["x"] + box["width"] / 2,
+                            box["y"] + box["height"] / 2,
+                        )
+                        self.log(f"  ✓ {label}: mouse click", "dim")
+                        return True
+                except Exception:
+                    pass
+        return False
+
+    async def _tile_chooser_open(self, tab) -> bool:
+        """True once the Create New chooser has actually rendered its tiles.
+
+        Clicking Create New is not the same as the dropdown opening: a JS click
+        skips the browser's focus machinery, and a Playwright click can dispatch
+        cleanly yet still leave the menu shut. Both have been observed live, in
+        opposite runs, so the only trustworthy signal is the tiles themselves.
+        """
+        df = self._DEEP_FIND_JS
+        return await self._eval_in_any_frame(tab, f"""() => {{
+            {df}
+            return !!deepFind(document, function(e) {{
+                return (e.tagName || '').toUpperCase() === 'A'
+                    && e.classList && e.classList.contains('add-material-tile')
+                    && (e.getAttribute('href') || '').includes('loadActivity/file/');
+            }});
+        }}""")
 
     async def _recover_list(self, tab, h5p_frame, list_url: str) -> None:
         """After a failed upload, get back to a live content list so the next
@@ -1067,29 +1213,53 @@ class H5PHandler:
         # Poll instead of single-shot: D2L renders these lazily and a fixed
         # 2s sleep intermittently misses them ("Page tile not found").
         create_ok = False
-        for _ in range(15):
-            create_ok = await self._eval_in_any_frame(tab, f"""() => {{
-                {df}
-                var btn = deepFind(document, function(e) {{
-                    var tag = (e.tagName || '').toUpperCase();
-                    if (tag !== 'D2L-BUTTON') return false;
-                    return (e.classList && e.classList.contains('create-new-btn'))
-                        || ((e.getAttribute && e.getAttribute('aria-label') || '').includes('Create New'));
-                }});
-                if (!btn) return false;
-                var inner = btn.shadowRoot ? btn.shadowRoot.querySelector('button') : null;
-                (inner || btn).click(); return true;
-            }}""")
-            if create_ok:
+        create_js = f"""() => {{
+            {df}
+            var btn = deepFind(document, function(e) {{
+                var tag = (e.tagName || '').toUpperCase();
+                if (tag !== 'D2L-BUTTON') return false;
+                return (e.classList && e.classList.contains('create-new-btn'))
+                    || ((e.getAttribute && e.getAttribute('aria-label') || '').includes('Create New'));
+            }});
+            if (!btn) return false;
+            var inner = btn.shadowRoot ? btn.shadowRoot.querySelector('button') : null;
+            (inner || btn).click(); return true;
+        }}"""
+
+        # Loop on the observable effect (tiles rendered), not on "a click was
+        # dispatched" — both click styles have been seen to dispatch fine and
+        # still leave the dropdown shut. Alternate methods so a no-op style
+        # can't monopolise every attempt.
+        for attempt in range(15):
+            if await self._tile_chooser_open(tab):
+                create_ok = True
                 break
-            await tab.wait_for_timeout(1000)
+            if attempt % 2 == 0:
+                clicked = await self._native_click_in_frames(
+                    tab, 'd2l-button.create-new-btn', "Create New"
+                )
+                style = "native"
+            else:
+                clicked = await self._eval_in_any_frame(tab, create_js)
+                style = "JS"
+            self.log(
+                f"  → Create New attempt {attempt + 1}/15 ({style}): "
+                f"{'clicked' if clicked else 'button not found'}",
+                "dim",
+            )
+            await tab.wait_for_timeout(1200)
         if not create_ok:
-            self.log("  ✗ Create New button not found", "error")
+            self.log("  ✗ Create New chooser never opened", "error")
             return None
-        await tab.wait_for_timeout(2000)
+        self.log("  ✓ Create New chooser is open", "dim")
 
         tile_ok = False
         for _ in range(15):
+            tile_ok = await self._native_click_in_frames(
+                tab, 'a.add-material-tile[href*="loadActivity/file/"]', "Page tile"
+            )
+            if tile_ok:
+                break
             tile_ok = await self._eval_in_any_frame(tab, f"""() => {{
                 {df}
                 var el = deepFind(document, function(e) {{
@@ -1101,6 +1271,7 @@ class H5PHandler:
                 el.click(); return true;
             }}""")
             if tile_ok:
+                self.log("  ✓ Page tile: JS fallback click", "dim")
                 break
             await tab.wait_for_timeout(1000)
         if not tile_ok:
@@ -1337,42 +1508,13 @@ class H5PHandler:
                     self.log("  ✗ Could not open H5P content list for upload phase", "error")
                     return
 
-                # Bulk-scan the entire content list once — no per-item navigation needed.
+                # Bulk-scan the whole library once, all pager pages included —
+                # no per-item navigation needed.
                 cloud_titles = []
                 try:
-                    cloud_scan = await h5p_frame.evaluate("""() => {
-                        var rows = Array.from(document.querySelectorAll('tr.content-item'));
-                        var titles = [];
-                        var seen = {};
-                        function addTitle(el) {
-                            if (!el) return;
-                            var txt = (el.textContent || '').replace(/\\s+/g, ' ').trim();
-                            if (!txt) return;
-                            var low = txt.toLowerCase();
-                            if (low === 'add content' || low === 'insert' || low === 'edit') return;
-                            if (!seen[low]) {
-                                seen[low] = true;
-                                titles.push(txt);
-                            }
-                        }
-                        for (var i = 0; i < rows.length; i++) {
-                            var links = rows[i].querySelectorAll(
-                                'a.fable-title, .content-title, td a, a[href*="/content/"]'
-                            );
-                            for (var j = 0; j < links.length; j++) addTitle(links[j]);
-                        }
-                        if (!titles.length) {
-                            var fallback = document.querySelectorAll(
-                                'a.fable-title, .content-title, tr.content-item td a, a[href*="/content/"]'
-                            );
-                            for (var k = 0; k < fallback.length; k++) addTitle(fallback[k]);
-                        }
-                        return { rowCount: rows.length, titleCount: titles.length, titles: titles };
-                    }""")
-                    cloud_titles = cloud_scan.get("titles") or []
+                    cloud_titles = await self._collect_cloud_titles(upload_tab, h5p_frame)
                     self.log(
-                        f"  H5P cloud scan: {cloud_scan.get('rowCount', 0)} row(s), "
-                        f"{len(cloud_titles)} title(s)",
+                        f"  H5P cloud scan: {len(cloud_titles)} title(s) across all pages",
                         "dim",
                     )
                     if cloud_titles:
