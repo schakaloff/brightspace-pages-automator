@@ -62,7 +62,7 @@ class H5PHandler:
         for idx, item in enumerate(h5p_items, 1):
             name      = item["name"]
             url       = item["href"]
-            safe_name = re.sub(r'[^\w\s\-]', '', name).strip()[:80]
+            safe_name = self._sanitize_name(name)
             save_path = save_dir / f"{safe_name}.h5p"
 
             self.log(f"  [{idx}/{len(h5p_items)}] Preparing H5P download: {name}", "step")
@@ -421,6 +421,120 @@ class H5PHandler:
         };
     }"""
 
+    # find_list_frame returns as soon as ONE row exists — a readiness signal,
+    # not a completeness one. Scanning right then has been observed live
+    # capturing 10 or 14 of 50 rows with the pager not yet in the DOM, which
+    # makes a 2-page library look like a 1-page one. Wait for the row count to
+    # stop changing (or the pager to appear) before trusting the page.
+    _SETTLE_PROBE_JS = """() => {  /* SETTLE_PROBE */
+        return {
+            rowCount: document.querySelectorAll('tr.content-item').length,
+            pagerCount: document.querySelectorAll(
+                'ul.pagination a.page-link[href*="page="]'
+            ).length
+        };
+    }"""
+
+    async def _wait_for_list_settled(self, tab, h5p_frame, attempts: int = 20,
+                                     stable_for: int = 3) -> int:
+        """Block until the content list stops growing. Returns the final row count."""
+        last = -1
+        stable = 0
+        rows = 0
+        for attempt in range(attempts):
+            try:
+                probe = await h5p_frame.evaluate(self._SETTLE_PROBE_JS)
+            except Exception as e:
+                self.log(f"    settle probe failed: {str(e).splitlines()[0]}", "dim")
+                await tab.wait_for_timeout(1000)
+                continue
+
+            rows = (probe or {}).get("rowCount", 0)
+            pager = (probe or {}).get("pagerCount", 0)
+            stable = stable + 1 if rows == last else 0
+            last = rows
+
+            # A visible pager means the page finished rendering: the list is
+            # server-rendered, so pager and rows land together.
+            if rows and (pager or stable >= stable_for):
+                self.log(
+                    f"    list settled: {rows} row(s), {pager} pager link(s) "
+                    f"after {attempt + 1} check(s)",
+                    "dim",
+                )
+                return rows
+            await tab.wait_for_timeout(1000)
+
+        self.log(
+            f"    ⚠ list never settled after {attempts} check(s); "
+            f"scanning {rows} row(s) as-is",
+            "warning",
+        )
+        return rows
+
+    @staticmethod
+    def _sanitize_name(name: str) -> str:
+        """Filesystem-safe version of a Moodle title.
+
+        For LOCAL FILENAMES ONLY — it drops '&', ':' etc., so it must never be
+        used as the cloud/display title. The original Moodle title travels
+        separately (see _moodle_h5p_maps).
+        """
+        return re.sub(r'[^\w\s\-]', '', name).strip()[:80]
+
+    @classmethod
+    def _moodle_h5p_maps(cls, moodle_items) -> tuple:
+        """Map each H5P file stem back to its Moodle section and ORIGINAL title.
+
+        Keys are the sanitised filename stems produced by enable_downloads, so a
+        downloaded file can be traced to the Moodle item it came from. Files
+        whose stem is in neither map are leftovers from another course and must
+        not be uploaded.
+        """
+        section_map: dict = {}
+        title_map: dict = {}
+        current_section = ""
+        for item in moodle_items:
+            if item["type"] == "SECTION":
+                current_section = item["name"]
+            elif item["type"] == "EXTERNAL" and (
+                "hvp" in item.get("hint", "") or "h5p" in item.get("hint", "")
+            ):
+                safe = cls._sanitize_name(item["name"])
+                section_map[safe] = current_section
+                title_map[safe] = item["name"]
+        return section_map, title_map
+
+    @staticmethod
+    def _norm_title(text: str) -> str:
+        """Normalise a title for comparison.
+
+        Local names are sanitised for use as filenames (re.sub(r'[^\\w\\s\\-]', ...)),
+        which drops '&' and ':' — so "Drag & Drop" becomes "Drag  Drop". Cloud
+        titles come from whatever was typed at upload time. Stripping the same
+        punctuation from both sides and collapsing whitespace makes the two
+        comparable.
+        """
+        cleaned = re.sub(r'[^\w\s]', ' ', text or '')
+        return re.sub(r'\s+', ' ', cleaned).strip().lower()
+
+    def _title_in_cloud(self, name: str, cloud_titles) -> str:
+        """Return the matching cloud title, or "" when the item is absent.
+
+        Full-title equality only. The old rule compared the first 25 characters
+        as a substring, which made "Mrs Goodfemur Case Study - Question 1" match
+        Questions 2&3 and 5 — those two were silently skipped and never reached
+        the cloud. Course content routinely differs only in a trailing number,
+        so a prefix rule is not safe here.
+        """
+        key = self._norm_title(name)
+        if not key:
+            return ""
+        for title in cloud_titles:
+            if self._norm_title(title) == key:
+                return title
+        return ""
+
     async def _collect_cloud_titles(self, tab, h5p_frame, max_pages: int = 20) -> list:
         """Every title in the H5P cloud library, walking all pager pages.
 
@@ -435,6 +549,7 @@ class H5PHandler:
         pages = 0
 
         while pages < max_pages:
+            await self._wait_for_list_settled(tab, h5p_frame)
             data = await h5p_frame.evaluate(self._COLLECT_TITLES_JS)
             pages += 1
             page_titles = (data or {}).get("titles") or []
@@ -599,51 +714,64 @@ class H5PHandler:
         except Exception:
             await tab.wait_for_timeout(1000)
 
+    TITLE_SELECTORS = (
+        'input.h5peditor-text[maxlength="255"]',
+        'input.h5peditor-text[name*="title"]',
+        'input[name*="title"]',
+        'input[id*="title"]',
+        'input.h5peditor-text',
+    )
+
+    async def _set_content_title(self, tab, item_name: str, attempts: int = 10) -> bool:
+        """Fill the H5P editor's title field, verifying the value stuck.
+
+        Polls: the editor renders asynchronously after "Use", so a single scan
+        right after a fixed wait can run before the field exists. Searches every
+        frame, not just h5p.com ones — the editor's inner frame is sometimes
+        about:blank/srcdoc and was being skipped entirely.
+        """
+        for attempt in range(attempts):
+            for frame in tab.frames:
+                for sel in self.TITLE_SELECTORS:
+                    try:
+                        if not await frame.locator(sel).count():
+                            continue
+                        inp = frame.locator(sel).first
+                        await inp.wait_for(state="visible", timeout=2000)
+                        await inp.click(click_count=3, timeout=3000)
+                        await inp.fill(item_name, timeout=3000)
+                        after = await inp.input_value()
+                        if (after or "").strip() == item_name.strip():
+                            self.log(
+                                f"    title set via {sel} (frame {frame.url[:50]!r})",
+                                "dim",
+                            )
+                            return True
+                        self.log(
+                            f"    title did not stick via {sel}: got {after!r}",
+                            "dim",
+                        )
+                    except Exception:
+                        continue
+            self.log(f"    … waiting for title input ({attempt + 1}/{attempts})", "dim")
+            await tab.wait_for_timeout(1500)
+
+        self.log(
+            f"    frames searched: {[f.url[:60] for f in tab.frames]}",
+            "dim",
+        )
+        return False
+
     async def upload_one(self, tab, h5p_frame, h5p_file, item_name) -> bool:
         """Upload one .h5p to H5P cloud via an already-open content list frame. Returns to list after."""
         list_url = h5p_frame.url
         try:
             # Check if already exists in cloud content list — skip if found.
-            # Re-find the live frame if the stored reference has a stale context.
-            name_key = re.sub(r'\s+', ' ', item_name).strip().lower()[:25]
-            duplicate_scan_js = f"""() => {{
-                var key = {name_key!r};
-                var rows = Array.from(document.querySelectorAll('tr.content-item'));
-                var titleCount = 0;
-                function norm(s) {{
-                    return (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                }}
-                function check(el) {{
-                    if (!el) return null;
-                    var title = norm(el.textContent);
-                    if (!title || title === 'add content' || title === 'insert' || title === 'edit') return null;
-                    titleCount++;
-                    return key && title.includes(key) ? title : null;
-                }}
-                for (var i = 0; i < rows.length; i++) {{
-                    var links = rows[i].querySelectorAll(
-                        'a.fable-title, .content-title, td a, a[href*="/content/"]'
-                    );
-                    for (var j = 0; j < links.length; j++) {{
-                        var matched = check(links[j]);
-                        if (matched) return {{ found: true, rowCount: rows.length, titleCount: titleCount, matched: matched }};
-                    }}
-                }}
-                if (!titleCount) {{
-                    var fallback = document.querySelectorAll(
-                        'a.fable-title, .content-title, tr.content-item td a, a[href*="/content/"]'
-                    );
-                    for (var k = 0; k < fallback.length; k++) {{
-                        var fallbackMatched = check(fallback[k]);
-                        if (fallbackMatched) {{
-                            return {{ found: true, rowCount: rows.length, titleCount: titleCount, matched: fallbackMatched }};
-                        }}
-                    }}
-                }}
-                return {{ found: false, rowCount: rows.length, titleCount: titleCount, matched: '' }};
-            }}"""
+            # Uses the same full-title rule as Phase A: a prefix rule made
+            # "…Question 1" swallow "…Question 2&3" and "…Question 5", which
+            # were then never uploaded at all.
             try:
-                duplicate_scan = await h5p_frame.evaluate(duplicate_scan_js)
+                cloud_titles = await self._collect_cloud_titles(tab, h5p_frame)
             except Exception as frame_err:
                 if "context was destroyed" in str(frame_err) or "Target closed" in str(frame_err):
                     h5p_frame = await self.find_list_frame(tab)
@@ -651,22 +779,23 @@ class H5PHandler:
                         self.log(f"  ✗ H5P content list frame lost — cannot upload {item_name}", "error")
                         return False
                     list_url = h5p_frame.url
-                    duplicate_scan = await h5p_frame.evaluate(duplicate_scan_js)
+                    cloud_titles = await self._collect_cloud_titles(tab, h5p_frame)
                 else:
                     raise
+
+            matched = self._title_in_cloud(item_name, cloud_titles)
             self.log(
-                f"  Duplicate check for '{item_name}': key='{name_key}', "
-                f"{duplicate_scan.get('rowCount', 0)} row(s), {duplicate_scan.get('titleCount', 0)} title(s)",
+                f"  Duplicate check for '{item_name}': {len(cloud_titles)} cloud title(s)",
                 "dim",
             )
-            if duplicate_scan.get("found"):
+            if matched:
                 self.log(
-                    f"  ✓ Already in H5P cloud: {item_name} "
-                    f"(matched='{duplicate_scan.get('matched', '')[:100]}') — skipping upload",
+                    f"  ✓ Already in H5P cloud: {item_name} (matched='{matched[:100]}') "
+                    "— skipping upload",
                     "dim",
                 )
                 return True
-            if duplicate_scan.get("titleCount", 0) == 0:
+            if not cloud_titles:
                 self.log(
                     f"  ⚠ No H5P cloud titles visible during duplicate check for {item_name}; upload may duplicate it.",
                     "warning",
@@ -764,43 +893,25 @@ class H5PHandler:
                 self.log("  → Dismissed skip/grade dialog", "dim")
                 await tab.wait_for_timeout(500)
 
-            # Set content title — search all frames for the input
+            # Set content title. This MUST succeed: Phase B finds the item in
+            # the cloud list by title, and so does the duplicate check — an
+            # untitled upload is invisible to both, so it can never be inserted
+            # and gets re-uploaded on every later run.
             self.log("  → Setting title…", "dim")
-            title_set = False
-            title_selectors = [
-                'input.h5peditor-text[maxlength="255"]',
-                'input.h5peditor-text[name*="title"]',
-                'input[name*="title"]',
-                'input[id*="title"]',
-            ]
-            self.log(f"    frames available: {[f.url[:60] for f in tab.frames]}", "dim")
-            for frame in tab.frames:
-                if "h5p.com" not in frame.url:
-                    continue
-                try:
-                    counts = []
-                    for sel in title_selectors:
-                        counts.append(f"{sel}={await frame.locator(sel).count()}")
-                    self.log(f"    frame {frame.url[:50]!r}: title candidates {', '.join(counts)}", "dim")
-                    for sel in title_selectors:
-                        if await frame.locator(sel).count() == 0:
-                            continue
-                        inp = frame.locator(sel).first
-                        await inp.wait_for(state="visible", timeout=3000)
-                        current = await inp.input_value()
-                        self.log(f"    using title selector {sel}; current value: {current!r}", "dim")
-                        await inp.click(click_count=3)
-                        await inp.fill(item_name)
-                        after = await inp.input_value()
-                        self.log(f"    title set to: {after!r}", "dim")
-                        title_set = True
-                        break
-                    if title_set:
-                        break
-                except Exception as te:
-                    self.log(f"    frame error: {te}", "dim")
+            title_set = await self._set_content_title(tab, item_name)
             if not title_set:
-                self.log("  ⚠ Title input not found — title not set", "warning")
+                self.log(
+                    f"  ✗ Title input never appeared — abandoning upload of {item_name} "
+                    "rather than saving it untitled",
+                    "error",
+                )
+                self.log(
+                    "    An untitled item cannot be found by Phase B and would be "
+                    "re-uploaded every run.",
+                    "warning",
+                )
+                await self._recover_list(tab, h5p_frame, list_url)
+                return False
 
             self.log("  → Clicking Save…", "dim")
             if not await self._click_when_ready(
@@ -833,41 +944,99 @@ class H5PHandler:
             await self._recover_list(tab, h5p_frame, list_url)
             return False
 
+    # Row titles + pager links for the CURRENT list page. a.fable-title is the
+    # only clean title node — .content-title glues the content type on, and
+    # td a also returns Clone/Move/Delete links.
+    _ROW_TITLES_JS = """() => {  /* ROW_TITLES */
+        var rows = document.querySelectorAll('tr.content-item');
+        var titles = [];
+        for (var i = 0; i < rows.length; i++) {
+            var el = rows[i].querySelector('a.fable-title');
+            titles.push(el ? (el.textContent || '').replace(/\\s+/g, ' ').trim() : '');
+        }
+        var hrefs = [];
+        var pages = document.querySelectorAll('ul.pagination a.page-link[href*="page="]');
+        for (var j = 0; j < pages.length; j++) {
+            var h = pages[j].href;
+            if (h && hrefs.indexOf(h) === -1) hrefs.push(h);
+        }
+        return { titles: titles, pageHrefs: hrefs };
+    }"""
+
+    _CLICK_ROW_INSERT_JS = """(i) => {  /* CLICK_ROW_INSERT */
+        var rows = document.querySelectorAll('tr.content-item');
+        var btn = rows[i] && rows[i].querySelector('button.lti-inserter, button');
+        if (!btn) return false;
+        btn.click();
+        return true;
+    }"""
+
+    async def _click_insert_for_title(self, tab, h5p_frame, item_name,
+                                      max_pages: int = 20) -> str:
+        """Click Insert on the row whose FULL normalised title equals item_name,
+        walking pager pages. Returns the matched cloud title, or "" if absent.
+
+        Phase B used to match on the first 25 characters as a substring, which
+        embeds "…Question 1" when asked for "…Question 23" — the wrong content,
+        on a page whose title looks right. It also only ever saw the current
+        page of a paginated list. Titles are matched in Python with the same
+        _norm_title rule as the duplicate check, then the row is clicked by
+        index.
+        """
+        key = self._norm_title(item_name)
+        if not key:
+            return ""
+        visited = {h5p_frame.url}
+        pending: list = []
+        pages = 0
+        while pages < max_pages:
+            await self._wait_for_list_settled(tab, h5p_frame)
+            data = await h5p_frame.evaluate(self._ROW_TITLES_JS) or {}
+            pages += 1
+            titles = data.get("titles") or []
+            for i, title in enumerate(titles):
+                if title and self._norm_title(title) == key:
+                    clicked = await h5p_frame.evaluate(self._CLICK_ROW_INSERT_JS, i)
+                    if clicked:
+                        return title
+                    self.log(
+                        f"    ⚠ Row for '{title[:80]}' has no insert button",
+                        "warning",
+                    )
+                    return ""
+
+            for href in data.get("pageHrefs") or []:
+                if href not in visited and href not in pending:
+                    pending.append(href)
+            if not pending:
+                return ""
+            next_url = pending.pop(0)
+            visited.add(next_url)
+            try:
+                await h5p_frame.goto(next_url, timeout=15000)
+                await tab.wait_for_timeout(1500)
+            except Exception as e:
+                self.log(
+                    f"    ⚠ Could not open {next_url[:80]}: {str(e).splitlines()[0]}",
+                    "warning",
+                )
+                return ""
+        return ""
+
     async def insert_from_list(self, tab, h5p_frame, item_name) -> bool:
         """Find item by name in H5P content list and insert into BS editor."""
         df = self._DEEP_FIND_JS
         try:
             self.log(f"  → Finding '{item_name}' in content list…", "dim")
-            name_key = item_name[:25].lower()
-            clicked = False
-            for _ in range(5):
-                try:
-                    result = await h5p_frame.evaluate(f"""() => {{
-                        var key = {name_key!r};
-                        var rows = document.querySelectorAll('tr.content-item');
-                        for (var i = 0; i < rows.length; i++) {{
-                            var el = rows[i].querySelector('a.fable-title, .content-title, td a');
-                            var title = el ? el.textContent.trim().toLowerCase() : '';
-                            if (title.includes(key)) {{
-                                var btn = rows[i].querySelector('button.lti-inserter, button');
-                                if (btn) {{ btn.click(); return title; }}
-                            }}
-                        }}
-                        var all = document.querySelectorAll('button.lti-inserter');
-                        if (all.length === 1) {{ all[0].click(); return 'only-one'; }}
-                        return null;
-                    }}""")
-                    if result:
-                        self.log(f"  ✓ Clicked Insert for: {result}", "dim")
-                        clicked = True
-                        break
-                except Exception:
-                    pass
-                await tab.wait_for_timeout(1000)
-
-            if not clicked:
-                self.log(f"  ✗ '{item_name}' not found in H5P content list", "error")
+            matched = await self._click_insert_for_title(tab, h5p_frame, item_name)
+            if not matched:
+                self.log(
+                    f"  ✗ '{item_name}' not found in H5P content list "
+                    "(exact full-title match across all pages)",
+                    "error",
+                )
                 return False
+            self.log(f"  ✓ Clicked Insert for: {matched}", "dim")
 
             # Click Insert in dialog footer (d2l-button[data-dialog-action="insert"])
             await tab.wait_for_timeout(1500)
@@ -1427,14 +1596,7 @@ class H5PHandler:
             self.log("  ⚠ No .h5p files found in downloads/h5p/ — skipping embed", "warning")
             return
 
-        section_map: dict = {}
-        current_section = ""
-        for item in moodle_items:
-            if item["type"] == "SECTION":
-                current_section = item["name"]
-            elif item["type"] == "EXTERNAL" and ("hvp" in item.get("hint", "") or "h5p" in item.get("hint", "")):
-                safe = re.sub(r'[^\w\s\-]', '', item["name"]).strip()[:80]
-                section_map[safe] = current_section
+        section_map, title_map = self._moodle_h5p_maps(moodle_items)
 
         bs_mod_map: dict = {}
         bs_mod_orig: dict = {}
@@ -1446,8 +1608,10 @@ class H5PHandler:
 
         assignments = []
         for f in h5p_files:
-            name = f.stem
-            moodle_section = section_map.get(name, "")
+            # The stem is the sanitised filename; the ORIGINAL Moodle title is
+            # what the cloud, duplicate checks, and Phase B page titles use.
+            name = title_map.get(f.stem, f.stem)
+            moodle_section = section_map.get(f.stem, "")
             bs_module_title = None
             bs_module_id = None
             if moodle_section:
@@ -1477,9 +1641,16 @@ class H5PHandler:
         this_course = [a for a in assignments if a["moodle_section"]]
         other_course = [a for a in assignments if not a["moodle_section"]]
         if other_course:
-            self.log(f"  ↷ Skipping {len(other_course)} file(s) not found in this Moodle course:", "dim")
+            # Cached leftovers from other courses must never be uploaded, and
+            # the user should SEE that they were ignored (dim lines are hidden
+            # when the GUI is not in verbose mode).
+            self.log(
+                f"  ↷ Ignoring {len(other_course)} cached file(s) not in this "
+                "Moodle course (leftovers in downloads/h5p/):",
+                "info",
+            )
             for a in other_course:
-                self.log(f"      {a['name']}", "dim")
+                self.log(f"      ignored leftover: {a['name']}", "info")
 
         phase_b_only = getattr(self, "h5p_phase_b_only", False)
 
@@ -1530,12 +1701,9 @@ class H5PHandler:
                     # Frame may not be ready yet; upload_one still has a per-item duplicate check.
 
                 def _in_cloud(name):
-                    key = re.sub(r'\s+', ' ', name).strip().lower()[:25]
-                    for title in cloud_titles:
-                        title_key = re.sub(r'\s+', ' ', title).strip().lower()
-                        if key and key in title_key:
-                            return True, key, title
-                    return False, key, None
+                    key = self._norm_title(name)
+                    matched = self._title_in_cloud(name, cloud_titles)
+                    return bool(matched), key, matched or None
 
                 to_upload = []
                 for item in this_course:
