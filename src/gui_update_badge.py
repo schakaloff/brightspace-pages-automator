@@ -39,6 +39,7 @@ class UpdateBadge(QToolButton):
         self.setAutoRaise(True)
         self.setIconSize(QSize(17, 17))
         self._release = None
+        self._diagnostics = {}
         self._accent, self._idle_color = theme_colors()
         self._refresh()
         self.clicked.connect(self._on_click)
@@ -47,6 +48,10 @@ class UpdateBadge(QToolButton):
 
     def set_release(self, release: dict | None):
         self._release = release
+        self._refresh()
+
+    def set_diagnostics(self, diagnostics: dict | None):
+        self._diagnostics = diagnostics or {}
         self._refresh()
 
     def has_update(self) -> bool:
@@ -68,12 +73,26 @@ class UpdateBadge(QToolButton):
     def _refresh(self):
         color = self._accent if self.has_update() else self._idle_color
         self.setIcon(make_icon("update", color, 17))
+        current = self._diagnostics.get("current_build", "unknown")
+        result = self._diagnostics.get("last_update_result", "No update check has run yet")
+        checked_at = self._diagnostics.get("last_update_at") or "not checked yet"
+        channel = self._diagnostics.get("update_channel", "unknown")
+        branch = self._diagnostics.get("update_branch", "unknown")
         if self.has_update():
             self.setToolTip(
-                f"Update available: {self._release.get('tag', '')}\nClick to install."
+                f"Update available: {self._release.get('tag', '')}\n"
+                f"Current: {current}\n"
+                f"Channel/branch: {channel} / {branch}\n"
+                f"Last result: {result} ({checked_at})\n"
+                "Click to install."
             )
         else:
-            self.setToolTip("You're up to date.\nClick to reinstall the latest version.")
+            self.setToolTip(
+                f"Current: {current}\n"
+                f"Channel/branch: {channel} / {branch}\n"
+                f"Last result: {result} ({checked_at})\n"
+                "Click to check and reinstall the latest version."
+            )
         self.update()
 
     # ── painting ─────────────────────────────────────────────────────────────

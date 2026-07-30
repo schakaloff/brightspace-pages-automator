@@ -41,6 +41,37 @@ def test_key_field_text_changed_emits_signal(qtbot):
     assert "new-value" in received
 
 
+def test_settings_shows_update_diagnostics(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QMainWindow
+    import update_checker
+    from gui_panels import SettingsPanel
+
+    monkeypatch.setattr(update_checker, "get_update_diagnostics", lambda: {
+        "current_version": "0.8.4",
+        "current_build": "v0.8.4-123",
+        "install_path": r"C:\Apps\BrightspacePagesAutomator",
+        "update_channel": "stable",
+        "update_branch": "main",
+        "latest_build": "v0.8.4-123",
+        "last_update_result": "Up to date",
+        "last_update_detail": "",
+        "last_update_at": "2026-07-30 12:00:00",
+        "updater_log_path": r"C:\Temp\BrightspacePagesAutomator-update.log",
+        "setup_log_path": r"C:\Temp\BrightspacePagesAutomator-setup.log",
+    })
+    mw = QMainWindow()
+    panel = SettingsPanel(mw)
+    qtbot.addWidget(panel)
+
+    text = panel._update_diag_lbl.text()
+    assert "Commit/build: v0.8.4-123" in text
+    assert "Install path: C:\\Apps\\BrightspacePagesAutomator" in text
+    assert "Update channel: stable" in text
+    assert "Update branch: main" in text
+    assert "Last update result: Up to date" in text
+    assert "Updater log: C:\\Temp\\BrightspacePagesAutomator-update.log" in text
+
+
 def test_divider_returns_frame(qtbot):
     from PySide6.QtWidgets import QFrame
     from gui_panels import _divider

@@ -62,6 +62,42 @@ class SettingsPanel(QWidget):
         layout.addSpacing(20)
 
         # ── Section 0: Appearance ─────────────────────────────────────────────
+        layout.addWidget(_form_label("APP VERSION & UPDATES"))
+        layout.addSpacing(6)
+
+        self._update_diag_lbl = QLabel("")
+        self._update_diag_lbl.setProperty("role", "dim")
+        self._update_diag_lbl.setWordWrap(True)
+        self._update_diag_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._update_diag_lbl.setStyleSheet(
+            "font-family: 'Consolas', monospace; font-size: 11px;"
+        )
+        layout.addWidget(self._update_diag_lbl)
+        layout.addSpacing(8)
+
+        update_btn_row = QHBoxLayout()
+        update_btn_row.setSpacing(8)
+
+        check_update_btn = QPushButton("Check Latest Installer")
+        check_update_btn.setProperty("variant", "secondary")
+        check_update_btn.setFixedHeight(36)
+        check_update_btn.setToolTip("Check GitHub Releases for the latest installer.")
+        check_update_btn.clicked.connect(self._check_latest_installer)
+        update_btn_row.addWidget(check_update_btn)
+
+        open_update_log_btn = QPushButton("Open Updater Log")
+        open_update_log_btn.setProperty("variant", "secondary")
+        open_update_log_btn.setFixedHeight(36)
+        open_update_log_btn.setToolTip("Open the updater log file shown above.")
+        open_update_log_btn.clicked.connect(self._open_updater_log)
+        update_btn_row.addWidget(open_update_log_btn)
+        update_btn_row.addStretch()
+        layout.addLayout(update_btn_row)
+        layout.addSpacing(24)
+        layout.addWidget(_divider())
+        layout.addSpacing(20)
+        self.refresh_update_diagnostics()
+
         layout.addWidget(_form_label("APPEARANCE"))
         layout.addSpacing(6)
 
@@ -352,7 +388,12 @@ class SettingsPanel(QWidget):
         layout.addSpacing(20)
 
         # ── Version footer ────────────────────────────────────────────────────
-        ver = QLabel("Brightspace Pages Automator  v0.8.0")
+        try:
+            from update_checker import current_build_label
+            footer_version = current_build_label()
+        except Exception:
+            footer_version = "unknown build"
+        ver = QLabel(f"Brightspace Pages Automator  {footer_version}")
         ver.setProperty("role", "dim")
         ver.setStyleSheet("font-size:11px;")
         layout.addWidget(ver)
@@ -384,6 +425,55 @@ class SettingsPanel(QWidget):
         self._model_combo.blockSignals(True)
         self._model_combo.setCurrentIndex(idx)
         self._model_combo.blockSignals(False)
+
+    def refresh_update_diagnostics(self, diagnostics: dict | None = None):
+        if diagnostics is None:
+            try:
+                from update_checker import get_update_diagnostics
+                diagnostics = get_update_diagnostics()
+            except Exception:
+                diagnostics = {}
+        result = diagnostics.get("last_update_result", "Unknown")
+        detail = diagnostics.get("last_update_detail", "")
+        if detail:
+            result = f"{result} - {detail}"
+        checked = diagnostics.get("last_update_at") or "not checked yet"
+        latest = diagnostics.get("latest_build") or "(not known)"
+        lines = [
+            f"Version: {diagnostics.get('current_version', 'unknown')}",
+            f"Commit/build: {diagnostics.get('current_build', 'unknown')}",
+            f"Install path: {diagnostics.get('install_path', 'unknown')}",
+            f"Update channel: {diagnostics.get('update_channel', 'unknown')}",
+            f"Update branch: {diagnostics.get('update_branch', 'unknown')}",
+            f"Latest release seen: {latest}",
+            f"Last update result: {result}",
+            f"Last checked: {checked}",
+            f"Updater log: {diagnostics.get('updater_log_path', 'unknown')}",
+            f"Installer log: {diagnostics.get('setup_log_path', 'unknown')}",
+        ]
+        self._update_diag_lbl.setText("\n".join(lines))
+
+    def _check_latest_installer(self):
+        if hasattr(self._mw, "_run_update_check"):
+            self._mw._run_update_check(force_install=True)
+        self.refresh_update_diagnostics()
+
+    def _open_updater_log(self):
+        try:
+            from update_checker import update_log_path
+            path = update_log_path()
+            if not path.exists():
+                path.write_text("No updater events recorded yet.\n", encoding="utf-8")
+            if sys.platform == "win32":
+                os.startfile(str(path))
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", str(path)])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception:
+            self.refresh_update_diagnostics()
 
     @property
     def bs_username(self) -> str:

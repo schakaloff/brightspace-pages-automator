@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 
 from config import RELAUNCH_SWITCH
-from update_checker import log_update_event
+from update_checker import log_update_event, record_update_result, setup_log_path, update_log_path
 
 
 def installer_args() -> list[str]:
@@ -46,8 +46,8 @@ def wait_then_install_script(
         f'set "APP={_cmd_value(app_path)}"',
         f'set "APPDIR={_cmd_value(app_dir)}"',
         f'set "APPNAME={_cmd_value(app_name)}"',
-        'set "LOG=%TEMP%\\BrightspacePagesAutomator-update.log"',
-        'set "SETUPLOG=%TEMP%\\BrightspacePagesAutomator-setup.log"',
+        f'set "LOG={_cmd_value(str(update_log_path()))}"',
+        f'set "SETUPLOG={_cmd_value(str(setup_log_path()))}"',
         f'>> "%LOG%" echo [%DATE% %TIME%] Waiting for app PID {pid}',
         # Wait-Process blocks until the pid exits and returns at once if it is
         # already gone. The previous `tasklist | findstr` poll could hang
@@ -63,6 +63,7 @@ def wait_then_install_script(
         f'"%INSTALLER%" {args}',
         'set "SETUP_EXIT=%ERRORLEVEL%"',
         '>> "%LOG%" echo [%DATE% %TIME%] Installer exited %SETUP_EXIT%',
+        '>> "%LOG%" echo [%DATE% %TIME%] Last update result: Installer exited %SETUP_EXIT%; setup log "%SETUPLOG%"',
         "timeout /t 2 /nobreak >NUL",
     ]
     if relaunch_path is not None:
@@ -90,6 +91,11 @@ def wait_then_install_script(
 
 def launch_after_current_process_exits(installer_path: Path) -> None:
     """Start a detached helper that waits for this app, then runs Setup."""
+    record_update_result(
+        "Applying update",
+        detail="Installer helper started; the app will close and relaunch after Setup finishes.",
+        extra={"installer_path": str(installer_path)},
+    )
     if sys.platform != "win32":
         log_update_event(f"Launching installer directly: {installer_path}")
         subprocess.Popen([str(installer_path)])

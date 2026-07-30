@@ -20,9 +20,11 @@ def test_wait_script_waits_for_app_before_starting_installer():
     script = wait_then_install_script(Path(r"C:\Temp\Setup File.exe"), 12345)
 
     assert "BrightspacePagesAutomator-update.log" in script
+    assert "BrightspacePagesAutomator-setup.log" in script
     assert "Wait-Process -Id 12345 -Timeout 120" in script
     assert "App exited, continuing" in script
     assert '"%INSTALLER%" /SILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH=yes /LOG="%SETUPLOG%"' in script
+    assert "Last update result: Installer exited %SETUP_EXIT%" in script
 
 
 def test_wait_script_relaunches_app_after_installer_finishes():

@@ -21,8 +21,9 @@ MIN_SPLASH_MS = 5000
 import gui_styles
 from gui_sidebar import Sidebar, StepButton
 from gui_icons import make_icon
+from app_version import APP_VERSION
 
-VERSION = "0.8.4"
+VERSION = APP_VERSION
 _CONFIG_PATH = Path(__file__).parent / "user_config.json"
 
 
@@ -303,6 +304,7 @@ class MainWindow(QMainWindow):
     def _on_settings(self):
         self._stack.setCurrentIndex(5)
         self._sidebar.set_active(None)
+        self._refresh_update_diagnostics()
 
     # ── Theme ────────────────────────────────────────────────
     def set_theme(self, name: str):
@@ -488,18 +490,20 @@ class MainWindow(QMainWindow):
         ).start()
 
     def _update_worker(self, force_install: bool = False):
-        from update_checker import check_for_update
+        from update_checker import check_for_update, get_update_diagnostics, record_update_result
         try:
             release = check_for_update(force_install=force_install)
-        except Exception:
+        except Exception as e:
+            record_update_result("Failed", f"Update check crashed: {e}")
             release = None
-        self._update_q.put((force_install, release))
+        self._update_q.put((force_install, release, get_update_diagnostics()))
 
     def _update_poll(self):
         try:
-            force_install, release = self._update_q.get_nowait()
+            force_install, release, diagnostics = self._update_q.get_nowait()
         except queue.Empty:
             return
+        self._refresh_update_diagnostics(diagnostics)
         if force_install:
             if release:
                 self._show_update_dialog(release)
@@ -515,6 +519,17 @@ class MainWindow(QMainWindow):
         if release or not self._update_badge.has_update():
             self._update_badge.set_release(release)
 
+    def _refresh_update_diagnostics(self, diagnostics: dict | None = None):
+        if diagnostics is None:
+            try:
+                from update_checker import get_update_diagnostics
+                diagnostics = get_update_diagnostics()
+            except Exception:
+                diagnostics = {}
+        self._update_badge.set_diagnostics(diagnostics)
+        if hasattr(self, "_settings") and hasattr(self._settings, "refresh_update_diagnostics"):
+            self._settings.refresh_update_diagnostics(diagnostics)
+
     def _on_update_badge_clicked(self):
         release = self._update_badge.release()
         if release:
@@ -526,6 +541,7 @@ class MainWindow(QMainWindow):
         from gui_dialogs import UpdateDialog
         dlg = UpdateDialog(release, self)
         dlg.exec()
+        self._refresh_update_diagnostics()
         if dlg.install_started():
             # Close from the main window after the modal dialog returns. The
             # window owns closeEvent/save_state, and it outlives the dialog.

@@ -332,6 +332,27 @@ class UpdateDialog(QDialog):
         warning.setStyleSheet("font-size:11px; color:#ffd75e;")
         layout.addWidget(warning)
 
+        try:
+            from update_checker import get_update_diagnostics
+            diag = get_update_diagnostics()
+            diag_text = "\n".join([
+                f"Current: {diag['current_build']}",
+                f"Install path: {diag['install_path']}",
+                f"Channel/branch: {diag['update_channel']} / {diag['update_branch']}",
+                f"Updater log: {diag['updater_log_path']}",
+            ])
+            diag_lbl = QLabel(diag_text)
+            diag_lbl.setProperty("role", "dim")
+            diag_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            diag_lbl.setWordWrap(True)
+            diag_lbl.setStyleSheet(
+                "font-family:'Consolas', monospace; font-size:10px; "
+                "padding:6px 0;"
+            )
+            layout.addWidget(diag_lbl)
+        except Exception:
+            pass
+
         # Hidden until Restart & Update is pressed — then it is the primary
         # "something is happening" indicator. Percent mode while downloading,
         # indeterminate sweep while the installer takes over (no percent there).
@@ -399,9 +420,19 @@ class UpdateDialog(QDialog):
         release = self._release
         try:
             import tempfile
-            from update_checker import download_asset, log_update_event
+            from update_checker import download_asset, log_update_event, record_update_result
             tmp_dir = Path(tempfile.gettempdir())
             installer_path = tmp_dir / release["asset_name"]
+            record_update_result(
+                "Update selected",
+                detail=f"Preparing installer download to {installer_path}",
+                latest_build=release.get("tag", ""),
+                extra={
+                    "asset_name": release.get("asset_name"),
+                    "asset_url": release.get("asset_url"),
+                    "download_path": str(installer_path),
+                },
+            )
             log_update_event(
                 "Update selected: "
                 f"latest_build={release.get('tag')} "
@@ -429,9 +460,24 @@ class UpdateDialog(QDialog):
             from update_installer import launch_after_current_process_exits
             launch_after_current_process_exits(installer_path)
             self._status_changed.emit("Restarting app")
+            record_update_result(
+                "Restart requested",
+                detail="Installer helper is running; current app process is closing.",
+                latest_build=release.get("tag", ""),
+                extra={"installer_path": str(installer_path)},
+            )
             log_update_event("Restarting app: closing current process")
             self._install_started.emit()
         except Exception as e:
+            try:
+                from update_checker import record_update_result
+                record_update_result(
+                    "Failed",
+                    detail=str(e),
+                    latest_build=release.get("tag", ""),
+                )
+            except Exception:
+                pass
             self._install_failed.emit(str(e))
 
     # ── GUI-thread slots ─────────────────────────────────────────────────────

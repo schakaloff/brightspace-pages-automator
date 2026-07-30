@@ -7,7 +7,7 @@ from PyInstaller.utils.hooks import collect_all
 ROOT = Path(SPECPATH).parent
 
 SRC_MODULES = [
-    "ai_styler", "automator", "browser", "config",
+    "ai_styler", "app_version", "automator", "browser", "config",
     "style_migrator", "unit_collector", "chromium_setup", "icon_art",
     "update_checker", "update_installer",
 ]
