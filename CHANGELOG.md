@@ -4,6 +4,23 @@ Add a new `## X.Y.Z` section here whenever you bump `VERSION` in `gui.py`.
 The matching section is pulled into the GitHub Release notes automatically,
 and shown to users in the in-app "Update available" dialog.
 
+## 0.8.5
+- H5P cloud checks now read the whole library instead of only the first page,
+  so activities already uploaded are no longer uploaded a second time.
+- H5P activities are matched by their full name rather than the first 25
+  characters. Items whose names differ only near the end (for example
+  "Question 1" and "Question 23") are no longer mistaken for each other, when
+  both checking the cloud and when inserting into a page.
+- H5P uploads keep the activity's original name, including punctuation, rather
+  than the simplified filename.
+- An upload that cannot set its title is abandoned instead of being saved
+  untitled, since an untitled activity can never be found again.
+- Declining the upload prompt no longer cancels the whole H5P run — activities
+  already in the cloud are still inserted.
+- Cached .h5p files left over from other courses are ignored and now listed in
+  the log.
+- Added docs/H5P_MANUAL_STEPS.md describing the same flow by hand.
+
 ## 0.8.3
 - Reworked the self-update restart helper to use a logged Windows batch helper
   that waits for the app to close, runs the installer with Inno relaunch
