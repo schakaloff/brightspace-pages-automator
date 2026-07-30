@@ -1730,18 +1730,28 @@ class H5PHandler:
                         f"{len(to_upload)} of {len(this_course)} H5P file(s) still need "
                         "uploading. Upload them now?"
                     ):
-                        self.log("⏹ Upload declined — stopping H5P phase", "warning")
-                        return
-                    self.log(f"  → Uploading {len(to_upload)} file(s)…", "info")
-                    for idx, item in enumerate(to_upload, 1):
-                        if self._should_stop():
-                            self.log("⏸ Stopped by user — aborting H5P upload phase", "warning")
-                            return
-                        self.log(f"  [{idx}/{len(to_upload)}] Uploading: {item['name']}…", "info")
-                        ok = await self.upload_one(upload_tab, h5p_frame, item["file"], item["name"])
-                        if not ok:
-                            self.log(f"    ✗ Upload failed — will skip insert for this item", "warning")
+                        # Declining the upload must not abandon Phase B: the
+                        # other files are already in the cloud and only need
+                        # inserting. Mark just these as unavailable so Phase B
+                        # skips them individually.
+                        self.log(
+                            f"⏹ Upload declined — skipping those {len(to_upload)} file(s); "
+                            "files already in the cloud will still be inserted.",
+                            "warning",
+                        )
+                        for item in to_upload:
                             item["upload_failed"] = True
+                    else:
+                        self.log(f"  → Uploading {len(to_upload)} file(s)…", "info")
+                        for idx, item in enumerate(to_upload, 1):
+                            if self._should_stop():
+                                self.log("⏸ Stopped by user — aborting H5P upload phase", "warning")
+                                return
+                            self.log(f"  [{idx}/{len(to_upload)}] Uploading: {item['name']}…", "info")
+                            ok = await self.upload_one(upload_tab, h5p_frame, item["file"], item["name"])
+                            if not ok:
+                                self.log(f"    ✗ Upload failed — will skip insert for this item", "warning")
+                                item["upload_failed"] = True
             finally:
                 try:
                     await upload_tab.close()

@@ -546,6 +546,111 @@ def test_insert_matches_original_title_against_sanitised_cloud_title():
     assert frame.clicked == [(BASE, 0)]
 
 
+# ── Declining the upload must not abandon Phase B ────────────────────────────
+# Reported live: 40 of 41 files were already in the cloud, the user said "no"
+# to uploading the 1 remaining file, and the whole H5P phase returned — so the
+# 40 that only needed inserting were silently dropped.
+
+class _PhaseBSpy:
+    """Runs embed_in_brightspace far enough to see whether Phase B starts."""
+
+    def __init__(self, tmp_path, decline_upload=True):
+        self.prompts = []
+        self.inserted = []
+        self.skipped_upload_failed = []
+        self.decline_upload = decline_upload
+
+    async def confirm(self, msg):
+        self.prompts.append(msg)
+        if "upload" in msg.lower() and "phase b" not in msg.lower():
+            return not self.decline_upload
+        return True
+
+
+def _run_embed(tmp_path, monkeypatch, decline_upload=True):
+    """Drive embed_in_brightspace with fakes; return (spy, handler, items)."""
+    import h5p_handler as mod
+
+    h5p_dir = tmp_path / "downloads" / "h5p"
+    h5p_dir.mkdir(parents=True)
+    # 2 already in cloud, 1 not.
+    for name in ("In Cloud A", "In Cloud B", "Needs Upload"):
+        (h5p_dir / f"{name}.h5p").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(mod, "__file__", str(tmp_path / "src" / "h5p_handler.py"))
+
+    spy = _PhaseBSpy(tmp_path, decline_upload)
+    handler = H5PHandler(
+        log=lambda *a, **k: None,
+        eval_in_any_frame=None,
+        auto_dismiss=None,
+        confirm=spy.confirm,
+        diagnose=None,
+        verify_topic_in_module=None,
+        summary={"h5p_inserted": [], "h5p_failed": []},
+    )
+
+    # Cloud contains the first two only.
+    async def fake_collect(tab, frame, **kwargs):
+        return ["In Cloud A", "In Cloud B"]
+
+    async def fake_open_editor(tab, bs_base, course_id, module_id):
+        return object()
+
+    async def fake_upload_one(*a, **k):
+        raise AssertionError("upload_one must not run when the user declines")
+
+    handler._collect_cloud_titles = fake_collect
+    handler.open_editor_and_get_frame = fake_open_editor
+    handler.upload_one = fake_upload_one
+
+    # Phase B: record which items reach it, then stop before touching a browser.
+    async def fake_verify(page, course_id, module_id, name):
+        spy.inserted.append(name)
+        return True  # "already in Brightspace" — ends that item cleanly
+
+    handler._verify_topic_in_module = fake_verify
+
+    moodle_items = [
+        {"type": "SECTION", "name": "Week 1"},
+        {"type": "EXTERNAL", "name": "In Cloud A", "hint": "hvp", "href": "x"},
+        {"type": "EXTERNAL", "name": "In Cloud B", "hint": "hvp", "href": "x"},
+        {"type": "EXTERNAL", "name": "Needs Upload", "hint": "hvp", "href": "x"},
+    ]
+    bs_flat = [{"kind": "MODULE", "id": "111", "title": "Week 1"}]
+
+    class FakeContext:
+        async def new_page(self):
+            class P:
+                async def close(self):
+                    return None
+            return P()
+
+    asyncio.run(handler.embed_in_brightspace(
+        FakeContext(), object(), moodle_items, bs_flat, "https://bs.example", "999"
+    ))
+    return spy, handler
+
+
+def test_declining_upload_still_runs_phase_b(tmp_path, monkeypatch):
+    spy, handler = _run_embed(tmp_path, monkeypatch, decline_upload=True)
+
+    # The Phase B prompt must still be asked — the old code returned first.
+    assert any("phase b" in p.lower() for p in spy.prompts), spy.prompts
+    # The two cloud-resident items reach Phase B; the declined one does not.
+    assert "In Cloud A" in spy.inserted
+    assert "In Cloud B" in spy.inserted
+    assert "Needs Upload" not in spy.inserted
+
+
+def test_declined_item_is_reported_as_not_inserted(tmp_path, monkeypatch):
+    spy, handler = _run_embed(tmp_path, monkeypatch, decline_upload=True)
+
+    failed = [n for n, _ in handler._summary["h5p_failed"]]
+    assert "Needs Upload" in failed
+    inserted = [n for n, _ in handler._summary["h5p_inserted"]]
+    assert sorted(inserted) == ["In Cloud A", "In Cloud B"]
+
+
 def test_insert_cast_vs_case_stays_distinct():
     frame = FakeInsertFrame()
     matched = asyncio.run(_handler()._click_insert_for_title(
