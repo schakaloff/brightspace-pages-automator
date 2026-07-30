@@ -18,6 +18,8 @@ SRC_MODULES = [
 extra_datas = []
 if (ROOT / "BUILD_VERSION").exists():
     extra_datas.append((str(ROOT / "BUILD_VERSION"), "."))
+if (ROOT / "BUILD_COMMIT").exists():
+    extra_datas.append((str(ROOT / "BUILD_COMMIT"), "."))
 
 # customtkinter/CTkMessagebox ship theme JSON + image assets that PyInstaller's
 # default analysis won't discover — collect_all pulls in their datas/binaries too.

@@ -71,6 +71,15 @@ def get_my_build_tag() -> str | None:
         return None
 
 
+def get_my_build_commit() -> str | None:
+    if not getattr(sys, "frozen", False):
+        return get_source_commit()
+    try:
+        return _resource_path("BUILD_COMMIT").read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+
+
 def get_install_path() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
@@ -111,9 +120,11 @@ def _version_from_build_tag(build_tag: str | None) -> str:
 
 def current_build_label() -> str:
     build_tag = get_my_build_tag()
+    commit = get_my_build_commit()
     if build_tag:
+        if commit:
+            return f"{build_tag} ({commit})"
         return build_tag
-    commit = get_source_commit()
     return f"source ({commit})" if commit else "source/unversioned"
 
 
@@ -147,6 +158,7 @@ def record_update_result(
         "detail": detail,
         "current_version": current_version_label(),
         "current_build": current_build_label(),
+        "current_commit": get_my_build_commit() or "",
         "latest_build": latest_build,
         "install_path": str(get_install_path()),
         "update_channel": UPDATE_CHANNEL,
@@ -183,6 +195,7 @@ def get_update_diagnostics() -> dict:
     return {
         "current_version": current_version_label(),
         "current_build": current_build_label(),
+        "current_commit": get_my_build_commit() or "",
         "install_path": str(get_install_path()),
         "update_channel": UPDATE_CHANNEL,
         "update_branch": update_branch_label(),
@@ -250,6 +263,7 @@ def check_for_update(force_install: bool = False) -> dict | None:
         f"channel={UPDATE_CHANNEL} "
         f"branch={update_branch_label()} "
         f"current_build={my_tag or '(source/unversioned)'} "
+        f"current_commit={get_my_build_commit() or '(unknown)'} "
         f"updater_log={update_log_path()} "
         f"setup_log={setup_log_path()} "
         f"force_install={force_install}"

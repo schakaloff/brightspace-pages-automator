@@ -15,6 +15,8 @@ SRC_MODULES = [
 extra_datas = []
 if (ROOT / "BUILD_VERSION").exists():
     extra_datas.append((str(ROOT / "BUILD_VERSION"), "."))
+if (ROOT / "BUILD_COMMIT").exists():
+    extra_datas.append((str(ROOT / "BUILD_COMMIT"), "."))
 
 collect_datas, collect_binaries, collect_hidden = [], [], []
 for pkg in ("customtkinter", "CTkMessagebox"):

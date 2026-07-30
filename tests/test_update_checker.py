@@ -60,6 +60,7 @@ def test_update_diagnostics_include_build_paths_and_last_result(monkeypatch):
     temp_dir = _workspace_temp()
     monkeypatch.setattr(update_checker.tempfile, "gettempdir", lambda: str(temp_dir))
     monkeypatch.setattr(update_checker, "get_my_build_tag", lambda: "v0.8.4-123")
+    monkeypatch.setattr(update_checker, "get_my_build_commit", lambda: "abc1234")
     monkeypatch.setattr(update_checker, "get_install_path", lambda: temp_dir / "App")
     monkeypatch.setattr(update_checker, "update_branch_label", lambda: "main")
 
@@ -71,7 +72,8 @@ def test_update_diagnostics_include_build_paths_and_last_result(monkeypatch):
     diagnostics = update_checker.get_update_diagnostics()
 
     assert diagnostics["current_version"] == "0.8.4"
-    assert diagnostics["current_build"] == "v0.8.4-123"
+    assert diagnostics["current_build"] == "v0.8.4-123 (abc1234)"
+    assert diagnostics["current_commit"] == "abc1234"
     assert diagnostics["install_path"] == str(temp_dir / "App")
     assert diagnostics["update_channel"] == update_checker.UPDATE_CHANNEL
     assert diagnostics["update_branch"] == "main"

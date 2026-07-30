@@ -34,6 +34,9 @@ jobs:
       - name: Write build version
         shell: bash
         run: echo "v${{ needs.get-version.outputs.version }}-${{ github.run_number }}" > BUILD_VERSION
+      - name: Write build commit
+        shell: bash
+        run: git rev-parse --short HEAD > BUILD_COMMIT
       - run: pyinstaller installer/brightspace_automator.spec --noconfirm
       - name: Install Inno Setup
         run: choco install innosetup -y
@@ -62,6 +65,8 @@ jobs:
       - run: pip install -r requirements.txt pyinstaller
       - name: Write build version
         run: echo "v${{ needs.get-version.outputs.version }}-${{ github.run_number }}" > BUILD_VERSION
+      - name: Write build commit
+        run: git rev-parse --short HEAD > BUILD_COMMIT
       - run: pyinstaller installer/brightspace_automator_mac.spec --noconfirm
       - name: Wrap .app into a .dmg
         run: |
