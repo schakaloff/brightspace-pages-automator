@@ -1,7 +1,9 @@
 import asyncio
 import html
+import json
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -572,6 +574,73 @@ class UnitCollector:
             self.log(f"✗ Could not extract HTML for {label}", "error")
         return html
 
+    # ── TEMPORARY DEBUG (added 2026-07-31) ────────────────────────────────────
+    # Topics that dead-end here (no Options button on either the edit or the
+    # download path) have proven impossible to inspect afterwards — by the time
+    # anyone goes looking, they are gone from the course. Capture the page state
+    # at the moment of failure instead. Remove this helper and its single call
+    # site in _download_file once the Kaltura dead-end is understood.
+    _JS_TOPIC_DIAGNOSTICS = """() => {
+        function deepTags(root, acc, depth) {
+            if (!root || depth > 10) return acc;
+            try {
+                root.querySelectorAll('*').forEach(el => {
+                    const t = el.tagName.toLowerCase();
+                    if (t.startsWith('d2l-')) acc[t] = (acc[t] || 0) + 1;
+                    if (el.shadowRoot) deepTags(el.shadowRoot, acc, depth + 1);
+                });
+            } catch (e) {}
+            return acc;
+        }
+        const roots = [document];
+        for (const f of document.querySelectorAll('iframe')) {
+            try { if (f.contentDocument) roots.push(f.contentDocument); } catch (e) {}
+        }
+        const tags = {};
+        roots.forEach(r => deepTags(r, tags, 0));
+        return {
+            url: location.href,
+            title: document.title,
+            d2lElementCounts: tags,
+            iframeSrcs: [...document.querySelectorAll('iframe')]
+                .map(f => (f.getAttribute('src') || '').slice(0, 200)),
+            bodyText: (document.body.innerText || '').slice(0, 1500),
+        };
+    }"""
+
+    async def _dump_topic_diagnostics(self, page: Page, label: str, reason: str) -> None:
+        """Write a screenshot + page-state dump for a topic that could not be
+        collected. Never raises — diagnostics must not break a run."""
+        try:
+            from config import SCREENSHOTS_DIR
+
+            out_dir = Path(SCREENSHOTS_DIR) / "topic_diagnostics"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            safe = re.sub(r"[^A-Za-z0-9]+", "_", label)[:50].strip("_") or "topic"
+            base = out_dir / f"{time.strftime('%Y%m%d-%H%M%S')}_{safe}"
+
+            try:
+                await page.screenshot(path=str(base) + ".png", full_page=True)
+            except Exception as e:
+                self.log(f"  (diagnostic screenshot failed: {e})", "dim")
+
+            info = {"label": label, "reason": reason, "playwrightUrl": page.url}
+            try:
+                info["frames"] = [f.url for f in page.frames]
+            except Exception:
+                pass
+            try:
+                info.update(await page.evaluate(self._JS_TOPIC_DIAGNOSTICS))
+            except Exception as e:
+                info["evaluateError"] = str(e)
+
+            (Path(str(base) + ".json")).write_text(
+                json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            self.log(f"  🔍 Diagnostics written to {base.name}.json/.png", "dim")
+        except Exception as e:
+            self.log(f"  (diagnostics failed: {e})", "dim")
+
     async def _download_file(self, page: Page, url: str, label: str) -> Optional[dict]:
         self.log(f"─" * 52, "dim")
         self.log(f"Downloading: {label}", "step")
@@ -588,6 +657,7 @@ class UnitCollector:
         _, btn = await _find_locator_any_frame(page, "d2l-button-icon.content-options-btn", retries=15)
         if btn is None:
             self.log(f"✗ No options button for {label}", "error")
+            await self._dump_topic_diagnostics(page, label, "no-options-button")  # TEMPORARY DEBUG
             return None
         await btn.first.scroll_into_view_if_needed()
         await btn.first.click()
