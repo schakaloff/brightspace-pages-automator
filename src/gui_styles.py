@@ -167,6 +167,7 @@ QTextEdit {{
     background-color: {c['BG']}; border: 1px solid {c['BORDER']}; border-radius: 6px;
     color: {c['TEXT_PRI']}; padding: 8px;
 }}
+QTextEdit:focus {{ border: 1px solid {c['BORDER_ACT']}; }}
 
 QCheckBox {{ color: {c['TEXT_PRI']}; font-size: 12px; spacing: 8px; }}
 QCheckBox::indicator {{
@@ -179,11 +180,20 @@ QCheckBox::indicator:checked {{
 }}
 QCheckBox::indicator:hover {{ border-color: {c['OC_TEAL_MID']}; }}
 
+QComboBox, NoScrollComboBox {{
+    background-color: {c['PANEL']}; border: 1px solid {c['BORDER']}; border-radius: 6px;
+    color: {c['TEXT_PRI']}; padding: 8px 12px; font-size: 13px;
+}}
+QComboBox:hover, NoScrollComboBox:hover {{ border-color: {c['OC_TEAL_MID']}; }}
+QComboBox:focus, NoScrollComboBox:focus {{ border: 1px solid {c['BORDER_ACT']}; }}
+
+
 QPushButton {{
-    background-color: {c['OC_TEAL']}; color: #ffffff; border: none;
+    background-color: {c['OC_TEAL']}; color: #ffffff; border: 1px solid transparent;
     border-radius: 6px; padding: 10px 18px; font-size: 13px; font-weight: 600;
 }}
 QPushButton:hover {{ background-color: {c['OC_TEAL_MID']}; }}
+QPushButton:focus {{ border: 1px solid {c['BORDER_ACT']}; outline: none; }}
 QPushButton:disabled {{ background-color: {c['BTN_DISABLED_BG']}; color: {c['TEXT_SEC']}; }}
 QPushButton[variant="secondary"] {{
     background-color: transparent; border: 1px solid {c['BORDER_ACT']}; color: {c['TEXT_SEC']};
@@ -225,10 +235,11 @@ QScrollArea {{ border: none; background: transparent; }}
 QScrollArea > QWidget > QWidget {{ background: transparent; }}
 
 QToolButton {{
-    background-color: {c['OC_TEAL']}; color: #ffffff; border: none;
+    background-color: {c['OC_TEAL']}; color: #ffffff; border: 1px solid transparent;
     border-radius: 6px; padding: 10px 18px; font-size: 13px; font-weight: 600;
 }}
 QToolButton:hover {{ background-color: {c['OC_TEAL_MID']}; }}
+QToolButton:focus {{ border: 1px solid {c['BORDER_ACT']}; outline: none; }}
 QToolButton:disabled {{ background-color: {c['BTN_DISABLED_BG']}; color: {c['TEXT_SEC']}; }}
 QToolButton::menu-button {{
     border: none; border-left: 1px solid {c['OC_TEAL_MID']};
@@ -275,6 +286,7 @@ QFrame[role="card"] QSpinBox {{
     background-color: {c['BG']}; border: 1px solid {c['BORDER']}; border-radius: 6px;
     padding: 2px 4px; color: {c['TEXT_PRI']};
 }}
+QFrame[role="card"] QSpinBox:focus {{ border: 1px solid {c['BORDER_ACT']}; }}
 QFrame[role="card"] QSpinBox::up-button, QFrame[role="card"] QSpinBox::down-button {{
     width: 18px; border: none; background: transparent;
 }}
