@@ -243,6 +243,21 @@ def apply_style(
                 log(f"❌ Claude unavailable after {attempt} attempts: {e}", "error")
                 return None, None
 
+        # Network-level failure (DNS, TLS, dropped socket, timeout). No HTTP
+        # status ever comes back, so this is NOT an APIStatusError and never
+        # reached the retry above — a single blip used to abandon the whole
+        # page. Covers APITimeoutError too, which subclasses this.
+        except anthropic.APIConnectionError as e:
+            if attempt < _MAX_RETRIES:
+                log(f"⚠ Connection error — retrying in {_RETRY_DELAY}s...", "warning")
+                time.sleep(_RETRY_DELAY)
+            else:
+                log(f"❌ Could not reach Claude after {attempt} attempts: {e}", "error")
+                return None, None
+
         except Exception as e:
             log(f"❌ Claude error: {e}", "error")
             return None, None
+
+    # Only reachable if every attempt retried without ever returning.
+    return None, None

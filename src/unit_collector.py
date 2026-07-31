@@ -14,6 +14,12 @@ from playwright.async_api import BrowserContext, Page
 # Normal topic pages are a few hundred to a few thousand chars.
 MAX_INLINE_HTML_CHARS = 40000
 
+# Re-opening the target page straight after saving it races D2L's editor load,
+# so the first read-back often comes back short or empty even though the save
+# succeeded. Retry a few times before deciding the content really isn't there.
+STYLE_READBACK_RETRIES = 3
+STYLE_READBACK_DELAY_MS = 5000
+
 
 async def _find_locator_any_frame(page: Page, selector: str, retries: int = 6, delay_ms: int = 700):
     for _ in range(max(retries, 1)):
@@ -1319,6 +1325,32 @@ class UnitCollector:
             except Exception:
                 pass
 
+    async def _read_back_for_styling(self, page: Page, expected_min_chars: int) -> Optional[str]:
+        """Re-open the saved target page and read its HTML back out of the
+        source dialog. Returns None when this attempt raced the editor's own
+        load — a not-yet-populated editor looks exactly like an empty page, and
+        styling that would overwrite the real content with nothing."""
+        if not await self._navigate_to_edit(page, self.target_url):
+            self.log("  ✗ Could not reopen target page", "warning")
+            return None
+        if not await self._open_source_code(page):
+            self.log("  ✗ Source Code not found", "warning")
+            return None
+
+        html = await self._extract_html(page)
+        if not html:
+            self.log("  ✗ Could not extract assembled HTML", "warning")
+            return None
+
+        if expected_min_chars and len(html) < expected_min_chars * 0.5:
+            self.log(
+                f"  ✗ Re-opened page only had {len(html):,} chars, expected "
+                f"~{expected_min_chars:,} — the editor had not finished loading",
+                "warning",
+            )
+            return None
+        return html
+
     async def _apply_claude_style(self, context, expected_min_chars: int = 0) -> bool:
         if not self.claude_api_key:
             self.log("⚠ No Claude API key — skipping styling step", "warning")
@@ -1329,23 +1361,28 @@ class UnitCollector:
 
         page = await context.new_page()
         try:
-            if not await self._navigate_to_edit(page, self.target_url):
-                self.log("✗ Could not reopen target page for styling", "error")
-                return False
-            if not await self._open_source_code(page):
-                self.log("✗ Source Code not found for styling", "error")
-                return False
+            # Reading the page back races D2L's own editor load, so a short or
+            # missing result means "not ready yet" far more often than it means
+            # "genuinely empty". Retry on the same page before giving up.
+            source_html = None
+            for attempt in range(1, STYLE_READBACK_RETRIES + 1):
+                if attempt > 1:
+                    self.log(
+                        f"  ↻ Editor not ready — retrying read-back "
+                        f"({attempt}/{STYLE_READBACK_RETRIES}) in "
+                        f"{STYLE_READBACK_DELAY_MS // 1000}s...",
+                        "warning",
+                    )
+                    await page.wait_for_timeout(STYLE_READBACK_DELAY_MS)
+                source_html = await self._read_back_for_styling(page, expected_min_chars)
+                if source_html:
+                    break
 
-            source_html = await self._extract_html(page)
             if not source_html:
-                self.log("✗ Could not extract assembled HTML", "error")
-                return False
-
-            if expected_min_chars and len(source_html) < expected_min_chars * 0.5:
                 self.log(
-                    f"✗ Re-opened page only had {len(source_html):,} chars, expected "
-                    f"~{expected_min_chars:,} — the editor likely hadn't finished loading "
-                    "the saved content. Skipping styling to avoid overwriting it.",
+                    f"✗ Could not read the assembled page back after "
+                    f"{STYLE_READBACK_RETRIES} attempts — skipping styling to avoid "
+                    "overwriting it.",
                     "error",
                 )
                 return False
