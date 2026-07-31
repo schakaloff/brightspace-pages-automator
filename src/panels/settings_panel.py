@@ -522,8 +522,15 @@ class SettingsPanel(QWidget):
         self._save_timer.start(500)
 
     def _save_api_key(self):
-        if hasattr(self._mw, "save_config"):
-            self._mw.save_config({"claude_api_key": self._key_field.text().strip()})
+        import keyring
+        key = self._key_field.text().strip()
+        if key:
+            keyring.set_password("BrightspacePagesAutomator_Claude", "api_key", key)
+        else:
+            try:
+                keyring.delete_password("BrightspacePagesAutomator_Claude", "api_key")
+            except keyring.errors.PasswordDeleteError:
+                pass
 
     def _on_model_changed(self, index: int):
         model_id = self._model_combo.itemData(index)
