@@ -145,6 +145,8 @@ class H5PHandler:
 
                 # Dismiss "Data Reset" dialog if it appears
                 for frame in tab.frames:
+                    if frame.is_detached():
+                        continue
                     try:
                         ok_btn = frame.locator('.h5p-dialog-ok-button')
                         if await ok_btn.count() > 0:
@@ -157,6 +159,8 @@ class H5PHandler:
 
                 reuse_clicked = False
                 for frame in tab.frames:
+                    if frame.is_detached():
+                        continue
                     try:
                         btn = frame.locator('li.h5p-export button')
                         if await btn.count() > 0:
@@ -176,6 +180,8 @@ class H5PHandler:
                 for _ in range(10):
                     await tab.wait_for_timeout(500)
                     for frame in tab.frames:
+                        if frame.is_detached():
+                            continue
                         try:
                             if await frame.locator('.h5p-download-button').count() > 0:
                                 dl_frame = frame
@@ -377,6 +383,8 @@ class H5PHandler:
         """Return the first live h5p.com frame that has the content list loaded."""
         for _ in range(15):
             for frame in tab.frames:
+                if frame.is_detached():
+                    continue
                 if "h5p.com" not in frame.url:
                     continue
                 try:
@@ -652,6 +660,8 @@ class H5PHandler:
         real events. Callers keep the JS click as a fallback.
         """
         for frame in tab.frames:
+            if frame.is_detached():
+                continue
             try:
                 loc = frame.locator(selector).first
                 if not await frame.locator(selector).count():
@@ -732,6 +742,8 @@ class H5PHandler:
         """
         for attempt in range(attempts):
             for frame in tab.frames:
+                if frame.is_detached():
+                    continue
                 for sel in self.TITLE_SELECTORS:
                     try:
                         if not await frame.locator(sel).count():
@@ -812,6 +824,8 @@ class H5PHandler:
             editor_frame = None
             for _ in range(10):
                 for frame in tab.frames:
+                    if frame.is_detached():
+                        continue
                     if "h5p.com" in frame.url and "content" in frame.url:
                         editor_frame = frame
                         break
@@ -825,6 +839,8 @@ class H5PHandler:
             hub_frame = None
             for _ in range(10):
                 for frame in tab.frames:
+                    if frame.is_detached():
+                        continue
                     try:
                         if await frame.evaluate("() => !!document.querySelector('a#h5p-hub-upload')"):
                             hub_frame = frame
@@ -872,6 +888,8 @@ class H5PHandler:
 
             # Check for validation error (missing H5P library on the cloud platform)
             for frame in tab.frames:
+                if frame.is_detached():
+                    continue
                 try:
                     err = await frame.evaluate("""() => {
                         var el = document.querySelector('.h5p-error-report, .error-report, [class*="error"]');
@@ -1073,6 +1091,8 @@ class H5PHandler:
                 second_insert_clicked = False
                 for attempt in range(8):
                     for frame in tab.frames:
+                        if frame.is_detached():
+                            continue
                         try:
                             clicked = await frame.evaluate(f"""() => {{
                                 {df}
@@ -1136,6 +1156,8 @@ class H5PHandler:
             h5p_frame = None
             for _ in range(10):
                 for frame in tab.frames:
+                    if frame.is_detached():
+                        continue
                     if "h5p.com" in frame.url:
                         h5p_frame = frame
                         break
@@ -1157,6 +1179,8 @@ class H5PHandler:
             h5p_frame = None
             for _ in range(10):
                 for frame in tab.frames:
+                    if frame.is_detached():
+                        continue
                     if "h5p.com" in frame.url and "content" in frame.url:
                         h5p_frame = frame
                         break
@@ -1174,6 +1198,8 @@ class H5PHandler:
             hub_frame = None
             for _ in range(10):
                 for frame in tab.frames:
+                    if frame.is_detached():
+                        continue
                     try:
                         has_it = await frame.evaluate("() => !!document.querySelector('a#h5p-hub-upload')")
                         if has_it:
@@ -1239,6 +1265,8 @@ class H5PHandler:
 
                 content_id = None
                 for frame in tab.frames:
+                    if frame.is_detached():
+                        continue
                     if "h5p.com" in frame.url and "/content/" in frame.url:
                         m = re.search(r'/content/(\d+)', frame.url)
                         if m:
