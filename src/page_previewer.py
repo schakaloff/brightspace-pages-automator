@@ -93,7 +93,7 @@ _JS_INJECT_CONTENT = """(styledHtml) => {
 }"""
 
 
-def _call_claude_feedback(
+async def _call_claude_feedback(
     styled_html: str,
     feedback: str,
     api_key: str,
@@ -113,12 +113,12 @@ def _call_claude_feedback(
         f"{styled_html}"
     )
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = anthropic.AsyncAnthropic(api_key=api_key)
     MAX_RETRIES = 3
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             log(f"🤖 Applying feedback — attempt {attempt}/{MAX_RETRIES}...", "info")
-            response = client.messages.create(
+            response = await client.messages.create(
                 model=model,
                 max_tokens=8192,
                 messages=[{"role": "user", "content": prompt}],
@@ -134,7 +134,7 @@ def _call_claude_feedback(
         except anthropic.APIStatusError as e:
             if e.status_code in (429, 529) and attempt < MAX_RETRIES:
                 log("⚠ Server busy — retrying in 8s...", "warning")
-                time.sleep(8)
+                await asyncio.sleep(8)
             else:
                 log("❌ AI unavailable after retries", "error")
                 return None
@@ -394,8 +394,7 @@ class PagePreviewer:
                     first_run = False
                 else:
                     # Regenerate: apply feedback on top of the previous styled result
-                    styled_html = await asyncio.to_thread(
-                        _call_claude_feedback,
+                    styled_html = await _call_claude_feedback(
                         styled_html,
                         feedback,
                         self.claude_api_key,
