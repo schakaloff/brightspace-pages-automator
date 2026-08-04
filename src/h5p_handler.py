@@ -4,6 +4,7 @@ import difflib
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
+from urllib.parse import urlparse
 
 from js_helpers import DEEP_FIND_JS, _norm
 
@@ -1588,8 +1589,6 @@ class H5PHandler:
                 )
 
     async def embed_in_brightspace(self, context, page, moodle_items, bs_flat, bs_base, course_id) -> None:
-        from urllib.parse import urlparse
-
         h5p_dir = Path(__file__).parent.parent / "downloads" / "h5p"
         h5p_files = list(h5p_dir.glob("*.h5p"))
         if not h5p_files:
