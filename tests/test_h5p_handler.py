@@ -136,6 +136,8 @@ class FakeLocator:
 
 
 class FakeClickFrame:
+    def is_detached(self):
+        return False
     def __init__(self, locator=None):
         self.url = "https://learn.example/frame"
         self._locator = locator
@@ -335,6 +337,8 @@ class FakeTitleInput:
 
 
 class FakeTitleFrame:
+    def is_detached(self):
+        return False
     def __init__(self, url, inp=None, matching=()):
         self.url = url
         self._inp = inp
