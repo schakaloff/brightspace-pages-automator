@@ -412,6 +412,8 @@ class MainWindow(QMainWindow):
         try:
             existing = self.load_config()
             existing.update(data)
+            if "claude_api_key" in existing:
+                del existing["claude_api_key"]
             _CONFIG_PATH.write_text(json.dumps(existing, indent=2), encoding="utf-8")
         except Exception as e:
             print(f"[config] save failed: {e}", flush=True)
@@ -590,6 +592,16 @@ class MainWindow(QMainWindow):
         self.save_config({
             "claude_model": self._claude_model,
         })
+
+        import keyring
+        if self._claude_key:
+            keyring.set_password("BrightspacePagesAutomator_Claude", "api_key", self._claude_key)
+        else:
+            try:
+                keyring.delete_password("BrightspacePagesAutomator_Claude", "api_key")
+            except keyring.errors.PasswordDeleteError:
+                pass
+
         event.accept()
         os._exit(0)
 
