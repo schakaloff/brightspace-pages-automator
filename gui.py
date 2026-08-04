@@ -379,12 +379,20 @@ class MainWindow(QMainWindow):
             pass
 
         import keyring
-
         cfg = self.load_config()
+
+        # Migrate legacy plaintext key to keyring if found
+        legacy_key = cfg.get("claude_api_key", "")
+        if legacy_key:
+            try:
+                keyring.set_password("BrightspacePagesAutomator_Claude", "api_key", legacy_key)
+                cfg.pop("claude_api_key", None)
+                self.save_config(cfg)
+            except Exception as e:
+                print(f"[config] Failed to migrate API key to keyring: {e}", flush=True)
+
         if not key:
             key = keyring.get_password("BrightspacePagesAutomator_Claude", "api_key") or ""
-        if not key:
-            key = cfg.get("claude_api_key", "")
 
         self._claude_key = key
         self._settings.set_api_key(key)
