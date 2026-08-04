@@ -18,7 +18,7 @@ import json as _json_mod
 import os
 import re
 from collections import Counter
-import queue
+from functools import lru_cache
 import threading
 import time
 from pathlib import Path
@@ -117,13 +117,26 @@ def _duplicate_name_scan(items: list) -> Optional[dict]:
     return _worst(files, "FILE items") or _worst(others, "all non-SECTION items")
 
 
-def _file_digest(path: Path) -> str:
-    """SHA-256 of a file's bytes, streamed so large files stay cheap."""
+@lru_cache(maxsize=1024)
+def _cached_file_digest_by_path(path_str: str, mtime: float, size: int) -> str:
     h = hashlib.sha256()
-    with open(path, "rb") as fh:
+    with open(path_str, "rb") as fh:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _file_digest(path: Path) -> str:
+    """SHA-256 of a file's bytes, streamed so large files stay cheap."""
+    try:
+        st = path.stat()
+        return _cached_file_digest_by_path(str(path), st.st_mtime, st.st_size)
+    except OSError:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
 
 
 def _collision_safe_path(save_dir: Path, stem: str, suffix: str, source: Path) -> Path:

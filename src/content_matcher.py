@@ -1,4 +1,5 @@
 import difflib
+import functools
 import html as html_module
 import re
 from typing import Optional
@@ -48,21 +49,27 @@ def _digitize(text: str) -> str:
     return _WORD_NUMS_RE.sub(lambda m: _WORD_NUMS[m.group(0).lower()], text)
 
 
+@functools.lru_cache(maxsize=2048)
+def _get_containment_features(text: str):
+    """Cache the expensive regex extraction of numbers and long words."""
+    digitized = _digitize(text)
+    nums = set(re.findall(r'\d+', digitized))
+    words = [w for w in re.findall(r'[a-z]+', digitized) if len(w) >= 4]
+    return nums, words
+
+
 def _containment_match(name_l: str, candidates) -> Optional[str]:
     """Catch short Moodle names ('Chapter 3') that are conceptually contained in a
     longer combined Brightspace title ('Week Two: Chapters Three and Four - ...').
     difflib's whole-string ratio penalizes this length mismatch too heavily, so this
     checks number-token overlap plus a shared keyword instead of literal substring."""
-    name_digit = _digitize(name_l)
-    name_nums = set(re.findall(r'\d+', name_digit))
-    name_words = [w for w in re.findall(r'[a-z]+', name_digit) if len(w) >= 4]
+    name_nums, name_words = _get_containment_features(name_l)
     if not name_nums or not name_words:
         return None
     for key in candidates:
-        cand_digit = _digitize(key)
-        if not name_nums & set(re.findall(r'\d+', cand_digit)):
+        cand_nums, cand_words = _get_containment_features(key)
+        if not name_nums & cand_nums:
             continue
-        cand_words = re.findall(r'[a-z]+', cand_digit)
         if any(cw.startswith(nw) or nw.startswith(cw) for nw in name_words for cw in cand_words):
             return key
     return None

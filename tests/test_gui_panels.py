@@ -102,6 +102,7 @@ def test_checker_panel_builds(qtbot):
     panel = CheckerPanel(mw)
     qtbot.addWidget(panel)
     assert panel._run_btn.text() == "Run Check"
+    # assert panel._continue_btn.isHidden()
 
 
 def test_collector_panel_builds(qtbot):
@@ -110,6 +111,7 @@ def test_collector_panel_builds(qtbot):
     mw = MagicMock(); mw.chromium_ready = False; mw.load_config.return_value = {}
     panel = CollectorPanel(mw); qtbot.addWidget(panel)
     assert panel._run_btn.text() == "Create Combined Unit Page"
+    # assert panel._continue_btn.isHidden()
 
 
 def test_collector_panel_has_moodle_url_field(qtbot):
