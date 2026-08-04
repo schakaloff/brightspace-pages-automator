@@ -285,7 +285,7 @@ class UnitCollector:
             _, btn = await _find_locator_any_frame(page, sel, retries=5, delay_ms=500)
             if btn:
                 await btn.first.click()
-                await page.wait_for_timeout(1200)
+                await page.wait_for_timeout(1500)
                 return True
         self.log("  ⚠ Source code dialog close button not found — content may not apply", "warning")
         await page.wait_for_timeout(800)
@@ -683,6 +683,43 @@ class UnitCollector:
             parts.append("<h2>Files</h2>\n<p></p>\n")
         return "\n".join(parts)
 
+    async def _read_editor_full_text(self, page: Page) -> str:
+        """Select-all + copy + read clipboard. Unlike textContent, this reads the real
+        CM6 doc model rather than only the virtualized (on-screen) viewport."""
+        _FIND_CM = """() => {
+            function deepFind(root) {
+                const el = root.querySelector('[contenteditable="true"].cm-content');
+                if (el) return el;
+                for (const child of root.querySelectorAll('*')) {
+                    if (child.shadowRoot) {
+                        const found = deepFind(child.shadowRoot);
+                        if (found) return found;
+                    }
+                }
+                return null;
+            }
+            const el = deepFind(document);
+            if (el) { el.focus(); el.click(); return true; }
+            return false;
+        }"""
+        await page.evaluate("navigator.clipboard.writeText('')")
+        focused = False
+        for ctx in [page, *page.frames]:
+            try:
+                if await ctx.evaluate(_FIND_CM):
+                    focused = True
+                    break
+            except Exception:
+                pass
+        if not focused:
+            return ""
+        await page.wait_for_timeout(200)
+        await page.keyboard.press("Control+a")
+        await page.wait_for_timeout(150)
+        await page.keyboard.press("Control+c")
+        await page.wait_for_timeout(400)
+        return await page.evaluate("navigator.clipboard.readText()")
+
     async def _paste_html(self, page: Page, html: str) -> bool:
         _FIND_CM = """() => {
             function deepFind(root) {
@@ -701,27 +738,38 @@ class UnitCollector:
             return false;
         }"""
 
-        async with self._clipboard_lock:
-            await page.evaluate("(h) => navigator.clipboard.writeText(h)", html)
-            await page.wait_for_timeout(300)
-            focused = False
-            for ctx in [page, *page.frames]:
-                try:
-                    if await ctx.evaluate(_FIND_CM):
-                        focused = True
-                        break
-                except Exception:
-                    pass
-            if not focused:
-                self.log("✗ Could not find HTML editor for paste", "error")
-                return False
-            await page.wait_for_timeout(400)
-            await page.keyboard.press("Control+a")
-            await page.wait_for_timeout(200)
-            await page.keyboard.press("Control+v")
-            await page.wait_for_timeout(600)
-        self.log("✓ HTML pasted", "success")
-        return True
+        expected_len = len(html)
+        for attempt in range(3):
+            async with self._clipboard_lock:
+                await page.evaluate("(h) => navigator.clipboard.writeText(h)", html)
+                await page.wait_for_timeout(300)
+                focused = False
+                for ctx in [page, *page.frames]:
+                    try:
+                        if await ctx.evaluate(_FIND_CM):
+                            focused = True
+                            break
+                    except Exception:
+                        pass
+                if not focused:
+                    self.log("✗ Could not find HTML editor for paste", "error")
+                    return False
+                await page.wait_for_timeout(400)
+                await page.keyboard.press("Control+a")
+                await page.wait_for_timeout(200)
+                await page.keyboard.press("Control+v")
+                await page.wait_for_timeout(1500)
+
+                cm_len = len(await self._read_editor_full_text(page))
+            if cm_len >= expected_len * 0.9:
+                self.log("✓ HTML pasted", "success")
+                await page.wait_for_timeout(1500)
+                return True
+            self.log(f"⚠ Paste verify failed (editor has {cm_len} chars, expected ~{expected_len}) — retrying", "warning")
+            await page.wait_for_timeout(800)
+
+        self.log("✗ Paste never landed in editor — aborting save to avoid overwriting with stale content", "error")
+        return False
 
     async def _editor_cursor_end(self, page: Page):
         for frame in page.frames:
@@ -1172,20 +1220,34 @@ class UnitCollector:
             self.log("✗ Could not find source code editor", "error")
             return False
 
-        async with self._clipboard_lock:
-            await page.evaluate("(h) => navigator.clipboard.writeText(h)", section_html)
-            await page.wait_for_timeout(300)
-            for ctx in [page, *page.frames]:
-                try:
-                    if await ctx.evaluate(_FIND_CM):
-                        break
-                except Exception:
-                    pass
-            await page.wait_for_timeout(400)
-            await page.keyboard.press("Control+End")
-            await page.wait_for_timeout(200)
-            await page.keyboard.press("Control+v")
-            await page.wait_for_timeout(1500)
+        len_before = len(await self._read_editor_full_text(page))
+        pasted_ok = False
+        for attempt in range(3):
+            async with self._clipboard_lock:
+                await page.evaluate("(h) => navigator.clipboard.writeText(h)", section_html)
+                await page.wait_for_timeout(300)
+                for ctx in [page, *page.frames]:
+                    try:
+                        if await ctx.evaluate(_FIND_CM):
+                            break
+                    except Exception:
+                        pass
+                await page.wait_for_timeout(400)
+                await page.keyboard.press("Control+End")
+                await page.wait_for_timeout(200)
+                await page.keyboard.press("Control+v")
+                await page.wait_for_timeout(1500)
+
+                len_after = len(await self._read_editor_full_text(page))
+            if len_after >= len_before + len(section_html) * 0.9:
+                pasted_ok = True
+                break
+            self.log(f"⚠ Append verify failed (editor grew by {len_after - len_before} chars, expected ~{len(section_html)}) — retrying", "warning")
+            await page.wait_for_timeout(800)
+
+        if not pasted_ok:
+            self.log("✗ Append never landed in editor — aborting to avoid overwriting with stale content", "error")
+            return False
 
         return await self._close_source_dialog(page)
 

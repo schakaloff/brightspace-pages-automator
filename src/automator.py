@@ -96,22 +96,51 @@ class PageAutomator:
         self.log("⚠ Clipboard empty after copy", "warning")
         return None
 
+    async def _read_editor_full_text(self, page: Page) -> str:
+        """Select-all + copy + read clipboard. Unlike textContent, this reads the real
+        CM6 doc model rather than only the virtualized (on-screen) viewport."""
+        await page.evaluate("navigator.clipboard.writeText('')")
+        if not await self._focus_codemirror(page):
+            return ""
+        await page.wait_for_timeout(200)
+        await page.keyboard.press("Control+a")
+        await page.wait_for_timeout(150)
+        await page.keyboard.press("Control+c")
+        await page.wait_for_timeout(400)
+        return await page.evaluate("navigator.clipboard.readText()")
+
     async def replace_html_in_editor(self, page: Page, html: str) -> bool:
         self.log("Pasting styled HTML (Ctrl+A, Ctrl+V)...", "info")
 
-        async with self._clipboard_lock:
-            await page.evaluate("(h) => navigator.clipboard.writeText(h)", html)
-            await page.wait_for_timeout(300)
+        expected_len = len(html)
+        pasted_ok = False
+        for attempt in range(3):
+            async with self._clipboard_lock:
+                await page.evaluate("(h) => navigator.clipboard.writeText(h)", html)
+                await page.wait_for_timeout(300)
 
-            await self._focus_codemirror(page)
-            await page.wait_for_timeout(400)
-            await page.keyboard.press("Control+a")
-            await page.wait_for_timeout(200)
-            await page.keyboard.press("Control+v")
-            await page.wait_for_timeout(600)
+                await self._focus_codemirror(page)
+                await page.wait_for_timeout(400)
+                await page.keyboard.press("Control+a")
+                await page.wait_for_timeout(200)
+                await page.keyboard.press("Control+v")
+                await page.wait_for_timeout(1500)
+
+                # Verify the paste actually landed in the CM6 doc model before trusting it
+                cm_len = len(await self._read_editor_full_text(page))
+
+            if cm_len >= expected_len * 0.9:
+                pasted_ok = True
+                break
+            self.log(f"⚠ Paste verify failed (editor has {cm_len} chars, expected ~{expected_len}) — retrying", "warning")
+            await page.wait_for_timeout(800)
+
+        if not pasted_ok:
+            self.log("✗ Paste never landed in editor — aborting save to avoid overwriting with stale content", "error")
+            return False
 
         self.log("✓ HTML pasted", "success")
-        await page.wait_for_timeout(500)
+        await page.wait_for_timeout(1500)
 
         # Close source-code dialog
         for selector in ['[data-dialog-action="save"]', 'd2l-button:has-text("OK")', 'button:has-text("OK")', 'd2l-button:has-text("Update")', 'button:has-text("Update")']:
@@ -121,7 +150,7 @@ class PageAutomator:
                 self.log("✓ Source dialog closed", "success")
                 break
 
-        await page.wait_for_timeout(1200)
+        await page.wait_for_timeout(1500)
 
         # Save and Close the editor page
         self.log("Saving page...", "info")
@@ -129,6 +158,7 @@ class PageAutomator:
             _, btn = await _find_locator_any_frame(page, selector, retries=6, delay_ms=600)
             if btn:
                 await btn.first.click()
+                await page.wait_for_timeout(1500)
                 self.log("✓ Page saved", "success")
                 return True
 
