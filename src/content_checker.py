@@ -18,6 +18,7 @@ import json as _json_mod
 import os
 import re
 from collections import Counter
+import queue
 import threading
 import time
 from pathlib import Path
@@ -342,6 +343,11 @@ class ContentChecker:
         self.moodle_username        = moodle_username
         self.moodle_password        = moodle_password
         self._summary               = {}
+
+        self._debug_log_queue = queue.Queue()
+        self._debug_log_thread = threading.Thread(target=self._debug_log_worker, daemon=True)
+        self._debug_log_thread.start()
+
         self._debug_log_path        = self._init_debug_log()
         self._h5p = H5PHandler(
             log=self.log,
@@ -355,16 +361,35 @@ class ContentChecker:
             should_stop=lambda: self.stop_flag[0],
         )
 
+    def _debug_log_worker(self) -> None:
+        """Background thread that writes log messages to disk."""
+        while True:
+            msg = self._debug_log_queue.get()
+            if msg is None:
+                self._debug_log_queue.task_done()
+                break
+            try:
+                path = getattr(self, "_debug_log_path", None)
+                if path:
+                    with path.open("a", encoding="utf-8") as f:
+                        f.write(msg)
+            except Exception:
+                pass
+            self._debug_log_queue.task_done()
+
     def _init_debug_log(self) -> Optional[Path]:
         try:
             debug_dir = Path(__file__).parent.parent / "downloads" / "debug"
             debug_dir.mkdir(parents=True, exist_ok=True)
             path = debug_dir / "checker-live.log"
-            with path.open("a", encoding="utf-8") as f:
-                f.write("\n" + "=" * 72 + "\n")
-                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Checker run started\n")
-                f.write(f"Brightspace URL: {self.bs_url}\n")
-                f.write(f"Moodle URL: {self.moodle_url}\n")
+            self._debug_log_path = path # Set path before enqueueing to prevent race condition
+            start_msg = (
+                "\n" + "=" * 72 + "\n" +
+                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Checker run started\n" +
+                f"Brightspace URL: {self.bs_url}\n" +
+                f"Moodle URL: {self.moodle_url}\n"
+            )
+            self._debug_log_queue.put(start_msg)
             return path
         except Exception:
             return None
@@ -373,11 +398,7 @@ class ContentChecker:
         path = getattr(self, "_debug_log_path", None)
         if not path:
             return
-        try:
-            with path.open("a", encoding="utf-8") as f:
-                f.write(f"[{time.strftime('%H:%M:%S')}] [{tag}] {msg}\n")
-        except Exception:
-            pass
+        self._debug_log_queue.put(f"[{time.strftime('%H:%M:%S')}] [{tag}] {msg}\n")
 
     def _make_log_filter(self, log_fn: Callable) -> Callable:
         """Wrap log function to filter out verbose messages."""
