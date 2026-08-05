@@ -1,7 +1,9 @@
 import asyncio
 import html
+import json
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -13,6 +15,12 @@ from playwright.async_api import BrowserContext, Page
 # source-code dialog poisons the editor session and wipes the whole page.
 # Normal topic pages are a few hundred to a few thousand chars.
 MAX_INLINE_HTML_CHARS = 40000
+
+# Re-opening the target page straight after saving it races D2L's editor load,
+# so the first read-back often comes back short or empty even though the save
+# succeeded. Retry a few times before deciding the content really isn't there.
+STYLE_READBACK_RETRIES = 3
+STYLE_READBACK_DELAY_MS = 5000
 
 
 async def _find_locator_any_frame(page: Page, selector: str, retries: int = 6, delay_ms: int = 700):
@@ -566,6 +574,73 @@ class UnitCollector:
             self.log(f"✗ Could not extract HTML for {label}", "error")
         return html
 
+    # ── TEMPORARY DEBUG (added 2026-07-31) ────────────────────────────────────
+    # Topics that dead-end here (no Options button on either the edit or the
+    # download path) have proven impossible to inspect afterwards — by the time
+    # anyone goes looking, they are gone from the course. Capture the page state
+    # at the moment of failure instead. Remove this helper and its single call
+    # site in _download_file once the Kaltura dead-end is understood.
+    _JS_TOPIC_DIAGNOSTICS = """() => {
+        function deepTags(root, acc, depth) {
+            if (!root || depth > 10) return acc;
+            try {
+                root.querySelectorAll('*').forEach(el => {
+                    const t = el.tagName.toLowerCase();
+                    if (t.startsWith('d2l-')) acc[t] = (acc[t] || 0) + 1;
+                    if (el.shadowRoot) deepTags(el.shadowRoot, acc, depth + 1);
+                });
+            } catch (e) {}
+            return acc;
+        }
+        const roots = [document];
+        for (const f of document.querySelectorAll('iframe')) {
+            try { if (f.contentDocument) roots.push(f.contentDocument); } catch (e) {}
+        }
+        const tags = {};
+        roots.forEach(r => deepTags(r, tags, 0));
+        return {
+            url: location.href,
+            title: document.title,
+            d2lElementCounts: tags,
+            iframeSrcs: [...document.querySelectorAll('iframe')]
+                .map(f => (f.getAttribute('src') || '').slice(0, 200)),
+            bodyText: (document.body.innerText || '').slice(0, 1500),
+        };
+    }"""
+
+    async def _dump_topic_diagnostics(self, page: Page, label: str, reason: str) -> None:
+        """Write a screenshot + page-state dump for a topic that could not be
+        collected. Never raises — diagnostics must not break a run."""
+        try:
+            from config import SCREENSHOTS_DIR
+
+            out_dir = Path(SCREENSHOTS_DIR) / "topic_diagnostics"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            safe = re.sub(r"[^A-Za-z0-9]+", "_", label)[:50].strip("_") or "topic"
+            base = out_dir / f"{time.strftime('%Y%m%d-%H%M%S')}_{safe}"
+
+            try:
+                await page.screenshot(path=str(base) + ".png", full_page=True)
+            except Exception as e:
+                self.log(f"  (diagnostic screenshot failed: {e})", "dim")
+
+            info = {"label": label, "reason": reason, "playwrightUrl": page.url}
+            try:
+                info["frames"] = [f.url for f in page.frames]
+            except Exception:
+                pass
+            try:
+                info.update(await page.evaluate(self._JS_TOPIC_DIAGNOSTICS))
+            except Exception as e:
+                info["evaluateError"] = str(e)
+
+            (Path(str(base) + ".json")).write_text(
+                json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            self.log(f"  🔍 Diagnostics written to {base.name}.json/.png", "dim")
+        except Exception as e:
+            self.log(f"  (diagnostics failed: {e})", "dim")
+
     async def _download_file(self, page: Page, url: str, label: str) -> Optional[dict]:
         self.log(f"─" * 52, "dim")
         self.log(f"Downloading: {label}", "step")
@@ -582,6 +657,7 @@ class UnitCollector:
         _, btn = await _find_locator_any_frame(page, "d2l-button-icon.content-options-btn", retries=15)
         if btn is None:
             self.log(f"✗ No options button for {label}", "error")
+            await self._dump_topic_diagnostics(page, label, "no-options-button")  # TEMPORARY DEBUG
             return None
         await btn.first.scroll_into_view_if_needed()
         await btn.first.click()
@@ -1319,6 +1395,32 @@ class UnitCollector:
             except Exception:
                 pass
 
+    async def _read_back_for_styling(self, page: Page, expected_min_chars: int) -> Optional[str]:
+        """Re-open the saved target page and read its HTML back out of the
+        source dialog. Returns None when this attempt raced the editor's own
+        load — a not-yet-populated editor looks exactly like an empty page, and
+        styling that would overwrite the real content with nothing."""
+        if not await self._navigate_to_edit(page, self.target_url):
+            self.log("  ✗ Could not reopen target page", "warning")
+            return None
+        if not await self._open_source_code(page):
+            self.log("  ✗ Source Code not found", "warning")
+            return None
+
+        html = await self._extract_html(page)
+        if not html:
+            self.log("  ✗ Could not extract assembled HTML", "warning")
+            return None
+
+        if expected_min_chars and len(html) < expected_min_chars * 0.5:
+            self.log(
+                f"  ✗ Re-opened page only had {len(html):,} chars, expected "
+                f"~{expected_min_chars:,} — the editor had not finished loading",
+                "warning",
+            )
+            return None
+        return html
+
     async def _apply_claude_style(self, context, expected_min_chars: int = 0) -> bool:
         if not self.claude_api_key:
             self.log("⚠ No Claude API key — skipping styling step", "warning")
@@ -1329,23 +1431,28 @@ class UnitCollector:
 
         page = await context.new_page()
         try:
-            if not await self._navigate_to_edit(page, self.target_url):
-                self.log("✗ Could not reopen target page for styling", "error")
-                return False
-            if not await self._open_source_code(page):
-                self.log("✗ Source Code not found for styling", "error")
-                return False
+            # Reading the page back races D2L's own editor load, so a short or
+            # missing result means "not ready yet" far more often than it means
+            # "genuinely empty". Retry on the same page before giving up.
+            source_html = None
+            for attempt in range(1, STYLE_READBACK_RETRIES + 1):
+                if attempt > 1:
+                    self.log(
+                        f"  ↻ Editor not ready — retrying read-back "
+                        f"({attempt}/{STYLE_READBACK_RETRIES}) in "
+                        f"{STYLE_READBACK_DELAY_MS // 1000}s...",
+                        "warning",
+                    )
+                    await page.wait_for_timeout(STYLE_READBACK_DELAY_MS)
+                source_html = await self._read_back_for_styling(page, expected_min_chars)
+                if source_html:
+                    break
 
-            source_html = await self._extract_html(page)
             if not source_html:
-                self.log("✗ Could not extract assembled HTML", "error")
-                return False
-
-            if expected_min_chars and len(source_html) < expected_min_chars * 0.5:
                 self.log(
-                    f"✗ Re-opened page only had {len(source_html):,} chars, expected "
-                    f"~{expected_min_chars:,} — the editor likely hadn't finished loading "
-                    "the saved content. Skipping styling to avoid overwriting it.",
+                    f"✗ Could not read the assembled page back after "
+                    f"{STYLE_READBACK_RETRIES} attempts — skipping styling to avoid "
+                    "overwriting it.",
                     "error",
                 )
                 return False
