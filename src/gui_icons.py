@@ -7,7 +7,13 @@ from PySide6.QtCore import Qt, QRectF, QPointF, QRect
 
 
 def _make_pixmap(size: int, draw_fn, color: str) -> QPixmap:
-    scale = 2
+    # Render at `scale`x physical resolution and tag the pixmap with that
+    # devicePixelRatio, instead of scaling back down to `size`x`size` — the
+    # old .scaled() call threw away all the extra detail, so every icon was
+    # only ever `size` physical pixels and looked blocky on high-DPI displays
+    # (150%/200% Windows scaling, macOS retina). Qt downscales a high-res
+    # pixmap cleanly on low-DPI screens, so one generous factor is safe.
+    scale = 4
     px = QPixmap(size * scale, size * scale)
     px.fill(Qt.GlobalColor.transparent)
     p = QPainter(px)
@@ -15,8 +21,11 @@ def _make_pixmap(size: int, draw_fn, color: str) -> QPixmap:
     p.scale(scale, scale)
     draw_fn(p, size, QColor(color))
     p.end()
-    return px.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
-                     Qt.TransformationMode.SmoothTransformation)
+    # Tag the DPR only after painting. Setting it beforehand would make the
+    # painter's own coordinate system logical, so the p.scale() above would
+    # apply a second time and draw the glyph 4x oversized off the canvas.
+    px.setDevicePixelRatio(scale)
+    return px
 
 
 def _stroke(p, c, w=1.7):

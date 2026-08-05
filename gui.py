@@ -142,8 +142,13 @@ class MainWindow(QMainWindow):
         try:
             from icon_art import draw_app_icon
             from PIL.ImageQt import ImageQt
-            img = draw_app_icon(64)
-            self.setWindowIcon(QIcon(QPixmap.fromImage(ImageQt(img))))
+            # Multiple native sizes so Windows picks a sharp match for every
+            # context (title bar, taskbar, Alt+Tab, jumbo icons on high-DPI
+            # displays) instead of stretching a single 64px bitmap.
+            icon = QIcon()
+            for size in (16, 24, 32, 48, 64, 128, 256, 512):
+                icon.addPixmap(QPixmap.fromImage(ImageQt(draw_app_icon(size))))
+            self.setWindowIcon(icon)
         except Exception:
             pass
 

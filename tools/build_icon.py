@@ -16,11 +16,16 @@ ASSETS = ROOT / "assets"
 
 def main():
     ASSETS.mkdir(exist_ok=True)
-    sizes = [16, 32, 48, 64, 128, 256]
-    imgs = [draw_app_icon(s) for s in sizes]
+    # .ico caps at 256px natively (Pillow silently drops larger entries), so
+    # that's already the ceiling for the Windows icon.
+    ico_sizes = [16, 32, 48, 64, 128, 256]
+    ico_imgs = [draw_app_icon(s) for s in ico_sizes]
+    ico_imgs[-1].save(ASSETS / "icon.ico", sizes=[(s, s) for s in ico_sizes])
 
-    imgs[-1].save(ASSETS / "icon.ico", sizes=[(s, s) for s in sizes])
-    imgs[-1].save(ASSETS / "icon.icns")
+    # .icns supports up to 1024px (512pt @2x retina); Pillow auto-derives the
+    # full mip chain from a single source image, so render at that size
+    # instead of reusing the 256px .ico source.
+    draw_app_icon(1024).save(ASSETS / "icon.icns")
 
     print(f"Wrote {ASSETS / 'icon.ico'}")
     print(f"Wrote {ASSETS / 'icon.icns'}")
