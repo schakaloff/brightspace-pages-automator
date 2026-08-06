@@ -16,6 +16,7 @@ import hashlib
 import html as html_module
 import json as _json_mod
 import os
+import queue
 import re
 from collections import Counter
 from functools import lru_cache
