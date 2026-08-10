@@ -1,3 +1,4 @@
+import asyncio
 import re
 import sys
 import time
@@ -147,7 +148,7 @@ def _load_prompt(theme_name: str) -> str:
     return fallback.read_text(encoding="utf-8") if fallback.exists() else ""
 
 
-def apply_style(
+async def apply_style(
     source_html: str,
     style_reference_html: str,
     theme_name: str,
@@ -181,17 +182,17 @@ def apply_style(
         style_reference_html=style_reference_html or "",
     )
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = anthropic.AsyncAnthropic(api_key=api_key)
 
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             log(f"🤖 {model} — attempt {attempt}/{_MAX_RETRIES} (theme: {theme_name})", "info")
-            with client.messages.stream(
+            async with client.messages.stream(
                 model=model,
                 max_tokens=_MAX_TOKENS,
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
-                response = stream.get_final_message()
+                response = await stream.get_final_message()
 
             if response.stop_reason == "max_tokens":
                 log(
@@ -238,7 +239,7 @@ def apply_style(
         except anthropic.APIStatusError as e:
             if e.status_code in (429, 529) and attempt < _MAX_RETRIES:
                 log(f"⚠ Server busy ({e.status_code}) — retrying in {_RETRY_DELAY}s...", "warning")
-                time.sleep(_RETRY_DELAY)
+                await asyncio.sleep(_RETRY_DELAY)
             else:
                 log(f"❌ Claude unavailable after {attempt} attempts: {e}", "error")
                 return None, None
@@ -250,7 +251,7 @@ def apply_style(
         except anthropic.APIConnectionError as e:
             if attempt < _MAX_RETRIES:
                 log(f"⚠ Connection error — retrying in {_RETRY_DELAY}s...", "warning")
-                time.sleep(_RETRY_DELAY)
+                await asyncio.sleep(_RETRY_DELAY)
             else:
                 log(f"❌ Could not reach Claude after {attempt} attempts: {e}", "error")
                 return None, None
