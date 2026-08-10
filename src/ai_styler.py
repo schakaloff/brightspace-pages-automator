@@ -3,6 +3,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Optional
+import anthropic
 
 _COLOR_PROP_RE = re.compile(r'(?:^|(?<=;))\s*(?:color|background-color)\s*:[^;]*', re.IGNORECASE)
 
@@ -158,7 +159,7 @@ def apply_style(
     """Returns (styled_html, usage) where usage is
     {"input_tokens", "output_tokens", "cost_cad"} — or (None, None) on failure.
     """
-    import anthropic
+
 
     def log(msg, level="info"):
         if log_callback:
