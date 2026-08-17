@@ -10,11 +10,6 @@ from typing import Callable, List, Optional
 from playwright.async_api import BrowserContext, Page
 
 
-# A single topic's inline HTML above this size is treated as a full standalone
-# document and linked instead of pasted — pasting very large HTML into D2L's
-# source-code dialog poisons the editor session and wipes the whole page.
-# Normal topic pages are a few hundred to a few thousand chars.
-MAX_INLINE_HTML_CHARS = 40000
 
 # Re-opening the target page straight after saving it races D2L's editor load,
 # so the first read-back often comes back short or empty even though the save
@@ -1582,27 +1577,8 @@ class UnitCollector:
                 safe = topic["label"].replace("<", "&lt;").replace(">", "&gt;")
 
                 if result["html"]:
-                    # A single topic's HTML that is very large is almost always a
-                    # full standalone document (its own <html>/<head>/<style>).
-                    # Pasting that into D2L's source-code dialog poisons the whole
-                    # editor session and wipes every section, so link to the
-                    # original topic instead of inlining it.
-                    if len(result["html"]) > MAX_INLINE_HTML_CHARS:
-                        self.log(
-                            f"⚠ '{topic['label']}' is too large to inline "
-                            f"({len(result['html']):,} chars) — linking to the "
-                            "original page instead.",
-                            "warning",
-                        )
-                        sections.append(
-                            f'<h2>{safe}</h2>\n'
-                            f'<p><a href="{topic["url"]}">Open original page: {safe}</a></p>\n'
-                            f'<hr/>\n'
-                        )
-                        link_count += 1
-                    else:
-                        sections.append(f"<h2>{safe}</h2>\n{result['html']}\n<hr/>\n")
-                        html_count += 1
+                    sections.append(f"<h2>{safe}</h2>\n{result['html']}\n<hr/>\n")
+                    html_count += 1
                 elif result["link_url"]:
                     corrected = self._name_matcher(topic["label"])
                     link_label = (corrected or topic["label"]).replace("<", "&lt;").replace(">", "&gt;")
