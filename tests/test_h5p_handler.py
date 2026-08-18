@@ -76,6 +76,31 @@ def _handler():
     )
 
 
+def test_slow_moodle_navigation_retries():
+    class SlowTab:
+        def __init__(self):
+            self.calls = 0
+            self.url = "about:blank"
+
+        async def goto(self, url, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("Timeout 60000ms exceeded")
+            self.url = url
+
+        async def wait_for_load_state(self, *args, **kwargs):
+            raise RuntimeError("still loading")
+
+        async def wait_for_timeout(self, ms):
+            return None
+
+    tab = SlowTab()
+    ok = asyncio.run(_handler()._goto_moodle(tab, "https://moodle.test/h5p", "H5P page"))
+
+    assert ok is True
+    assert tab.calls == 2
+
+
 def test_collect_cloud_titles_spans_pages():
     frame = FakeFrame()
     titles = asyncio.run(_handler()._collect_cloud_titles(FakeTab(), frame))

@@ -16,6 +16,11 @@ if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, Page
 
 
+MOODLE_NAV_TIMEOUT_MS = 60000
+MOODLE_SAVE_TIMEOUT_MS = 90000
+MOODLE_NAV_RETRIES = 3
+
+
 class H5PHandler:
     def __init__(
         self,
@@ -118,6 +123,45 @@ class H5PHandler:
         except Exception:
             pass
         return "Moodle rejected the save; no validation message was visible"
+
+    async def _goto_moodle(self, tab, url: str, label: str) -> bool:
+        """Navigate on slow Moodle hosts without sacrificing the whole item.
+
+        Moodle can take well over the old 15–20 second allowance after an H5P
+        form save. Each activity uses a fresh tab, so retrying the GET is safe.
+        A timed-out navigation is also accepted if DOMContentLoaded arrives
+        during a short grace period.
+        """
+        last_error = "navigation timed out"
+        for attempt in range(1, MOODLE_NAV_RETRIES + 1):
+            try:
+                await tab.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=MOODLE_NAV_TIMEOUT_MS,
+                )
+                return True
+            except Exception as exc:
+                last_error = str(exc).splitlines()[0]
+                try:
+                    await tab.wait_for_load_state("domcontentloaded", timeout=15000)
+                    if tab.url and "about:blank" not in tab.url:
+                        self.log(
+                            f"      {label} loaded during the timeout grace period",
+                            "detail",
+                        )
+                        return True
+                except Exception:
+                    pass
+                if attempt < MOODLE_NAV_RETRIES:
+                    self.log(
+                        f"    ⚠ {label} is slow — retrying "
+                        f"({attempt + 1}/{MOODLE_NAV_RETRIES})…",
+                        "warning",
+                    )
+                    await tab.wait_for_timeout(2000)
+        self.log(f"    ✗ {label} failed after retries: {last_error}", "error")
+        return False
 
     @staticmethod
     def validate_h5p_package(path: Path) -> tuple[bool, str]:
@@ -235,7 +279,9 @@ class H5PHandler:
             try:
                 # Step 1: navigate to H5P activity
                 self.log("      opening H5P activity page", "detail")
-                await tab.goto(url, wait_until="domcontentloaded", timeout=20000)
+                if not await self._goto_moodle(tab, url, "H5P activity page"):
+                    failure_reason = "H5P activity page did not load after retries"
+                    continue
                 self.log(f"      loaded: {tab.url}", "detail")
                 await tab.wait_for_timeout(1000)
 
@@ -251,7 +297,9 @@ class H5PHandler:
                 settings_href = await settings.first.get_attribute("href")
                 settings_href = re.sub(r'&return=\d+', '', settings_href)
                 self.log(f"      settings href: {settings_href}", "detail")
-                await tab.goto(settings_href, wait_until="domcontentloaded", timeout=15000)
+                if not await self._goto_moodle(tab, settings_href, "H5P settings page"):
+                    failure_reason = "H5P settings page did not load after retries"
+                    continue
                 await tab.wait_for_timeout(800)
 
                 # Step 3 & 4: enable Allow download via JS — works regardless of
@@ -280,23 +328,41 @@ class H5PHandler:
                 else:
                     self.log(f"    ✓ Download enabled", "success")
 
-                # Step 5: Save and display (scroll into view — button is below the fold)
-                self.log(f"    → Clicking Save and display…", "dim")
-                save_btn = tab.locator('#id_submitbutton')
-                if await save_btn.count() == 0:
-                    self.log(f"    ⚠ Save and display button not found", "warning")
-                    failure_reason = "Save and display button was not found"
-                    continue
-                await save_btn.first.scroll_into_view_if_needed()
-                await tab.wait_for_timeout(500)
-                await save_btn.first.click()
-                try:
-                    await tab.wait_for_url(lambda u: "modedit.php" not in u, timeout=15000)
-                except Exception:
-                    failure_reason = await self._moodle_save_failure_reason(tab)
-                    self.log(f"    ⚠ Moodle did not save this activity: {failure_reason}", "warning")
-                    continue
-                self.log(f"    ✓ Saved — on: {tab.url[:60]}", "dim")
+                # Step 5: Save only when we changed the checkbox. Re-saving an
+                # already-enabled H5P needlessly makes Moodle process the large
+                # package again and is especially painful on slower machines.
+                if cb_result.get("wasChecked"):
+                    self.log("    → No save needed — returning to activity", "dim")
+                    if not await self._goto_moodle(tab, url, "H5P activity page"):
+                        failure_reason = "Could not return to H5P activity"
+                        continue
+                else:
+                    self.log(f"    → Clicking Save and display…", "dim")
+                    save_btn = tab.locator('#id_submitbutton')
+                    if await save_btn.count() == 0:
+                        self.log(f"    ⚠ Save and display button not found", "warning")
+                        failure_reason = "Save and display button was not found"
+                        continue
+                    await save_btn.first.scroll_into_view_if_needed()
+                    await tab.wait_for_timeout(500)
+                    # Do not let Playwright's implicit navigation wait impose
+                    # its shorter default; the explicit wait below owns the
+                    # full slow-server allowance.
+                    await save_btn.first.click(timeout=15000, no_wait_after=True)
+                    try:
+                        await tab.wait_for_url(
+                            lambda u: "modedit.php" not in u,
+                            timeout=MOODLE_SAVE_TIMEOUT_MS,
+                        )
+                    except Exception:
+                        failure_reason = await self._moodle_save_failure_reason(tab)
+                        self.log(
+                            f"    ⚠ Moodle did not save this activity after "
+                            f"{MOODLE_SAVE_TIMEOUT_MS // 1000}s: {failure_reason}",
+                            "warning",
+                        )
+                        continue
+                    self.log(f"    ✓ Saved — on: {tab.url[:60]}", "dim")
                 await tab.wait_for_timeout(2000)
 
                 # Step 6: click Reuse button — scroll first (H5P iframe lazy-loads when visible)
