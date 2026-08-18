@@ -58,6 +58,14 @@ def wait_then_install_script(
         f'"try {{ Wait-Process -Id {pid} -Timeout 120 -ErrorAction Stop }} catch {{ }}" '
         '>NUL 2>&1',
         '>> "%LOG%" echo [%DATE% %TIME%] App exited, continuing',
+        # The PID above is the window that requested the update, but another
+        # app instance (or a slow child process retaining the application
+        # mutex) can still make Inno Setup abort in silent mode. Ensure the
+        # packaged executable is fully gone before launching Setup.
+        'if not "%APPNAME%"=="" (',
+        '  >> "%LOG%" echo [%DATE% %TIME%] Closing remaining %APPNAME% processes',
+        '  taskkill /F /IM "%APPNAME%" >NUL 2>&1',
+        ')',
         "timeout /t 1 /nobreak >NUL",
         '>> "%LOG%" echo [%DATE% %TIME%] Running installer "%INSTALLER%"',
         f'"%INSTALLER%" {args}',

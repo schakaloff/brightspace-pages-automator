@@ -35,6 +35,8 @@ def test_wait_script_relaunches_app_after_installer_finishes():
     )
 
     assert 'tasklist /FI "IMAGENAME eq %APPNAME%"' in script
+    assert 'taskkill /F /IM "%APPNAME%"' in script
+    assert script.index('taskkill /F /IM "%APPNAME%"') < script.index('"%INSTALLER%"')
     assert 'if exist "%APP%"' in script
     assert 'Restart command start "" /D "%APPDIR%" "%APP%"' in script
     assert 'start "" /D "%APPDIR%" "%APP%"' in script
