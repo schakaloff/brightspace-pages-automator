@@ -1,4 +1,5 @@
 import asyncio
+import zipfile
 import sys
 
 sys.path.insert(0, "src")
@@ -663,3 +664,120 @@ def test_insert_cast_vs_case_stays_distinct():
 
     assert matched == "Mrs Goodfemur Cast Study - Question 4"
     assert frame.clicked == [(BASE, 1)]  # row index 1 on page 1, not row 0
+
+
+# ── Gradebook choices and stable duplicate identities ─────────────────────────────
+
+def test_duplicate_titles_get_distinct_stable_cache_stems():
+    items = [
+        {"type": "SECTION", "name": "Week 1"},
+        {"type": "EXTERNAL", "name": "Practice", "hint": "h5p", "href": "https://m/x?id=1"},
+        {"type": "EXTERNAL", "name": "Practice", "hint": "h5p", "href": "https://m/x?id=2"},
+    ]
+    stems = H5PHandler._download_stems(items)
+    values = list(stems.values())
+    assert len(set(values)) == 2
+    assert all(value.startswith("Practice__") for value in values)
+
+
+def test_single_title_keeps_legacy_cache_filename():
+    item = {"type": "EXTERNAL", "name": "Drag & Drop", "hint": "h5p", "href": "https://m/x?id=1"}
+    assert H5PHandler._download_stems([item])[id(item)] == "Drag  Drop"
+
+
+class GradeChoiceTab:
+    async def wait_for_timeout(self, ms):
+        return None
+
+
+def test_graded_choice_only_requests_add_grade_item():
+    handler = _handler()
+    requested = []
+
+    async def click(tab, texts):
+        requested.append(texts)
+        return "add grade item" in texts
+
+    handler._auto_dismiss = click
+    status = asyncio.run(handler._handle_grade_prompt(GradeChoiceTab(), "Practice", True))
+    assert status == "handled"
+    assert requested == [["add grade item"]]
+    assert not any("proceed without" in text for texts in requested for text in texts)
+
+
+def test_ungraded_choice_requests_proceed_without_grade_item():
+    handler = _handler()
+    requested = []
+
+    async def click(tab, texts):
+        requested.append(texts)
+        return True
+
+    handler._auto_dismiss = click
+    status = asyncio.run(handler._handle_grade_prompt(GradeChoiceTab(), "Practice", False))
+    assert status == "handled"
+    assert "proceed without grade item" in requested[0]
+    assert "add grade item" not in requested[0]
+
+
+def test_missing_graded_choice_skips_instead_of_falling_back_ungraded():
+    handler = _handler()
+    requested = []
+
+    async def click(tab, texts):
+        requested.append(texts)
+        return False
+
+    handler._auto_dismiss = click
+    handler._grade_recovery = lambda name, graded: "skip"
+    status = asyncio.run(handler._handle_grade_prompt(GradeChoiceTab(), "Practice", True))
+    assert status == "skip"
+    assert not any("proceed without" in text for texts in requested for text in texts)
+
+
+class MoodleSaveFailureTab:
+    def __init__(self, result):
+        self.result = result
+
+    async def evaluate(self, script):
+        return self.result
+
+
+def test_moodle_save_failure_reports_missing_h5p_package():
+    tab = MoodleSaveFailureTab({"messages": [], "packageMissing": True})
+    reason = asyncio.run(H5PHandler._moodle_save_failure_reason(tab))
+    assert reason == "Moodle activity has no H5P package file attached"
+
+
+def test_moodle_generic_required_message_reports_missing_package():
+    tab = MoodleSaveFailureTab({"messages": ["Required"], "packageMissing": True})
+    reason = asyncio.run(H5PHandler._moodle_save_failure_reason(tab))
+    assert reason == "Moodle activity has no H5P package file attached"
+
+
+def test_moodle_save_failure_prefers_visible_validation_message():
+    tab = MoodleSaveFailureTab({
+        "messages": ["A package file is required"],
+        "packageMissing": True,
+    })
+    reason = asyncio.run(H5PHandler._moodle_save_failure_reason(tab))
+    assert reason == "A package file is required"
+
+
+def test_validate_h5p_package_accepts_zip_with_manifest(tmp_path):
+    package = tmp_path / "activity.h5p"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("h5p.json", '{"title":"Activity"}')
+        archive.writestr("content/content.json", "{}")
+
+    assert H5PHandler.validate_h5p_package(package) == (True, "")
+
+
+def test_validate_h5p_package_rejects_missing_manifest(tmp_path):
+    package = tmp_path / "activity.h5p"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("content/content.json", "{}")
+
+    valid, reason = H5PHandler.validate_h5p_package(package)
+    assert valid is False
+    assert reason == "package does not contain h5p.json"

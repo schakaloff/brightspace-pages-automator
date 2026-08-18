@@ -116,7 +116,7 @@ def test_fetch_toc_returns_empty_list_on_failure():
     async def _run():
         return await fetch_toc(page, "8520")
 
-    assert asyncio.run(_run()) == []
+    assert asyncio.run(_run()) is None
 
 
 def test_fetch_toc_returns_empty_list_on_exception():
@@ -127,7 +127,29 @@ def test_fetch_toc_returns_empty_list_on_exception():
     async def _run():
         return await fetch_toc(_RaisingPage(), "8520")
 
-    assert asyncio.run(_run()) == []
+    assert asyncio.run(_run()) is None
+
+
+def test_run_multi_does_not_call_toc_failure_course_complete():
+    messages = []
+
+    async def failed_fetch(page, course_id):
+        return None
+
+    async def run_unit(unit_url):
+        raise AssertionError("should never be called")
+
+    async def _run():
+        return await run_multi(
+            page=None, course_id="8520", base_url="https://example.test",
+            run_unit=run_unit, confirm_fn=lambda msg: True,
+            fetch_toc_fn=failed_fetch,
+            log=lambda msg, level="info": messages.append(msg),
+        )
+
+    summary = asyncio.run(_run())
+    assert summary["stopped_reason"] == "toc-failure"
+    assert not any("course complete" in message for message in messages)
 
 
 from multi_unit_selector import run_multi

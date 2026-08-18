@@ -322,6 +322,9 @@ class ContentChecker:
         on_moodle_waiting:   Callable           = None,
         h5p_ready_event:      threading.Event    = None,
         on_h5p_waiting:       Callable           = None,
+        h5p_recovery:         Optional[Callable] = None,
+        h5p_grade_all:        bool               = False,
+        h5p_grade_recovery:   Optional[Callable]  = None,
         file_checklist_event: threading.Event    = None,
         on_file_checklist:    Callable           = None,
         confirm_fn:           Optional[Callable] = None,
@@ -344,6 +347,7 @@ class ContentChecker:
         self.on_moodle_waiting      = on_moodle_waiting
         self.h5p_ready_event        = h5p_ready_event
         self.on_h5p_waiting         = on_h5p_waiting
+        self.h5p_recovery           = h5p_recovery
         self.file_checklist_event   = file_checklist_event
         self.on_file_checklist      = on_file_checklist
         self.file_checklist_result  = []
@@ -373,7 +377,9 @@ class ContentChecker:
             summary=self._summary,
             notify=self._notify,
             should_stop=lambda: self.stop_flag[0],
+            grade_recovery=h5p_grade_recovery,
         )
+        self._h5p.grade_all = h5p_grade_all
 
     def _debug_log_worker(self) -> None:
         """Background thread that writes log messages to disk."""
@@ -2144,20 +2150,27 @@ class ContentChecker:
 
             # If there are H5P items, pause so the user can check the browser
             # (e.g. switch out of preview mode) before downloads start.
-            h5p_pending = [
+            h5p_activities = [
                 i for i in items
                 if i.get("type") == "EXTERNAL"
                 and ("hvp" in i.get("hint", "") or "h5p" in i.get("hint", ""))
                 and i.get("href")
             ]
-            if h5p_pending:
+            h5p_cached, h5p_missing = self._h5p.local_download_status(items)
+            if h5p_activities:
                 self.log("", "dim")
                 self.log("─" * 52, "dim")
-                self.log(f"🎮 {len(h5p_pending)} H5P file(s) to download.", "step")
+                self.log(
+                    f"🎮 {len(h5p_activities)} H5P activities: "
+                    f"{len(h5p_cached)} already local, "
+                    f"{len(h5p_missing)} need downloading.",
+                    "step",
+                )
+            if h5p_missing:
                 # Auto-switch to Instructor role so edit controls appear
                 await self._switch_to_instructor_role(tab)
 
-            if h5p_pending and self.on_h5p_waiting:
+            if h5p_missing and self.on_h5p_waiting:
                 self.log(
                     "  Verify the browser looks right, then click"
                     " ✅ Ready — Download H5P in the app.",
@@ -2181,8 +2194,26 @@ class ContentChecker:
                 self.log("  ⏭ H5P download skipped.", "dim")
             else:
                 self.log("  Starting H5P download preparation...", "step")
-                await self._h5p.enable_downloads(context, items)
+                h5p_failures = await self._h5p.enable_downloads(context, items)
                 self.log("  Finished H5P download preparation.", "step")
+                if h5p_failures and self.h5p_recovery:
+                    self.log(
+                        f"  Recovery available for {len(h5p_failures)} missing H5P file(s).",
+                        "warning",
+                    )
+                    loop = asyncio.get_event_loop()
+                    selections = await loop.run_in_executor(
+                        None, self.h5p_recovery, h5p_failures
+                    )
+                    recovered = self._h5p.recover_downloads(
+                        h5p_failures, selections or []
+                    )
+                    remaining = len(h5p_failures) - len(recovered)
+                    self.log(
+                        f"  H5P recovery: {len(recovered)} recovered, "
+                        f"{remaining} still missing — continuing with available files.",
+                        "success" if not remaining else "warning",
+                    )
 
             await tab.close()
             n_items = sum(1 for i in items if i["type"] != "SECTION")
@@ -3192,13 +3223,25 @@ class ContentChecker:
                 self.log(f"   ❌ {name}  →  {mod}", "error")
 
         # ── H5P embeds ────────────────────────────────────────────────────────
-        if s["h5p_inserted"] or s["h5p_failed"]:
+        if (s["h5p_inserted"] or s["h5p_failed"] or s.get("h5p_skipped")
+                or s.get("h5p_grade_failed")):
             self.log("", "dim")
-            self.log("🎮 H5P embeds:", "info")
+            self.log(
+                f"🎮 H5P: {len(s['h5p_inserted'])} newly inserted, "
+                f"{len(s.get('h5p_already_present', []))} already present, "
+                f"{len(s['h5p_failed'])} failed",
+                "info",
+            )
             for name, mod in s["h5p_inserted"]:
                 self.log(f"   ✅ {name}  →  {mod}", "success")
             for name, mod in s["h5p_failed"]:
                 self.log(f"   ❌ {name}  →  {mod}", "error")
+            self.log(
+                f"   Gradebook: {len(s.get('h5p_graded', []))} graded, "
+                f"{len(s.get('h5p_ungraded', []))} ungraded, "
+                f"{len(s.get('h5p_grade_failed', []))} existing item(s) not changed",
+                "info",
+            )
 
         self.log("", "dim")
         self.log("═" * 52, "dim")
@@ -3248,6 +3291,11 @@ class ContentChecker:
             "files_failed":   [],
             "h5p_inserted":   [],
             "h5p_failed":     [],
+            "h5p_graded":     [],
+            "h5p_ungraded":   [],
+            "h5p_skipped":    [],
+            "h5p_grade_failed": [],
+            "h5p_already_present": [],
         }
         self._h5p._summary = self._summary
 

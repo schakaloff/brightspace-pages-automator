@@ -1,5 +1,6 @@
 # tests/test_gui_panels.py
 import sys
+import threading
 sys.path.insert(0, "src")
 
 
@@ -102,7 +103,51 @@ def test_checker_panel_builds(qtbot):
     panel = CheckerPanel(mw)
     qtbot.addWidget(panel)
     assert panel._run_btn.text() == "Run Check"
+    assert panel._gradebook_cb.text() == "Add H5P activities to gradebook"
+    assert panel._gradebook_cb.isChecked() is False
     # assert panel._continue_btn.isHidden()
+
+
+def test_h5p_panel_has_pre_run_gradebook_checkbox(qtbot):
+    from unittest.mock import MagicMock
+    from panels.h5p_panel import H5PPanel
+    mw = MagicMock()
+    mw.chromium_ready = False
+    mw.load_config.return_value = {}
+    panel = H5PPanel(mw)
+    qtbot.addWidget(panel)
+    assert panel._gradebook_cb.text() == "Add H5P activities to gradebook"
+    assert panel._gradebook_cb.isChecked() is False
+    panel._gradebook_cb.setChecked(True)
+    assert panel._gradebook_cb.isChecked() is True
+
+
+def test_h5p_recovery_dialog_matches_dropped_package(qtbot, tmp_path):
+    from gui_dialogs import H5PRecoveryDialog
+
+    event = threading.Event()
+    result = []
+    failures = [{
+        "activity_key": "https://moodle/mod/h5pactivity/view.php?id=1",
+        "name": "Introduction 2024",
+        "safe_name": "Introduction 2024",
+        "reason": "Moodle activity has no H5P package file attached",
+    }]
+    package = tmp_path / "Introduction_2024.h5p"
+    package.write_bytes(b"placeholder")
+    dialog = H5PRecoveryDialog(failures, result, event)
+    qtbot.addWidget(dialog)
+
+    dialog._add_dropped_files([str(package)])
+    assert dialog._rows[0]["path"] == str(package)
+    assert "Matched 1" in dialog._drop_status.text()
+
+    dialog._continue()
+    assert event.is_set()
+    assert result == [{
+        "activity_key": "https://moodle/mod/h5pactivity/view.php?id=1",
+        "path": str(package),
+    }]
 
 
 def test_collector_panel_builds(qtbot):

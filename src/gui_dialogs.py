@@ -1,4 +1,6 @@
 import json
+import difflib
+import re
 import sys
 import threading
 import webbrowser
@@ -7,9 +9,207 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QWidget, QCheckBox, QSpinBox,
-    QFrame, QProgressBar,
+    QFrame, QProgressBar, QFileDialog, QLineEdit,
 )
 from PySide6.QtCore import Qt, Signal
+
+
+# ── H5PRecoveryDialog ───────────────────────────────────────────────────────
+
+class H5PRecoveryDialog(QDialog):
+    """Collect replacement packages for Moodle H5P downloads that failed."""
+
+    def __init__(self, failures: list[dict], result_list: list,
+                 event: threading.Event, parent=None):
+        super().__init__(parent)
+        self._failures = failures
+        self._result_list = result_list
+        self._event = event
+        self._rows: list[dict] = []
+        self.setWindowTitle("Recover missing H5P files")
+        self.setMinimumSize(720, 500)
+        self.resize(780, 580)
+        self.setModal(True)
+        self.setAcceptDrops(True)
+        self._build()
+
+    @staticmethod
+    def _norm(value: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", value.lower())
+
+    def _build(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 18, 22, 16)
+        layout.setSpacing(10)
+
+        title = QLabel(f"⚠ {len(self._failures)} H5P file(s) were not downloaded")
+        title.setStyleSheet("font-size:15px; font-weight:bold;")
+        layout.addWidget(title)
+        help_text = QLabel(
+            "Drop replacement .h5p files anywhere in this window, or choose a file "
+            "beside an activity. Files are copied into the app cache; originals are untouched."
+        )
+        help_text.setWordWrap(True)
+        help_text.setProperty("role", "dim")
+        layout.addWidget(help_text)
+
+        drop = QLabel("Drop missing .h5p files here")
+        drop.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        drop.setMinimumHeight(70)
+        drop.setStyleSheet(
+            "border:2px dashed #777; border-radius:8px; padding:18px; "
+            "font-size:14px; font-weight:bold;"
+        )
+        layout.addWidget(drop)
+        self._drop_status = QLabel("")
+        self._drop_status.setProperty("role", "dim")
+        self._drop_status.setWordWrap(True)
+        layout.addWidget(self._drop_status)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        inner = QWidget()
+        rows = QVBoxLayout(inner)
+        rows.setAlignment(Qt.AlignmentFlag.AlignTop)
+        rows.setSpacing(10)
+        for failure in self._failures:
+            box = QFrame()
+            box.setFrameShape(QFrame.Shape.StyledPanel)
+            row_layout = QVBoxLayout(box)
+            row_layout.setContentsMargins(10, 8, 10, 8)
+            name = QLabel(failure["name"])
+            name.setStyleSheet("font-weight:bold;")
+            reason = QLabel(failure.get("reason") or "Moodle download failed")
+            reason.setProperty("role", "dim")
+            reason.setWordWrap(True)
+            select_row = QHBoxLayout()
+            path_field = QLineEdit()
+            path_field.setReadOnly(True)
+            path_field.setPlaceholderText("No replacement selected")
+            browse = QPushButton("Choose .h5p…")
+            browse.setProperty("variant", "secondary")
+            browse.clicked.connect(
+                lambda checked=False, f=failure: self._choose_file(f)
+            )
+            select_row.addWidget(path_field, 1)
+            select_row.addWidget(browse)
+            row_layout.addWidget(name)
+            row_layout.addWidget(reason)
+            row_layout.addLayout(select_row)
+            rows.addWidget(box)
+            self._rows.append({
+                "failure": failure, "field": path_field, "path": ""
+            })
+        scroll.setWidget(inner)
+        layout.addWidget(scroll, 1)
+
+        self._count = QLabel()
+        self._count.setProperty("role", "dim")
+        layout.addWidget(self._count)
+
+        actions = QHBoxLayout()
+        continue_btn = QPushButton("Continue with available H5Ps")
+        continue_btn.setFixedHeight(40)
+        continue_btn.clicked.connect(self._continue)
+        skip_btn = QPushButton("Continue without replacements")
+        skip_btn.setProperty("variant", "secondary")
+        skip_btn.setFixedHeight(40)
+        skip_btn.clicked.connect(self._skip)
+        actions.addWidget(continue_btn, 1)
+        actions.addWidget(skip_btn)
+        layout.addLayout(actions)
+        self._update_count()
+
+    def _choose_file(self, failure: dict):
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"Choose H5P for {failure['name']}", "", "H5P packages (*.h5p)"
+        )
+        if path:
+            row = next(r for r in self._rows if r["failure"] is failure)
+            self._assign(row, path)
+
+    def _assign(self, row: dict, path: str):
+        row["path"] = path
+        row["field"].setText(path)
+        self._update_count()
+
+    def _add_dropped_files(self, paths: list[str]):
+        available = [r for r in self._rows if not r["path"]]
+        matched = 0
+        unmatched = []
+        for path in paths:
+            if Path(path).suffix.lower() != ".h5p" or not available:
+                unmatched.append(Path(path).name)
+                continue
+            stem = self._norm(Path(path).stem)
+            scored = sorted(
+                ((difflib.SequenceMatcher(None, stem, self._norm(r["failure"]["name"])).ratio(), r)
+                 for r in available),
+                key=lambda pair: pair[0], reverse=True,
+            )
+            if not scored:
+                continue
+            score, row = scored[0]
+            # Exact/contained names are safe. Fuzzy names need a strong unique match.
+            second = scored[1][0] if len(scored) > 1 else 0
+            if (stem in self._norm(row["failure"]["name"])
+                    or self._norm(row["failure"]["name"]) in stem
+                    or (score >= 0.72 and score - second >= 0.08)):
+                self._assign(row, path)
+                available.remove(row)
+                matched += 1
+            else:
+                unmatched.append(Path(path).name)
+        status = f"Matched {matched} dropped file(s)."
+        if unmatched:
+            status += " Choose a row manually for: " + ", ".join(unmatched)
+        self._drop_status.setText(status)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and any(
+            Path(url.toLocalFile()).suffix.lower() == ".h5p"
+            for url in event.mimeData().urls()
+        ):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        self._add_dropped_files([
+            url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()
+        ])
+        event.acceptProposedAction()
+
+    def _update_count(self):
+        selected = sum(bool(row["path"]) for row in self._rows)
+        self._count.setText(
+            f"{selected} replacement(s) selected; "
+            f"{len(self._rows) - selected} will remain missing"
+        )
+
+    def _continue(self):
+        selections = [
+            {
+                "activity_key": row["failure"]["activity_key"],
+                "path": row["path"],
+            }
+            for row in self._rows if row["path"]
+        ]
+        self._release(selections)
+
+    def _skip(self):
+        self._release([])
+
+    def _release(self, selections: list[dict]):
+        self._result_list.clear()
+        self._result_list.extend(selections)
+        self._event.set()
+        self.accept()
+
+    def closeEvent(self, event):
+        if not self._event.is_set():
+            self._result_list.clear()
+            self._event.set()
+        super().closeEvent(event)
 
 
 # ── FileChecklistDialog ───────────────────────────────────────────────────────

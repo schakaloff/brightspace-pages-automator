@@ -4,7 +4,7 @@ import threading
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit,
+    QPushButton, QLineEdit, QCheckBox,
 )
 from PySide6.QtCore import Signal, QTimer
 
@@ -56,6 +56,15 @@ class H5PPanel(QWidget):
         self._moodle_entry.setPlaceholderText("https://mymoodle.okanagan.bc.ca/course/view.php?id=…")
         self._moodle_entry.setFixedHeight(40)
         layout.addWidget(self._moodle_entry)
+        layout.addSpacing(12)
+
+        self._gradebook_cb = QCheckBox("Add H5P activities to gradebook")
+        self._gradebook_cb.setChecked(False)
+        self._gradebook_cb.setToolTip(
+            "Checked: choose Add Grade Item for every H5P activity in this run. "
+            "Unchecked: proceed without grade items."
+        )
+        layout.addWidget(self._gradebook_cb)
         layout.addSpacing(14)
 
         self._run_btn = QPushButton("Run H5P")
@@ -115,6 +124,7 @@ class H5PPanel(QWidget):
 
         bs_url = self._bs_entry.text().strip()
         moodle_url = self._moodle_entry.text().strip()
+        grade_all = self._gradebook_cb.isChecked()
         if not bs_url or not moodle_url:
             self._log.append_log("Enter both a Brightspace and a Moodle course URL.", "warning")
             return
@@ -138,6 +148,20 @@ class H5PPanel(QWidget):
 
         q = self._log_queue
 
+        def grade_recovery(item_name: str, should_grade: bool) -> str:
+            result = ["skip"]
+            event = threading.Event()
+            q.put(("__H5P_GRADE_RECOVERY__", (item_name, result, event)))
+            event.wait()
+            return result[0]
+
+        def h5p_recovery(failures: list[dict]) -> list[dict]:
+            result = []
+            event = threading.Event()
+            q.put(("__H5P_FILE_RECOVERY__", (failures, result, event)))
+            event.wait()
+            return result
+
         def worker():
             done_sent = [False]
 
@@ -157,7 +181,10 @@ class H5PPanel(QWidget):
                     on_moodle_waiting=lambda: q.put(("__H5P_MOODLE_WAITING__", "")),
                     h5p_ready_event=h5p_ev,
                     on_h5p_waiting=lambda: q.put(("__H5P_WAITING__", "")),
+                    h5p_recovery=h5p_recovery,
                     h5p_skip_flag=skip_flag,
+                    h5p_grade_all=grade_all,
+                    h5p_grade_recovery=grade_recovery,
                     bs_username=self._mw.bs_username,
                     bs_password=self._mw.bs_password,
                     sso_email=self._mw.sso_email,
@@ -207,6 +234,28 @@ class H5PPanel(QWidget):
                         pass
                     self._h5p_ready_btn.clicked.connect(self._h5p_ready)
                     self._h5p_skip_btn.clicked.connect(self._h5p_skip)
+                elif msg == "__H5P_GRADE_RECOVERY__":
+                    item_name, result_ref, event = tag
+                    from PySide6.QtWidgets import QMessageBox
+                    dlg = QMessageBox(self)
+                    dlg.setWindowTitle("H5P gradebook action needed")
+                    dlg.setText(
+                        f"The app could not choose Add Grade Item for:\n\n{item_name}\n\n"
+                        "You can fix the open Brightspace dialog manually, retry, skip this item, or stop."
+                    )
+                    fixed = dlg.addButton("I fixed it — Continue", QMessageBox.ButtonRole.AcceptRole)
+                    retry = dlg.addButton("Retry Automatically", QMessageBox.ButtonRole.ActionRole)
+                    skip = dlg.addButton("Skip This Item", QMessageBox.ButtonRole.DestructiveRole)
+                    stop = dlg.addButton("Stop Run", QMessageBox.ButtonRole.RejectRole)
+                    dlg.exec()
+                    clicked = dlg.clickedButton()
+                    result_ref[0] = ("continue" if clicked is fixed else "retry" if clicked is retry
+                                     else "stop" if clicked is stop else "skip")
+                    event.set()
+                elif msg == "__H5P_FILE_RECOVERY__":
+                    failures, result_ref, event = tag
+                    from gui_dialogs import H5PRecoveryDialog
+                    H5PRecoveryDialog(failures, result_ref, event, self).exec()
                 else:
                     self._log.append_log(msg, tag)
         except queue.Empty:

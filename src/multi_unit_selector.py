@@ -25,6 +25,7 @@ Field names confirmed live against a real course (2026-07-14):
   Topic:  Title
 """
 
+import asyncio
 from typing import Awaitable, Callable, Optional
 
 from playwright.async_api import Page
@@ -70,22 +71,33 @@ _JS_FETCH_TOC = r"""async ([courseId]) => {
 }"""
 
 
-async def fetch_toc(page: Page, course_id: str, log: Optional[Callable] = None) -> list:
-    """Fetch and flatten this course's top-level modules. Never raises —
-    returns [] on any failure so the caller can stop the multi-unit run."""
+async def fetch_toc(page: Page, course_id: str, log: Optional[Callable] = None) -> Optional[list]:
+    """Fetch and flatten this course's top-level modules.
+
+    ``[]`` means the request succeeded and the course genuinely has no
+    modules. ``None`` means the request failed.  Keeping those states distinct
+    is important: treating a transient API failure as an empty course makes a
+    multi-unit run incorrectly announce "course complete".
+    """
     def _log(msg: str, level: str = "info"):
         if log:
             log(msg, level)
 
-    try:
-        result = await page.evaluate(_JS_FETCH_TOC, [course_id])
-    except Exception as e:
-        _log(f"✗ Could not fetch course structure: {e}", "error")
-        return []
+    result = None
+    for attempt in range(1, 4):
+        try:
+            result = await page.evaluate(_JS_FETCH_TOC, [course_id])
+        except Exception as e:
+            result = {"ok": False, "reason": str(e)}
+        if result and result.get("ok"):
+            break
+        if attempt < 3:
+            _log(f"⚠ Course structure fetch failed; retrying ({attempt}/3)…", "warning")
+            await asyncio.sleep(2)
 
     if not result or not result.get("ok"):
         _log(f"✗ Course structure fetch failed ({(result or {}).get('reason', 'unknown')})", "error")
-        return []
+        return None
 
     return _flatten_modules(result["modules"])
 
@@ -118,6 +130,10 @@ async def run_multi(
 
     while True:
         modules = await fetch(page, course_id)
+        if modules is None:
+            stopped_reason = "toc-failure"
+            _log("✗ Stopped: could not verify the remaining course units", "error")
+            break
         next_unit = select_next_unit(modules, combined_suffix)
 
         if next_unit is None:

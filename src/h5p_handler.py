@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import difflib
+import hashlib
 import re
+import shutil
+import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 from urllib.parse import urlparse
@@ -24,6 +28,7 @@ class H5PHandler:
         summary: dict,
         notify: Optional[Callable] = None,
         should_stop: Optional[Callable] = None,
+        grade_recovery: Optional[Callable] = None,
     ) -> None:
         self.log = log
         self._eval_in_any_frame = eval_in_any_frame
@@ -34,9 +39,130 @@ class H5PHandler:
         self._summary = summary
         self._notify = notify
         self._should_stop = should_stop or (lambda: False)
+        self._grade_recovery = grade_recovery
+        self.grade_all = False
         self._DEEP_FIND_JS = DEEP_FIND_JS
 
-    async def enable_downloads(self, context, items: list) -> None:
+    @staticmethod
+    def activity_key(item: dict) -> str:
+        """Stable identity for a Moodle H5P activity, including duplicate titles."""
+        href = (item.get("href") or "").split("#", 1)[0].strip()
+        return href or f"{item.get('name', '')}|{item.get('hint', '')}"
+
+    @classmethod
+    def _download_stems(cls, items: list) -> dict[int, str]:
+        h5p_items = [i for i in items if i.get("type") == "EXTERNAL"
+                     and ("hvp" in i.get("hint", "") or "h5p" in i.get("hint", ""))
+                     and i.get("href")]
+        bases = [cls._sanitize_name(i.get("name") or "H5P") for i in h5p_items]
+        counts = {base: bases.count(base) for base in set(bases)}
+        result = {}
+        for item, base in zip(h5p_items, bases):
+            if counts[base] > 1:
+                digest = hashlib.sha1(cls.activity_key(item).encode("utf-8")).hexdigest()[:8]
+                base = f"{base}__{digest}"
+            result[id(item)] = base
+        return result
+
+    @classmethod
+    def local_download_status(cls, items: list) -> tuple[list[dict], list[dict]]:
+        """Split Moodle H5P activities into locally cached and missing lists."""
+        stems = cls._download_stems(items)
+        save_dir = Path(__file__).parent.parent / "downloads" / "h5p"
+        cached, missing = [], []
+        for item in items:
+            if id(item) not in stems:
+                continue
+            entry = {
+                "item": item,
+                "safe_name": stems[id(item)],
+                "path": save_dir / f"{stems[id(item)]}.h5p",
+            }
+            (cached if entry["path"].exists() else missing).append(entry)
+        return cached, missing
+
+    @staticmethod
+    async def _moodle_save_failure_reason(tab) -> str:
+        """Explain why Moodle left an H5P activity on its edit form."""
+        try:
+            details = await tab.evaluate("""() => {
+                const messages = [];
+                const selectors = [
+                    '.invalid-feedback', '.form-control-feedback',
+                    '.error', '[id^="id_error_"]', '.alert-danger'
+                ];
+                for (const el of document.querySelectorAll(selectors.join(','))) {
+                    const text = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+                    if (text && !messages.includes(text)) messages.push(text);
+                }
+                const field = document.querySelector('#fitem_id_packagefile');
+                let packageMissing = false;
+                if (field) {
+                    const filename = field.querySelector(
+                        '.fp-filename, .filepicker-filelist .file-name, a[href$=".h5p"]'
+                    );
+                    const text = (field.textContent || '').toLowerCase();
+                    packageMissing = !filename && text.includes('drag and drop files here');
+                }
+                return { messages, packageMissing };
+            }""")
+            messages = (details or {}).get("messages") or []
+            package_missing = (details or {}).get("packageMissing")
+            useful_messages = [m for m in messages if m.strip().lower() != "required"]
+            if useful_messages:
+                return "; ".join(useful_messages[:3])
+            if package_missing:
+                return "Moodle activity has no H5P package file attached"
+            if messages:
+                return "; ".join(messages[:3])
+        except Exception:
+            pass
+        return "Moodle rejected the save; no validation message was visible"
+
+    @staticmethod
+    def validate_h5p_package(path: Path) -> tuple[bool, str]:
+        """Return whether *path* is an importable H5P ZIP package."""
+        path = Path(path)
+        if path.suffix.lower() != ".h5p":
+            return False, "file must have an .h5p extension"
+        if not path.is_file():
+            return False, "file does not exist"
+        try:
+            with zipfile.ZipFile(path) as package:
+                names = {name.replace("\\", "/").lstrip("./") for name in package.namelist()}
+                if "h5p.json" not in names:
+                    return False, "package does not contain h5p.json"
+        except (OSError, zipfile.BadZipFile):
+            return False, "file is not a valid H5P ZIP package"
+        return True, ""
+
+    def recover_downloads(self, failures: list[dict], selections: list[dict]) -> list[dict]:
+        """Validate and copy user-supplied packages into the course H5P cache."""
+        by_key = {failure["activity_key"]: failure for failure in failures}
+        recovered = []
+        save_dir = Path(__file__).parent.parent / "downloads" / "h5p"
+        save_dir.mkdir(parents=True, exist_ok=True)
+        for selection in selections:
+            failure = by_key.get(selection.get("activity_key"))
+            if not failure:
+                self.log("  ✗ Recovery file did not match a failed Moodle activity", "error")
+                continue
+            source = Path(selection.get("path") or "")
+            valid, reason = self.validate_h5p_package(source)
+            if not valid:
+                self.log(f"  ✗ Recovery rejected for {failure['name']}: {reason}", "error")
+                continue
+            target = save_dir / f"{failure['safe_name']}.h5p"
+            try:
+                if source.resolve() != target.resolve():
+                    shutil.copy2(source, target)
+                recovered.append(failure)
+                self.log(f"  ✓ RECOVERED: {failure['name']} ← {source.name}", "success")
+            except OSError as exc:
+                self.log(f"  ✗ Recovery copy failed for {failure['name']}: {exc}", "error")
+        return recovered
+
+    async def enable_downloads(self, context, items: list) -> list[dict]:
         """
         For each H5P activity: open Settings, tick Allow download, Save and display.
         Each item gets a fresh page so a crashed/stalled tab can't affect the rest.
@@ -49,34 +175,63 @@ class H5PHandler:
         ]
 
         if not h5p_items:
-            return
+            return []
 
         self.log("", "dim")
         self.log("─" * 52, "dim")
         self.log(f"🎮 H5P activities found: {len(h5p_items)}", "step")
-        self.log("  Enabling download on each…", "dim")
+        self.log("  Checking the local H5P cache first…", "dim")
 
         save_dir = Path(__file__).parent.parent / "downloads" / "h5p"
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        success = skipped = 0
-        for idx, item in enumerate(h5p_items, 1):
+        cached_status, pending_status = self.local_download_status(items)
+        cached_items = [
+            (entry["item"], entry["safe_name"], entry["path"])
+            for entry in cached_status
+        ]
+        pending_items = [
+            (entry["item"], entry["safe_name"], entry["path"])
+            for entry in pending_status
+        ]
+
+        success = skipped = len(cached_items)
+        failures: list[dict] = []
+        self.log(
+            f"  Local H5P cache: {len(cached_items)} ready, "
+            f"{len(pending_items)} missing.",
+            "success" if cached_items else "info",
+        )
+        if cached_items:
+            self.log(
+                "  ✓ Cached files will be reused — Moodle will not download them again.",
+                "success",
+            )
+            for cached_item, _, cached_path in cached_items:
+                self.log(
+                    f"      LOCAL: {cached_item['name']} → {cached_path.name}",
+                    "detail",
+                )
+        if pending_items:
+            self.log(
+                f"  Attempting only the {len(pending_items)} missing H5P download(s)…",
+                "step",
+            )
+
+        for idx, (item, safe_name, save_path) in enumerate(pending_items, 1):
             name      = item["name"]
             url       = item["href"]
-            safe_name = self._sanitize_name(name)
-            save_path = save_dir / f"{safe_name}.h5p"
 
-            self.log(f"  [{idx}/{len(h5p_items)}] Preparing H5P download: {name}", "step")
+            self.log(
+                f"  [{idx}/{len(pending_items)}] Downloading missing H5P: {name}",
+                "step",
+            )
             self.log(f"      href: {url}", "detail")
             self.log(f"      save path: {save_path}", "detail")
 
-            if save_path.exists():
-                self.log(f"    ℹ Already downloaded — skipping", "dim")
-                success += 1
-                skipped += 1
-                continue
-
             tab = await context.new_page()
+            downloaded = False
+            failure_reason = "download process stopped before a file was saved"
             try:
                 # Step 1: navigate to H5P activity
                 self.log("      opening H5P activity page", "detail")
@@ -91,6 +246,7 @@ class H5PHandler:
                 self.log(f"      settings links found: {settings_count}", "detail")
                 if settings_count == 0:
                     self.log(f"    ⚠ No Settings link — check teacher access", "warning")
+                    failure_reason = "Settings link not available (check Teacher access)"
                     continue
                 settings_href = await settings.first.get_attribute("href")
                 settings_href = re.sub(r'&return=\d+', '', settings_href)
@@ -117,6 +273,7 @@ class H5PHandler:
                 }""")
                 if not cb_result or not cb_result.get("found"):
                     self.log(f"    ⚠ Allow download checkbox not found", "warning")
+                    failure_reason = "Allow download checkbox was not found"
                     continue
                 if cb_result.get("wasChecked"):
                     self.log(f"    ✓ Already enabled", "dim")
@@ -128,6 +285,7 @@ class H5PHandler:
                 save_btn = tab.locator('#id_submitbutton')
                 if await save_btn.count() == 0:
                     self.log(f"    ⚠ Save and display button not found", "warning")
+                    failure_reason = "Save and display button was not found"
                     continue
                 await save_btn.first.scroll_into_view_if_needed()
                 await tab.wait_for_timeout(500)
@@ -135,7 +293,8 @@ class H5PHandler:
                 try:
                     await tab.wait_for_url(lambda u: "modedit.php" not in u, timeout=15000)
                 except Exception:
-                    self.log(f"    ⚠ Save didn't navigate away — still on {tab.url[:80]}", "warning")
+                    failure_reason = await self._moodle_save_failure_reason(tab)
+                    self.log(f"    ⚠ Moodle did not save this activity: {failure_reason}", "warning")
                     continue
                 self.log(f"    ✓ Saved — on: {tab.url[:60]}", "dim")
                 await tab.wait_for_timeout(2000)
@@ -173,6 +332,7 @@ class H5PHandler:
 
                 if not reuse_clicked:
                     self.log(f"    ⚠ Reuse button not found in any frame", "warning")
+                    failure_reason = "Reuse button was not found after saving"
                     continue
 
                 # Step 7: wait for download dialog then click "Download as an .h5p file"
@@ -194,6 +354,7 @@ class H5PHandler:
 
                 if not dl_frame:
                     self.log(f"    ⚠ Download dialog did not appear", "warning")
+                    failure_reason = "Reuse opened, but the download dialog did not appear"
                 else:
                     try:
                         async with tab.expect_download(timeout=15000) as dl_info:
@@ -202,12 +363,23 @@ class H5PHandler:
                         await download.save_as(str(save_path))
                         self.log(f"    💾 Saved: {safe_name}.h5p", "success")
                         success += 1
+                        downloaded = True
                     except Exception as e:
                         self.log(f"    ✗ Download failed: {e}", "error")
+                        failure_reason = f"browser download failed: {e}"
 
             except Exception as e:
                 self.log(f"    ✗ Failed: {e}", "error")
+                failure_reason = str(e)
             finally:
+                if not downloaded:
+                    failures.append({
+                        "activity_key": self.activity_key(item),
+                        "name": name,
+                        "safe_name": safe_name,
+                        "reason": failure_reason,
+                    })
+                    self.log(f"    ✗ NOT DOWNLOADED: {name} — {failure_reason}", "error")
                 try:
                     await tab.close()
                 except Exception:
@@ -215,15 +387,20 @@ class H5PHandler:
 
         self.log("", "dim")
         new_downloads = success - skipped
-        if skipped:
-            self.log(
-                f"  H5P: {new_downloads} downloaded, {skipped} already cached ({success}/{len(h5p_items)} total)",
-                "success",
-            )
-        else:
-            self.log(f"  H5P: {success}/{len(h5p_items)} downloaded", "success")
+        result_level = "error" if failures else "success"
+        self.log(
+            f"  H5P download result: {new_downloads} downloaded, "
+            f"{skipped} already cached, {len(failures)} NOT DOWNLOADED "
+            f"({success}/{len(h5p_items)} available)",
+            result_level,
+        )
+        if failures:
+            self.log(f"  H5P NOT DOWNLOADED: {len(failures)}", "error")
+            for failure in failures:
+                self.log(f"    ✗ {failure['name']} — {failure['reason']}", "error")
         if new_downloads > 0:
             self.log(f"  Saved to: downloads/h5p/", "dim")
+        return failures
 
     async def open_interactives(self, tab, for_quiz: bool = False) -> bool:
         df = self._DEEP_FIND_JS
@@ -503,13 +680,14 @@ class H5PHandler:
         section_map: dict = {}
         title_map: dict = {}
         current_section = ""
+        stems = cls._download_stems(moodle_items)
         for item in moodle_items:
             if item["type"] == "SECTION":
                 current_section = item["name"]
             elif item["type"] == "EXTERNAL" and (
                 "hvp" in item.get("hint", "") or "h5p" in item.get("hint", "")
-            ):
-                safe = cls._sanitize_name(item["name"])
+            ) and id(item) in stems:
+                safe = stems[id(item)]
                 section_map[safe] = current_section
                 title_map[safe] = item["name"]
         return section_map, title_map
@@ -1042,7 +1220,53 @@ class H5PHandler:
                 return ""
         return ""
 
-    async def insert_from_list(self, tab, h5p_frame, item_name) -> bool:
+    async def _grade_recovery_action(self, item_name: str, should_grade: bool) -> str:
+        if not self._grade_recovery:
+            return "skip"
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self._grade_recovery,
+            item_name,
+            should_grade,
+        )
+
+    async def _handle_grade_prompt(self, tab, item_name: str, should_grade: bool) -> str:
+        """Handle Brightspace's grade choice. Returns handled/absent/skip/stop."""
+        wanted = ["add grade item"] if should_grade else [
+            "proceed without grade item", "proceed without", "skip"
+        ]
+        for _ in range(3):
+            await tab.wait_for_timeout(700)
+            if await self._auto_dismiss(tab, wanted):
+                label = "Add Grade Item" if should_grade else "Proceed Without Grade Item"
+                self.log(f"  → Chose '{label}' for {item_name}", "info")
+                return "handled"
+
+        if not should_grade:
+            self.log("  → No grade item dialog found (continuing ungraded)", "dim")
+            return "absent"
+
+        while True:
+            self.log(
+                f"  ⚠ Could not choose Add Grade Item for {item_name}; waiting for user action.",
+                "warning",
+            )
+            action = await self._grade_recovery_action(item_name, should_grade)
+            if action == "retry":
+                for _ in range(3):
+                    await tab.wait_for_timeout(700)
+                    if await self._auto_dismiss(tab, wanted):
+                        self.log(f"  → Chose 'Add Grade Item' for {item_name}", "info")
+                        return "handled"
+                continue
+            if action == "continue":
+                self.log("  → User confirmed the gradebook choice manually", "info")
+                return "handled"
+            if action in ("skip", "stop"):
+                return action
+
+    async def insert_from_list(self, tab, h5p_frame, item_name, should_grade: bool = False) -> bool:
         """Find item by name in H5P content list and insert into BS editor."""
         df = self._DEEP_FIND_JS
         try:
@@ -1079,16 +1303,17 @@ class H5PHandler:
                     pass
                 await tab.wait_for_timeout(1000)
 
-            # "Add Grade Item" dialog appears after Insert — dismiss it
-            await tab.wait_for_timeout(1500)
-            self.log("  → Checking for 'Add Grade Item' dialog…", "dim")
-            dismissed = await self._auto_dismiss(tab, ["proceed without grade item", "proceed without", "skip"])
-            if dismissed:
-                self.log("  → Dismissed 'Add Grade Item' dialog", "dim")
+            self.log("  → Checking for grade item choice…", "dim")
+            grade_status = await self._handle_grade_prompt(tab, item_name, should_grade)
+            self._last_grade_status = grade_status
+            self._grade_choice_completed = grade_status == "handled"
+            if grade_status in ("skip", "stop"):
+                return False
+            if grade_status == "handled":
                 await tab.wait_for_timeout(1000)
-                # After dismissing, a plain <button class="d2l-button" primary>Insert</button>
+                # After the choice, a plain <button class="d2l-button" primary>Insert</button>
                 # appears in the Interactives dialog — search all frames for it
-                self.log("  → Clicking Insert again after grade item dismiss…", "dim")
+                self.log("  → Clicking Insert again after gradebook choice…", "dim")
                 second_insert_clicked = False
                 for attempt in range(8):
                     for frame in tab.frames:
@@ -1128,9 +1353,6 @@ class H5PHandler:
                     await tab.wait_for_timeout(800)
                 if not second_insert_clicked:
                     self.log("  ⚠ Second Insert button not found", "warning")
-            else:
-                self.log("  → No grade item dialog found (ok)", "dim")
-
             return True
         except Exception as e:
             self.log(f"  ✗ _h5p_insert_from_list error: {e}", "error")
@@ -1336,7 +1558,7 @@ class H5PHandler:
             self.log(f"  ✗ _h5p_insert_existing error: {e}", "error")
             return False
 
-    async def finalize(self, tab, title: str, is_quiz: bool) -> bool:
+    async def finalize(self, tab, title: str, is_quiz: bool, should_grade: bool = False) -> bool:
         df = self._DEEP_FIND_JS
         try:
             # Fill title — prefer exact maxlength match, fall back to any d2l-input
@@ -1385,11 +1607,19 @@ class H5PHandler:
             if not saved:
                 self.log("  ⚠ d2l-button.d2l-desktop not found — Save and Close may have failed", "warning")
 
-            # After Save and Close: "Add Grade Item" dialog → click "Proceed Without Grade Item"
+            # Some Brightspace versions show the choice only after Save and Close.
             await tab.wait_for_timeout(2000)
-            dismissed = await self._auto_dismiss(tab, ["proceed without grade item", "proceed without"])
-            if dismissed:
-                self.log("  → Auto-dismissed 'Add Grade Item' dialog", "dim")
+            if getattr(self, "_grade_choice_completed", False):
+                wanted = ["add grade item"] if should_grade else [
+                    "proceed without grade item", "proceed without", "skip"
+                ]
+                clicked = await self._auto_dismiss(tab, wanted)
+                grade_status = "handled" if clicked else "absent"
+            else:
+                grade_status = await self._handle_grade_prompt(tab, title, should_grade)
+            self._last_grade_status = grade_status
+            if grade_status in ("skip", "stop"):
+                return False
             await tab.wait_for_timeout(2000)
             return True
         except Exception as e:
@@ -1483,11 +1713,6 @@ class H5PHandler:
         except Exception:
             pass
         await tab.wait_for_timeout(1500)
-
-        dismissed = await self._auto_dismiss(tab, ["proceed without grade item", "proceed without"])
-        if dismissed:
-            self.log("  → Auto-dismissed 'Proceed Without Grade Item'", "dim")
-            await tab.wait_for_timeout(800)
 
         ok = await self.open_interactives(tab, for_quiz=False)
         if not ok:
@@ -1624,6 +1849,9 @@ class H5PHandler:
             return
 
         section_map, title_map = self._moodle_h5p_maps(moodle_items)
+        for key in ("h5p_inserted", "h5p_failed", "h5p_graded", "h5p_ungraded",
+                    "h5p_skipped", "h5p_grade_failed", "h5p_already_present"):
+            self._summary.setdefault(key, [])
 
         bs_mod_map: dict = {}
         bs_mod_orig: dict = {}
@@ -1648,6 +1876,7 @@ class H5PHandler:
                     bs_module_id = bs_mod_map[close[0]]
             assignments.append({
                 "file": f, "name": name,
+                "should_grade": self.grade_all,
                 "moodle_section": moodle_section,
                 "bs_module_title": bs_module_title,
                 "bs_module_id": bs_module_id,
@@ -1800,7 +2029,8 @@ class H5PHandler:
         self.log("", "dim")
         self.log("Phase B — inserting H5P into Brightspace pages…", "step")
         N = len(matched)
-        embedded_count = 0
+        newly_inserted_count = 0
+        already_present_count = 0
 
         for idx, item in enumerate(matched, 1):
             if self._should_stop():
@@ -1814,17 +2044,22 @@ class H5PHandler:
             name = item["name"]
             bs_module_title = item["bs_module_title"]
             bs_module_id = item["bs_module_id"]
-            self.log(f"  [{idx}/{N}] {name}  →  {bs_module_title}", "info")
+            self.log(f"  [{idx}/{N}] {name}  →  {bs_module_title}", "detail")
 
             # Check live via API — stale bs_flat misses topics added in earlier iterations
             already_in_bs = await self._verify_topic_in_module(
                 page, course_id, bs_module_id, name
             )
             if already_in_bs:
-                self.log(f"    ✓ Already in Brightspace — skipping", "dim")
-                self._summary["h5p_inserted"].append((name, bs_module_title))
-                embedded_count += 1
+                already_present_count += 1
+                self._summary["h5p_already_present"].append((name, bs_module_title))
+                if item["should_grade"]:
+                    self._summary["h5p_grade_failed"].append((name, bs_module_title))
+                self._summary["h5p_skipped"].append((name, bs_module_title))
+                self.log(f"    ALREADY IN BRIGHTSPACE: {name}", "detail")
                 continue
+
+            self.log(f"  [{idx}/{N}] Inserting: {name} → {bs_module_title}", "info")
 
             tab = await context.new_page()
             try:
@@ -1836,14 +2071,29 @@ class H5PHandler:
                     self._summary["h5p_failed"].append((name, bs_module_title))
                     continue
 
-                ok = await self.insert_from_list(tab, h5p_frame, name)
+                self._last_grade_status = None
+                self._grade_choice_completed = False
+                ok = await self.insert_from_list(tab, h5p_frame, name, item["should_grade"])
                 if not ok:
-                    self.log(f"    ✗ Insert failed — skipping", "error")
-                    self._summary["h5p_failed"].append((name, bs_module_title))
+                    if self._last_grade_status in ("skip", "stop"):
+                        self.log(f"    ⚠ Gradebook choice not completed — skipping item", "warning")
+                        self._summary["h5p_grade_failed"].append((name, bs_module_title))
+                        self._summary["h5p_skipped"].append((name, bs_module_title))
+                        if self._last_grade_status == "stop":
+                            return
+                    else:
+                        self.log(f"    ✗ Insert failed — skipping", "error")
+                        self._summary["h5p_failed"].append((name, bs_module_title))
                     continue
 
-                ok = await self.finalize(tab, name, is_quiz=False)
+                ok = await self.finalize(tab, name, is_quiz=False, should_grade=item["should_grade"])
                 if not ok:
+                    if self._last_grade_status in ("skip", "stop"):
+                        self._summary["h5p_grade_failed"].append((name, bs_module_title))
+                        self._summary["h5p_skipped"].append((name, bs_module_title))
+                        if self._last_grade_status == "stop":
+                            return
+                        continue
                     self.log(f"    ⚠ Finalize had errors", "warning")
 
                 # Verify via API that the topic actually landed
@@ -1853,11 +2103,12 @@ class H5PHandler:
                 if confirmed:
                     self.log(f"    ✓ Done + verified: {name} → {bs_module_title}", "success")
                     self._summary["h5p_inserted"].append((name, bs_module_title))
+                    newly_inserted_count += 1
+                    bucket = "h5p_graded" if item["should_grade"] else "h5p_ungraded"
+                    self._summary[bucket].append((name, bs_module_title))
                 else:
                     self.log(f"    ⚠ Inserted but not confirmed in module via API", "warning")
                     self._summary["h5p_failed"].append((name, bs_module_title))
-                embedded_count += 1
-
             except Exception as e:
                 self.log(f"    ✗ Error on {name}: {e}", "error")
                 self._summary["h5p_failed"].append((name, bs_module_title))
@@ -1868,16 +2119,52 @@ class H5PHandler:
                     pass
 
         self.log("", "dim")
-        self.log(f"✅ H5P embed complete: {embedded_count}/{N} inserted", "success")
+        self.log(
+            f"✅ Brightspace H5P result: {newly_inserted_count} newly inserted, "
+            f"{already_present_count} already present, "
+            f"{len(self._summary['h5p_failed'])} failed",
+            "success" if not self._summary["h5p_failed"] else "warning",
+        )
+        if already_present_count:
+            self.log(
+                f"   ✓ Reused {already_present_count} existing Brightspace H5P page(s); "
+                "nothing was inserted twice.",
+                "success",
+            )
+        if self.grade_all and already_present_count:
+            self.log(
+                f"   ⚠ Gradebook setting was requested, but {already_present_count} H5P page(s) "
+                "already existed. Their gradebook status was not changed automatically.",
+                "warning",
+            )
+        self.log(
+            f"   Gradebook: {len(self._summary['h5p_graded'])} graded, "
+            f"{len(self._summary['h5p_ungraded'])} ungraded, "
+            f"{len(self._summary['h5p_skipped'])} skipped, "
+            f"{len(self._summary['h5p_grade_failed'])} grade-choice issue(s)",
+            "info",
+        )
 
         if self._notify:
             inserted = self._summary.get("h5p_inserted", [])
             failed   = self._summary.get("h5p_failed", [])
-            lines = [f"Inserted into Brightspace: {len(inserted)}"]
+            lines = [f"Newly inserted into Brightspace: {len(inserted)}"]
+            lines.append(
+                f"Already present: {len(self._summary['h5p_already_present'])}"
+            )
+            lines.append(
+                f"Graded: {len(self._summary['h5p_graded'])} | "
+                f"Ungraded: {len(self._summary['h5p_ungraded'])} | "
+                f"Skipped: {len(self._summary['h5p_skipped'])}"
+            )
             lines += [f"  ✓ {n}" for n, _ in inserted]
             if failed:
                 lines.append(f"\nNot inserted: {len(failed)}")
                 lines += [f"  ✗ {n}" for n, _ in failed]
                 lines.append("\nFailed items usually mean a missing content type "
                              "on H5P.com — see the log for the exact library name.")
+            grade_failed = self._summary.get("h5p_grade_failed", [])
+            if grade_failed:
+                lines.append(f"\nGradebook status needs review: {len(grade_failed)}")
+                lines += [f"  ⚠ {n}" for n, _ in grade_failed]
             self._notify("H5P results", "\n".join(lines))

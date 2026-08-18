@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit, QToolButton, QMenu, QSizePolicy,
+    QPushButton, QLineEdit, QToolButton, QMenu, QSizePolicy, QCheckBox,
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 
@@ -59,6 +59,14 @@ class CheckerPanel(QWidget):
         self._moodle_entry.setFixedHeight(40)
         self._moodle_entry.setToolTip("Paste the Moodle course home URL.\nRequires Teacher-level access to download files and H5P.")
         layout.addWidget(self._moodle_entry)
+        layout.addSpacing(12)
+
+        self._gradebook_cb = QCheckBox("Add H5P activities to gradebook")
+        self._gradebook_cb.setChecked(False)
+        self._gradebook_cb.setToolTip(
+            "Applies to H5P activities in this run. Leave unchecked to proceed without grade items."
+        )
+        layout.addWidget(self._gradebook_cb)
         layout.addSpacing(14)
 
         # Split run button + dropdown menu
@@ -193,6 +201,7 @@ class CheckerPanel(QWidget):
         moodle_ev = _t.Event(); h5p_ev = _t.Event(); file_ev = _t.Event()
         file_result = []
         skip_flag   = [False]
+        grade_all = self._gradebook_cb.isChecked()
         self._moodle_ready_event   = moodle_ev
         self._h5p_ready_event      = h5p_ev
         self._file_checklist_event = file_ev
@@ -228,6 +237,20 @@ class CheckerPanel(QWidget):
             # Fire-and-forget popup; worker does not wait for an answer.
             q.put(("__CHK_NOTIFY__", (title, text)))
 
+        def grade_recovery(item_name: str, should_grade: bool) -> str:
+            result = ["skip"]
+            event = _t.Event()
+            q.put(("__CHK_H5P_GRADE_RECOVERY__", (item_name, result, event)))
+            event.wait()
+            return result[0]
+
+        def h5p_recovery(failures: list[dict]) -> list[dict]:
+            result = []
+            event = _t.Event()
+            q.put(("__CHK_H5P_FILE_RECOVERY__", (failures, result, event)))
+            event.wait()
+            return result
+
         def worker():
             done_sent = [False]
             def on_done():
@@ -245,6 +268,9 @@ class CheckerPanel(QWidget):
                     on_moodle_waiting=lambda: q.put(("__CHK_MOODLE_WAITING__", "")),
                     h5p_ready_event=h5p_ev,
                     on_h5p_waiting=lambda: q.put(("__CHK_H5P_WAITING__", skip_flag)),
+                    h5p_recovery=h5p_recovery,
+                    h5p_grade_all=grade_all,
+                    h5p_grade_recovery=grade_recovery,
                     file_checklist_event=file_ev,
                     on_file_checklist=lambda d: q.put(("__CHK_FILE_CHECKLIST__", (d, file_result, file_ev))),
                     confirm_fn=confirm,
@@ -403,6 +429,28 @@ class CheckerPanel(QWidget):
                     from gui_dialogs import FileChecklistDialog
                     dlg = FileChecklistDialog(data_json, result_list, event, self)
                     dlg.exec()
+                elif msg == "__CHK_H5P_GRADE_RECOVERY__":
+                    item_name, result_ref, event = tag
+                    from PySide6.QtWidgets import QMessageBox
+                    dlg = QMessageBox(self)
+                    dlg.setWindowTitle("H5P gradebook action needed")
+                    dlg.setText(
+                        f"The app could not choose Add Grade Item for:\n\n{item_name}\n\n"
+                        "You can fix the open Brightspace dialog manually, retry, skip this item, or stop."
+                    )
+                    fixed = dlg.addButton("I fixed it — Continue", QMessageBox.ButtonRole.AcceptRole)
+                    retry = dlg.addButton("Retry Automatically", QMessageBox.ButtonRole.ActionRole)
+                    skip = dlg.addButton("Skip This Item", QMessageBox.ButtonRole.DestructiveRole)
+                    stop = dlg.addButton("Stop Run", QMessageBox.ButtonRole.RejectRole)
+                    dlg.exec()
+                    clicked = dlg.clickedButton()
+                    result_ref[0] = ("continue" if clicked is fixed else "retry" if clicked is retry
+                                     else "stop" if clicked is stop else "skip")
+                    event.set()
+                elif msg == "__CHK_H5P_FILE_RECOVERY__":
+                    failures, result_ref, event = tag
+                    from gui_dialogs import H5PRecoveryDialog
+                    H5PRecoveryDialog(failures, result_ref, event, self).exec()
                 else:
                     self._log.append_log(msg, tag)
         except queue.Empty:

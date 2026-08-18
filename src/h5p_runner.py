@@ -58,7 +58,10 @@ async def run_h5p_only(
     on_moodle_waiting: Optional[Callable] = None,
     h5p_ready_event: Optional[threading.Event] = None,
     on_h5p_waiting: Optional[Callable] = None,
+    h5p_recovery: Optional[Callable] = None,
     h5p_skip_flag: Optional[list] = None,
+    h5p_grade_all: bool = False,
+    h5p_grade_recovery: Optional[Callable] = None,
     confirm_fn: Optional[Callable] = None,
     bs_username: str = "",
     bs_password: str = "",
@@ -77,6 +80,9 @@ async def run_h5p_only(
         on_moodle_waiting=on_moodle_waiting,
         h5p_ready_event=h5p_ready_event,
         on_h5p_waiting=on_h5p_waiting,
+        h5p_recovery=h5p_recovery,
+        h5p_grade_all=h5p_grade_all,
+        h5p_grade_recovery=h5p_grade_recovery,
         confirm_fn=confirm_fn,
         bs_username=bs_username,
         bs_password=bs_password,
@@ -86,7 +92,12 @@ async def run_h5p_only(
         moodle_password=moodle_password,
     )
     checker.h5p_skip_flag = h5p_skip_flag or [False]
-    checker._summary = {"h5p_inserted": [], "h5p_failed": []}
+    checker.do_h5p_embed = True
+    checker._summary = {
+        "h5p_inserted": [], "h5p_failed": [], "h5p_graded": [],
+        "h5p_ungraded": [], "h5p_skipped": [], "h5p_grade_failed": [],
+        "h5p_already_present": [],
+    }
     checker._h5p._summary = checker._summary
     # Override with the stricter exact-match check (see _verify_topic_in_module_strict).
     checker._h5p._verify_topic_in_module = _verify_topic_in_module_strict
@@ -129,7 +140,18 @@ async def run_h5p_only(
         log("─" * 52, "dim")
         inserted = checker._summary.get("h5p_inserted", [])
         failed = checker._summary.get("h5p_failed", [])
-        log(f"✓ H5P done: {len(inserted)} inserted, {len(failed)} failed", "success")
+        already = checker._summary.get("h5p_already_present", [])
+        log(
+            f"✓ H5P done: {len(inserted)} newly inserted, "
+            f"{len(already)} already present, {len(failed)} failed",
+            "success" if not failed else "warning",
+        )
+        log(
+            f"  Gradebook: {len(checker._summary.get('h5p_graded', []))} graded, "
+            f"{len(checker._summary.get('h5p_ungraded', []))} ungraded, "
+            f"{len(checker._summary.get('h5p_grade_failed', []))} existing item(s) not changed",
+            "info",
+        )
 
         if on_complete:
             on_complete()

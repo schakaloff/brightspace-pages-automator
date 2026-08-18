@@ -1666,7 +1666,9 @@ class UnitCollector:
                                     "error",
                                 )
 
-                    await self._save_and_close(tab)
+                    if not await self._save_and_close(tab):
+                        self.log("✗ Could not save the assembled target page", "error")
+                        return False
             finally:
                 try:
                     await tab.close()
@@ -1682,7 +1684,15 @@ class UnitCollector:
 
             if self.claude_api_key:
                 assembled_chars = sum(len(s) for s in sections)
-                await self._apply_claude_style(context, expected_min_chars=assembled_chars)
+                if not await self._apply_claude_style(
+                    context, expected_min_chars=assembled_chars
+                ):
+                    self.log(
+                        "✗ Unit is only partially complete: text was saved, but "
+                        "the requested styling was not applied.",
+                        "error",
+                    )
+                    return False
 
             self.log("─" * 52, "dim")
             self.log("✓ Done! Close the browser when finished.", "success")
