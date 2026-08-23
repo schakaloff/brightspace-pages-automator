@@ -413,8 +413,7 @@ class PageAutomator:
             source_html = f"<h2>{escaped}</h2>\n{source_html}"
 
         from ai_styler import apply_style, DEFAULT_MODEL
-        styled_html, usage = await asyncio.to_thread(
-            apply_style,
+        styled_html, usage = await apply_style(
             source_html=source_html,
             style_reference_html=self.style_reference_html,
             theme_name=self.theme_name,
