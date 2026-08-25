@@ -25,6 +25,7 @@ import sys
 import urllib.error
 import urllib.request
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 try:
@@ -54,6 +55,34 @@ _STICKY_KEYS = (
 
 
 API_TIMEOUT_SECONDS = 10
+
+
+@lru_cache(maxsize=1)
+def ssl_context() -> ssl.SSLContext:
+    """Verified TLS context for the updater's own HTTPS requests.
+
+    A frozen macOS build has no usable trust store: _ssl is linked against an
+    OpenSSL whose compiled-in CA path points at the build machine's Python
+    prefix, which doesn't exist on the user's Mac. Every urllib request then
+    fails with CERTIFICATE_VERIFY_FAILED even though the network is fine.
+
+    certifi ships the CA bundle, so it is loaded *on top of* whatever the
+    platform provides rather than instead of it: passing cafile= to
+    create_default_context suppresses the system store entirely, which would
+    drop enterprise roots that a managed Windows machine needs. Loading both
+    keeps those working and gives macOS a trust store it would otherwise lack.
+
+    Verification is never relaxed — create_default_context means
+    CERT_REQUIRED and check_hostname, and nothing here changes that.
+    """
+    context = ssl.create_default_context()
+    try:
+        import certifi
+
+        context.load_verify_locations(cafile=certifi.where())
+    except Exception as e:  # missing certifi, unreadable bundle
+        log_update_event(f"certifi CA bundle unavailable, using system trust only: {e}")
+    return context
 
 
 class UpdateIntegrityError(Exception):
@@ -422,7 +451,7 @@ def fetch_expected_sha256(checksum_url: str | None, asset_name: str | None) -> s
         req = urllib.request.Request(
             checksum_url, headers={"Accept": "application/octet-stream"}
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=15, context=ssl_context()) as resp:
             text = resp.read().decode("utf-8", errors="replace")
     except Exception as e:
         raise UpdateIntegrityError(f"Could not download {CHECKSUM_ASSET_NAME}: {e}") from e
@@ -565,7 +594,9 @@ def _fetch_latest_release() -> dict | None:
     """
     try:
         req = urllib.request.Request(API_URL, headers={"Accept": "application/vnd.github+json"})
-        with urllib.request.urlopen(req, timeout=API_TIMEOUT_SECONDS) as resp:
+        with urllib.request.urlopen(
+            req, timeout=API_TIMEOUT_SECONDS, context=ssl_context()
+        ) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         # Subclass of URLError, so it has to be caught first or a status code
@@ -751,7 +782,7 @@ def download_asset(url: str, dest_path: Path, progress_cb=None) -> None:
     )
     log_update_event(f"Download started: url={url} dest={dest_path}")
     req = urllib.request.Request(url, headers={"Accept": "application/octet-stream"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=30, context=ssl_context()) as resp:
         total = int(resp.headers.get("Content-Length", 0))
         log_update_event(f"Download response: content_length={total or 'unknown'}")
         read = 0

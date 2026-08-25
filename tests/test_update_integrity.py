@@ -30,7 +30,7 @@ def _serve(text):
         def __exit__(self, *exc):
             return False
 
-    return lambda req, timeout=None: _Resp()
+    return lambda req, **kwargs: _Resp()
 
 
 # ── checksum file parsing ───────────────────────────────────────────────────

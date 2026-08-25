@@ -25,7 +25,7 @@ def _isolated_state(tmp_path, monkeypatch):
 
 
 def _raise_from_urlopen(monkeypatch, exc):
-    def _urlopen(req, timeout=None):
+    def _urlopen(req, **kwargs):
         raise exc
     monkeypatch.setattr(update_checker.urllib.request, "urlopen", _urlopen)
 
@@ -42,7 +42,7 @@ def _serve(monkeypatch, body: bytes):
             return False
 
     monkeypatch.setattr(update_checker.urllib.request, "urlopen",
-                        lambda req, timeout=None: _Resp())
+                        lambda req, **kwargs: _Resp())
 
 
 def _http_error(code, reason="Forbidden", headers=None):

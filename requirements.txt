@@ -4,6 +4,7 @@ pillow
 anthropic
 python-dotenv
 requests
+certifi
 keyring
 pytest
 pytest-qt

@@ -37,6 +37,9 @@ a = Analysis(
         "PIL",
         "PIL.Image",
         "PIL.ImageDraw",
+        # Ships the CA bundle the updater loads; nothing else imports it,
+        # so without this PyInstaller would leave it (and cacert.pem) out.
+        "certifi",
         "playwright",
         "playwright.__main__",
         "playwright.sync_api",
