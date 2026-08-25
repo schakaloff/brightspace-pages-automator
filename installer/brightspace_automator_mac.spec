@@ -2,8 +2,6 @@
 # Build with: pyinstaller installer/brightspace_automator_mac.spec --noconfirm
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all
-
 ROOT = Path(SPECPATH).parent
 
 SRC_MODULES = [
@@ -12,31 +10,25 @@ SRC_MODULES = [
     "update_checker",
 ]
 
+# CI writes BUILD_VERSION (the exact release tag) before invoking PyInstaller so
+# update_checker can compare its own build against the latest GitHub release.
+# Optional for local/manual builds — update_checker degrades gracefully if absent.
 extra_datas = []
 if (ROOT / "BUILD_VERSION").exists():
     extra_datas.append((str(ROOT / "BUILD_VERSION"), "."))
 if (ROOT / "BUILD_COMMIT").exists():
     extra_datas.append((str(ROOT / "BUILD_COMMIT"), "."))
 
-collect_datas, collect_binaries, collect_hidden = [], [], []
-for pkg in ("customtkinter", "CTkMessagebox"):
-    d, b, h = collect_all(pkg)
-    collect_datas += d
-    collect_binaries += b
-    collect_hidden += h
-
 a = Analysis(
     [str(ROOT / "gui.py")],
     pathex=[str(ROOT), str(ROOT / "src")],
-    binaries=collect_binaries,
+    binaries=[],
     datas=[
         (str(ROOT / "templates" / "style_reference.html"), "templates"),
+        (str(ROOT / "prompts"), "prompts"),
         *extra_datas,
-        *collect_datas,
     ],
     hiddenimports=[
-        "customtkinter",
-        "CTkMessagebox",
         "google.genai",
         "google.genai.errors",
         "bs4",
@@ -50,7 +42,6 @@ a = Analysis(
         "playwright.sync_api",
         "playwright.async_api",
         *SRC_MODULES,
-        *collect_hidden,
     ],
     hookspath=[],
     hooksconfig={},
@@ -58,6 +49,8 @@ a = Analysis(
     excludes=[],
     noarchive=False,
 )
+
+a.datas += Tree(str(ROOT / "assets"), prefix="assets")
 
 pyz = PYZ(a.pure)
 
