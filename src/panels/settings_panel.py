@@ -439,6 +439,22 @@ class SettingsPanel(QWidget):
             result = f"{result} - {detail}"
         checked = diagnostics.get("last_update_at") or "not checked yet"
         latest = diagnostics.get("latest_build") or "(not known)"
+        # A Setup that exited non-zero must never be readable as a success, so
+        # the install outcome gets its own line with the exit code attached.
+        install_result = diagnostics.get("last_install_result", "")
+        if install_result:
+            install_line = install_result
+            exit_code = diagnostics.get("setup_exit_code", "")
+            if exit_code != "":
+                install_line = f"{install_line} (Setup exit code {exit_code})"
+            install_detail = diagnostics.get("last_install_detail", "")
+            if install_detail:
+                install_line = f"{install_line} - {install_detail}"
+            install_at = diagnostics.get("last_install_at", "")
+            if install_at:
+                install_line = f"{install_line} [{install_at}]"
+        else:
+            install_line = "no update has been installed from this app yet"
         lines = [
             f"Version: {diagnostics.get('current_version', 'unknown')}",
             f"Commit/build: {diagnostics.get('current_build', 'unknown')}",
@@ -448,6 +464,7 @@ class SettingsPanel(QWidget):
             f"Latest release seen: {latest}",
             f"Last update result: {result}",
             f"Last checked: {checked}",
+            f"Last install: {install_line}",
             f"Updater log: {diagnostics.get('updater_log_path', 'unknown')}",
             f"Installer log: {diagnostics.get('setup_log_path', 'unknown')}",
         ]

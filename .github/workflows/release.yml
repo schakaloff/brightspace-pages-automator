@@ -49,10 +49,26 @@ jobs:
             Where-Object { $_.Name -ne "BrightspacePagesAutomator-Setup-Latest.exe" } |
             Select-Object -First 1
           Copy-Item $installer.FullName installer\output\BrightspacePagesAutomator-Setup-Latest.exe
+      # The app refuses to execute a downloaded installer that isn't listed here
+      # with a matching digest, so this step is required for self-update to work.
+      # Format is plain `sha256sum` output: "<64 hex>  <filename>".
+      - name: Generate installer checksums
+        shell: pwsh
+        run: |
+          $out = "installer\output\SHA256SUMS.txt"
+          $lines = Get-ChildItem installer\output\BrightspacePagesAutomator-Setup-*.exe |
+            ForEach-Object {
+              "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+            }
+          if (-not $lines) { Write-Error "No installers found to checksum"; exit 1 }
+          Set-Content -Path $out -Value $lines -Encoding ascii
+          Get-Content $out
       - uses: actions/upload-artifact@v4
         with:
           name: windows-installer
-          path: installer/output/BrightspacePagesAutomator-Setup-*.exe
+          path: |
+            installer/output/BrightspacePagesAutomator-Setup-*.exe
+            installer/output/SHA256SUMS.txt
 
   build-mac:
     needs: get-version

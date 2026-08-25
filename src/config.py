@@ -19,9 +19,9 @@ SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 # replacing files. Changing one without the other silently breaks updates.
 APP_MUTEX_NAME = "BrightspacePagesAutomator.SingleInstance"
 
-# Switch the self-updater passes to the installer. The installer's normal launch
-# entry is skipifsilent, so a silent update would never reopen the app; a Run
-# entry gated on this flag is what actually brings it back.
-# Inno reads this via {param:RELAUNCH|no}, which needs the =yes form — a bare
-# /RELAUNCH would expand to an empty string and never match.
-RELAUNCH_SWITCH = "/RELAUNCH=yes"
+# There is deliberately no relaunch switch here any more. Setup used to reopen
+# the app itself via a [Run] entry gated on /RELAUNCH while the updater helper
+# reopened it too — two paths racing to start the same app, which is how users
+# ended up with two windows after an update. The helper in src/update_installer.py
+# is now the only thing that relaunches, and it does so whether Setup succeeded
+# or failed.

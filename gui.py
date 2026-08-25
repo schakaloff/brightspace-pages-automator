@@ -492,6 +492,15 @@ class MainWindow(QMainWindow):
     _RECHECK_MS = 30 * 60 * 1000
 
     def _start_update_check(self):
+        # Anything the installer helper reported after we exited is folded into
+        # the update state first, so a failed install is visible in Settings
+        # even though the check that follows will say "Up to date".
+        try:
+            from update_checker import consume_installer_result
+            consume_installer_result()
+        except Exception:
+            pass
+
         self._update_q = queue.Queue()
         self._update_timer = QTimer(self)
         self._update_timer.timeout.connect(self._update_poll)
@@ -616,22 +625,10 @@ def _claim_app_mutex():
 
     Without this the installer cannot tell the app is running, so it neither
     closes it nor waits for it, and silently fails to overwrite the locked .exe.
-    Returns the handle (which must stay referenced) or None off Windows.
+    Returns (handle, already_running); the handle must stay referenced.
     """
-    if sys.platform != "win32":
-        return None
-    try:
-        import ctypes
-        from ctypes import wintypes
-        from config import APP_MUTEX_NAME
-        # restype must be set: the default c_int truncates a 64-bit HANDLE, which
-        # yields a handle that cannot be closed or checked.
-        create = ctypes.windll.kernel32.CreateMutexW
-        create.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
-        create.restype = wintypes.HANDLE
-        return create(None, False, APP_MUTEX_NAME)
-    except Exception:
-        return None
+    from single_instance import claim_single_instance
+    return claim_single_instance()
 
 
 if __name__ == "__main__":
@@ -653,7 +650,19 @@ if __name__ == "__main__":
     # Claimed after the HiDPI re-exec above so the handle belongs to the process
     # that actually sticks around. Held for the lifetime of the app: the
     # installer's AppMutex check is how it knows we are running.
-    _app_mutex = _claim_app_mutex()
+    _app_mutex, _already_running = _claim_app_mutex()
+    if _already_running:
+        # Second copies are almost always accidental — a double-clicked icon, or
+        # a relaunch racing the one the updater already started. Say so and stop
+        # rather than opening a window that fights the first one over the log,
+        # the session file and the browser.
+        QMessageBox.information(
+            None,
+            "Brightspace Pages Automator",
+            "Brightspace Pages Automator is already running.\n\n"
+            "Switch to the open window instead of starting a second copy.",
+        )
+        sys.exit(0)
 
     gui_styles.set_theme(_load_saved_theme())
     app.setStyleSheet(gui_styles.get_stylesheet())

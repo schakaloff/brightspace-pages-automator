@@ -39,13 +39,7 @@ Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "A
 [Run]
 Filename: "{app}\install_browsers.bat"; StatusMsg: "Installing Chromium browser (one-time, ~2 min)..."; Flags: runhidden waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
-; Reopens the app after a silent self-update. The entry above is skipifsilent,
-; so without this one "Restart & Update" would only ever close the app. Gated on
-; /RELAUNCH so a normal silent install by an admin stays silent.
-Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: WantsRelaunch
-
-[Code]
-function WantsRelaunch(): Boolean;
-begin
-  Result := CompareText(ExpandConstant('{param:RELAUNCH|no}'), 'yes') = 0;
-end;
+; Setup deliberately does NOT reopen the app after a silent self-update. The
+; updater helper (src/update_installer.py) is the single relaunch path: it
+; starts the app once Setup exits, whether or not Setup succeeded. A [Run]
+; entry here would race the helper and open two windows.

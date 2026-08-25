@@ -5,11 +5,18 @@ The app's VERSION constant isn't bumped on every CI run (releases are tagged
 v<VERSION>-<run_number>, and a run can ship without a VERSION bump), so the
 only reliable way to know "is a newer build available" is to compare our own
 exact build tag (baked into the bundle at build time as BUILD_VERSION)
-against the latest published release tag — not a semver comparison.
+against the latest published release tag.
+
+Tags are ordered rather than merely compared for equality: v0.8.5-98 parses to
+(0, 8, 5, 98), so a release that is older than the installed build (which is
+what /releases/latest returns once a newer release is deleted) can never be
+offered as an update.
 """
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import sys
@@ -29,6 +36,23 @@ LATEST_WINDOWS_INSTALLER = "BrightspacePagesAutomator-Setup-Latest.exe"
 UPDATE_LOG_NAME = "BrightspacePagesAutomator-update.log"
 SETUP_LOG_NAME = "BrightspacePagesAutomator-setup.log"
 UPDATE_STATE_NAME = "BrightspacePagesAutomator-update-state.json"
+# Written by the installer helper (a .cmd, so: plain "exit=<code>" text rather
+# than JSON) and folded into the update state on the next launch.
+UPDATE_RESULT_NAME = "BrightspacePagesAutomator-update-result.txt"
+CHECKSUM_ASSET_NAME = "SHA256SUMS.txt"
+UPDATE_DIR_PREFIX = "BrightspacePagesAutomator-update-"
+# Carried across record_update_result() calls so the outcome of the last actual
+# install survives the "Up to date" check that runs seconds after launch.
+_STICKY_KEYS = (
+    "last_install_result",
+    "last_install_detail",
+    "last_install_at",
+    "setup_exit_code",
+)
+
+
+class UpdateIntegrityError(Exception):
+    """The downloaded installer could not be proven to match the release."""
 UPDATE_CHANNEL = os.environ.get("BPA_UPDATE_CHANNEL", "stable")
 UPDATE_BRANCH = os.environ.get("BPA_UPDATE_BRANCH", "main")
 
@@ -48,6 +72,10 @@ def setup_log_path() -> Path:
 
 def update_state_path() -> Path:
     return Path(tempfile.gettempdir()) / UPDATE_STATE_NAME
+
+
+def update_result_path() -> Path:
+    return Path(tempfile.gettempdir()) / UPDATE_RESULT_NAME
 
 
 def log_update_event(message: str) -> None:
@@ -111,6 +139,34 @@ def get_source_branch() -> str | None:
     return _git_value("branch", "--show-current")
 
 
+_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)(?:\.(\d+))?(?:-(\d+))?$")
+
+
+def parse_build_tag(tag: str | None) -> tuple[int, int, int, int] | None:
+    """v0.8.5-98 -> (0, 8, 5, 98). None for anything that isn't that shape.
+
+    A missing patch or run number counts as 0, so v0.8 and v0.8.5 still order
+    against v0.8.5-98. Legacy or hand-made tags (v1.0-beta, "nightly") return
+    None and callers fall back to the old equality check rather than crashing.
+    """
+    if not tag:
+        return None
+    m = _TAG_RE.match(tag.strip())
+    if not m:
+        return None
+    major, minor, patch, run = m.groups()
+    return (int(major), int(minor), int(patch or 0), int(run or 0))
+
+
+def is_newer_build(latest_tag: str | None, current_tag: str | None) -> bool | None:
+    """True/False when both tags order, None when they can't be compared."""
+    latest = parse_build_tag(latest_tag)
+    current = parse_build_tag(current_tag)
+    if latest is None or current is None:
+        return None
+    return latest > current
+
+
 def _version_from_build_tag(build_tag: str | None) -> str:
     if not build_tag:
         return APP_VERSION
@@ -152,6 +208,7 @@ def record_update_result(
     latest_build: str = "",
     extra: dict | None = None,
 ) -> dict:
+    previous = read_update_state()
     state = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "result": result,
@@ -166,6 +223,11 @@ def record_update_result(
         "updater_log_path": str(update_log_path()),
         "setup_log_path": str(setup_log_path()),
     }
+    # The result of the last real install outlives the routine check that
+    # follows it, so a failed update can't be papered over by "Up to date".
+    for key in _STICKY_KEYS:
+        if key in previous:
+            state[key] = previous[key]
     if extra:
         state.update(extra)
     try:
@@ -205,7 +267,164 @@ def get_update_diagnostics() -> dict:
         "latest_build": state.get("latest_build", ""),
         "updater_log_path": str(update_log_path()),
         "setup_log_path": str(setup_log_path()),
+        "last_install_result": state.get("last_install_result", ""),
+        "last_install_detail": state.get("last_install_detail", ""),
+        "last_install_at": state.get("last_install_at", ""),
+        "setup_exit_code": state.get("setup_exit_code", ""),
     }
+
+
+def consume_installer_result() -> dict | None:
+    """Fold the helper's Setup exit code into the update state, once.
+
+    The helper runs after this process is gone, so the only way it can report
+    back is a file. Reading it at the next launch (and deleting it) turns a
+    silent failed install into something Settings and the badge can show.
+    """
+    path = update_result_path()
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    code = None
+    for line in raw.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip().lower() == "exit":
+            try:
+                code = int(value.strip())
+            except ValueError:
+                code = None
+            break
+
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+    if code == 0:
+        result = "Update installed"
+        detail = "Installer finished successfully (exit code 0)."
+    elif code is None:
+        result = "Update failed"
+        detail = (
+            "The installer helper did not report an exit code. "
+            f"See the setup log at {setup_log_path()}."
+        )
+    else:
+        result = "Update failed"
+        detail = (
+            f"Installer exited with code {code} — the update was NOT applied. "
+            f"See the setup log at {setup_log_path()}."
+        )
+
+    log_update_event(f"Installer result consumed: exit={code if code is not None else '(missing)'}")
+    return record_update_result(
+        result,
+        detail=detail,
+        extra={
+            "last_install_result": result,
+            "last_install_detail": detail,
+            "last_install_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "setup_exit_code": "" if code is None else code,
+        },
+    )
+
+
+def new_update_dir() -> Path:
+    """A fresh private directory per update attempt.
+
+    Downloading to a fixed %TEMP% name means any local process can predict —
+    and replace — the file that is about to be executed with installer
+    privileges. mkdtemp gives a name nothing can guess ahead of time.
+    """
+    return Path(tempfile.mkdtemp(prefix=UPDATE_DIR_PREFIX))
+
+
+def cleanup_update_dir(path: Path | None) -> None:
+    """Best-effort removal of an update directory whose installer never ran."""
+    if path is None:
+        return
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+        log_update_event(f"Update directory removed: {path}")
+    except Exception:
+        pass
+
+
+def sha256_of_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 256), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def parse_checksums(text: str) -> dict:
+    """Parse `sha256sum` output: "<64 hex>  <filename>" per line.
+
+    Blank lines and comments are skipped; anything else that doesn't match the
+    shape is ignored rather than fatal, so one stray line can't void the file.
+    """
+    sums = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        digest, name = parts[0].strip().lower(), parts[1].strip().lstrip("*")
+        if len(digest) != 64 or not all(c in "0123456789abcdef" for c in digest):
+            continue
+        sums[Path(name).name] = digest
+    return sums
+
+
+def fetch_expected_sha256(checksum_url: str | None, asset_name: str | None) -> str:
+    """Expected digest for asset_name, or UpdateIntegrityError explaining why not."""
+    if not checksum_url:
+        raise UpdateIntegrityError(
+            f"This release does not publish {CHECKSUM_ASSET_NAME}, so the installer "
+            "cannot be verified."
+        )
+    if not asset_name:
+        raise UpdateIntegrityError("This release has no installer to verify.")
+    try:
+        req = urllib.request.Request(
+            checksum_url, headers={"Accept": "application/octet-stream"}
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        raise UpdateIntegrityError(f"Could not download {CHECKSUM_ASSET_NAME}: {e}") from e
+
+    sums = parse_checksums(text)
+    if not sums:
+        raise UpdateIntegrityError(
+            f"{CHECKSUM_ASSET_NAME} is malformed — no usable SHA-256 lines found."
+        )
+    digest = sums.get(Path(asset_name).name)
+    if not digest:
+        raise UpdateIntegrityError(
+            f"{CHECKSUM_ASSET_NAME} does not list {asset_name}."
+        )
+    return digest
+
+
+def verify_installer_checksum(installer_path: Path, expected_sha256: str) -> str:
+    """Raise UpdateIntegrityError unless the file on disk matches expected."""
+    actual = sha256_of_file(installer_path)
+    expected = (expected_sha256 or "").strip().lower()
+    log_update_event(
+        f"Checksum check: file={installer_path} expected={expected or '(none)'} actual={actual}"
+    )
+    if actual != expected:
+        raise UpdateIntegrityError(
+            "The downloaded installer does not match the checksum published with "
+            f"the release (expected {expected or '(none)'}, got {actual})."
+        )
+    return actual
 
 
 def _pick_asset(assets: list) -> dict | None:
@@ -229,19 +448,37 @@ def _fetch_latest_release() -> dict | None:
         return None
 
 
-def _release_info(release: dict, force_install: bool = False) -> dict | None:
+def _pick_checksum_asset(assets: list) -> dict | None:
+    for asset in assets:
+        if asset.get("name") == CHECKSUM_ASSET_NAME:
+            return asset
+    return None
+
+
+def _release_info(
+    release: dict,
+    force_install: bool = False,
+    same_build: bool = False,
+) -> dict | None:
     latest_tag = release.get("tag_name", "")
     if not latest_tag:
         return None
 
-    asset = _pick_asset(release.get("assets", []))
+    assets = release.get("assets", [])
+    asset = _pick_asset(assets)
+    checksum = _pick_checksum_asset(assets)
     return {
         "tag": latest_tag,
         "body": release.get("body") or "(no changelog provided)",
         "html_url": release.get("html_url", ""),
         "asset_url": asset.get("browser_download_url") if asset else None,
         "asset_name": asset.get("name") if asset else None,
+        "checksum_url": checksum.get("browser_download_url") if checksum else None,
+        "checksum_name": checksum.get("name") if checksum else None,
         "force_install": force_install,
+        # True only when the user deliberately asked to reinstall the build they
+        # are already running — the dialog says "reinstall", not "update".
+        "same_build": same_build,
     }
 
 
@@ -283,24 +520,62 @@ def check_for_update(force_install: bool = False) -> dict | None:
         return None
 
     latest_tag = release.get("tag_name", "")
-    info = _release_info(release, force_install=force_install)
+    same_build = bool(latest_tag) and latest_tag == my_tag
+    newer = is_newer_build(latest_tag, my_tag)
+    info = _release_info(
+        release, force_install=force_install, same_build=same_build
+    )
     log_update_event(
         "Update check latest: "
         f"latest_build={latest_tag or '(missing)'} "
+        f"latest_order={parse_build_tag(latest_tag)} "
+        f"current_order={parse_build_tag(my_tag)} "
+        f"newer={newer if newer is not None else '(not comparable)'} "
         f"asset_name={(info or {}).get('asset_name')} "
-        f"asset_url={(info or {}).get('asset_url')}"
+        f"asset_url={(info or {}).get('asset_url')} "
+        f"checksum_url={(info or {}).get('checksum_url')}"
     )
-    if not force_install and (not latest_tag or latest_tag == my_tag):
-        record_update_result("Up to date", latest_build=latest_tag)
-        log_update_event("Update check result: up to date")
-        return None
+
+    if not force_install:
+        if not latest_tag or same_build:
+            record_update_result("Up to date", latest_build=latest_tag)
+            log_update_event("Update check result: up to date")
+            return None
+        if newer is False:
+            # /releases/latest returns whatever is newest *now*, which can be
+            # older than this build once a release is deleted or unpublished.
+            # Offering it would silently downgrade the user.
+            record_update_result(
+                "Up to date",
+                detail=(
+                    f"Latest release {latest_tag} is not newer than the installed "
+                    f"build {my_tag}."
+                ),
+                latest_build=latest_tag,
+            )
+            log_update_event("Update check result: latest release is not newer; ignoring")
+            return None
+        if newer is None:
+            log_update_event(
+                "Update check: tags are not orderable "
+                f"(current={my_tag!r} latest={latest_tag!r}); "
+                "falling back to an inequality comparison"
+            )
+
+    if force_install and same_build:
+        result_label = "Reinstall available"
+    elif force_install:
+        result_label = "Manual reinstall available"
+    else:
+        result_label = "Update available"
 
     record_update_result(
-        "Update available" if not force_install else "Manual reinstall available",
+        result_label,
         latest_build=latest_tag,
         extra={
             "asset_name": (info or {}).get("asset_name"),
             "asset_url": (info or {}).get("asset_url"),
+            "checksum_url": (info or {}).get("checksum_url"),
             "release_url": (info or {}).get("html_url"),
         },
     )

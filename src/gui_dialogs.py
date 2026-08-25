@@ -502,6 +502,17 @@ class UpdateDialog(QDialog):
         self._install_started.connect(self._on_install_started)
         self._install_failed.connect(self._on_install_failed)
 
+    def _is_same_build(self) -> bool:
+        """The user asked to reinstall the exact build they are running."""
+        return bool(self._release.get("same_build"))
+
+    def _button_text(self) -> str:
+        if self._is_same_build():
+            return "Restart && Reinstall"
+        if self._release.get("force_install"):
+            return "Restart && Install"
+        return "Restart && Update"
+
     def _build(self):
         from update_notes import note_for
 
@@ -509,13 +520,28 @@ class UpdateDialog(QDialog):
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(10)
 
-        if self._release.get("force_install"):
-            title_text = f"Install latest version: {self._release.get('tag', '')}"
+        tag = self._release.get("tag", "")
+        if self._is_same_build():
+            title_text = "You already have this build installed"
+        elif self._release.get("force_install"):
+            title_text = f"Install latest version: {tag}"
         else:
-            title_text = f"New version available: {self._release.get('tag', '')}"
+            title_text = f"New version available: {tag}"
         title = QLabel(title_text)
         title.setStyleSheet("font-size:16px; font-weight:bold;")
         layout.addWidget(title)
+
+        if self._is_same_build():
+            # Reached by clicking the badge with no update pending. Nothing is
+            # newer; this is the repair path, and saying "update" here would be
+            # a lie the user can check.
+            subtitle = QLabel(
+                f"{tag} is the latest release and the build you are running.\n"
+                "Reinstall latest version?"
+            )
+            subtitle.setWordWrap(True)
+            subtitle.setStyleSheet("font-size:12px; padding-bottom:4px;")
+            layout.addWidget(subtitle)
 
         # One line instead of a changelog. Nobody running this tool needs a diff;
         # the honest notes stay on the GitHub release for whoever is debugging.
@@ -571,6 +597,7 @@ class UpdateDialog(QDialog):
 
         self._status_lbl = QLabel("")
         self._status_lbl.setProperty("role", "dim")
+        self._status_lbl.setWordWrap(True)
         self._status_lbl.setStyleSheet("font-size:11px;")
         layout.addWidget(self._status_lbl)
 
@@ -584,12 +611,7 @@ class UpdateDialog(QDialog):
         later_btn.setFixedHeight(38)
         later_btn.clicked.connect(self.reject)
 
-        button_text = (
-            "Restart && Install"
-            if self._release.get("force_install")
-            else "Restart && Update"
-        )
-        self._update_btn = QPushButton(button_text)
+        self._update_btn = QPushButton(self._button_text())
         self._update_btn.setFixedHeight(38)
         self._update_btn.clicked.connect(self._on_update)
 
@@ -618,11 +640,24 @@ class UpdateDialog(QDialog):
     def _run_update(self):
         """Worker thread. Talks to the GUI only through signals."""
         release = self._release
+        update_dir = None
+        launched = False
         try:
-            import tempfile
-            from update_checker import download_asset, log_update_event, record_update_result
-            tmp_dir = Path(tempfile.gettempdir())
-            installer_path = tmp_dir / release["asset_name"]
+            from update_checker import (
+                UpdateIntegrityError,
+                cleanup_update_dir,
+                download_asset,
+                fetch_expected_sha256,
+                log_update_event,
+                new_update_dir,
+                record_update_result,
+                verify_installer_checksum,
+            )
+            # A fresh private directory per attempt: a fixed %TEMP% name is a
+            # path any other local process can predict and replace between the
+            # download finishing and the installer being executed.
+            update_dir = new_update_dir()
+            installer_path = update_dir / release["asset_name"]
             record_update_result(
                 "Update selected",
                 detail=f"Preparing installer download to {installer_path}",
@@ -655,10 +690,29 @@ class UpdateDialog(QDialog):
             self._status_changed.emit("Update downloaded")
             log_update_event(f"Update downloaded: {installer_path}")
 
+            # Nothing is executed until the bytes on disk match the checksum
+            # published with the release. Any doubt at all and the installer is
+            # deleted instead of run.
+            self._status_changed.emit("Verifying download…")
+            expected = fetch_expected_sha256(
+                release.get("checksum_url"), release.get("asset_name")
+            )
+            verify_installer_checksum(installer_path, expected)
+            self._status_changed.emit("Download verified")
+            record_update_result(
+                "Verified",
+                detail=f"Installer SHA-256 matches {release.get('checksum_name') or 'the published checksum'}.",
+                latest_build=release.get("tag", ""),
+                extra={"installer_sha256": expected},
+            )
+
             self._status_changed.emit("Applying update")
             log_update_event("Applying update: launching detached helper")
             from update_installer import launch_after_current_process_exits
             launch_after_current_process_exits(installer_path)
+            # From here the helper owns the directory — it deletes the installer
+            # and the directory itself once Setup is finished with them.
+            launched = True
             self._status_changed.emit("Restarting app")
             record_update_result(
                 "Restart requested",
@@ -669,16 +723,36 @@ class UpdateDialog(QDialog):
             log_update_event("Restarting app: closing current process")
             self._install_started.emit()
         except Exception as e:
+            integrity = type(e).__name__ == "UpdateIntegrityError"
+            if integrity:
+                message = (
+                    f"{e}\n\nThe download was discarded and nothing was installed. "
+                    "You can install manually from the release page."
+                )
+            else:
+                message = str(e)
             try:
-                from update_checker import record_update_result
+                from update_checker import log_update_event, record_update_result
                 record_update_result(
-                    "Failed",
+                    "Integrity check failed" if integrity else "Failed",
                     detail=str(e),
                     latest_build=release.get("tag", ""),
                 )
+                log_update_event(
+                    ("Update aborted (integrity): " if integrity else "Update failed: ")
+                    + str(e)
+                )
             except Exception:
                 pass
-            self._install_failed.emit(str(e))
+            self._install_failed.emit(message)
+        finally:
+            # Only ours to delete while the installer has not been handed over.
+            if not launched:
+                try:
+                    from update_checker import cleanup_update_dir
+                    cleanup_update_dir(update_dir)
+                except Exception:
+                    pass
 
     # ── GUI-thread slots ─────────────────────────────────────────────────────
 
@@ -703,12 +777,7 @@ class UpdateDialog(QDialog):
         self._progress.setValue(0)
         self._progress.hide()
         self._update_btn.setEnabled(True)
-        button_text = (
-            "Restart && Install"
-            if self._release.get("force_install")
-            else "Restart && Update"
-        )
-        self._update_btn.setText(button_text)
+        self._update_btn.setText(self._button_text())
 
     def install_started(self) -> bool:
         return self._install_started_flag
