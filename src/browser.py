@@ -135,6 +135,15 @@ async def launch_browser(log_fn=None):
             log_fn(msg, tag)
         print(msg)
 
+    # Pin the browser registry before the driver starts. Playwright injects
+    # PLAYWRIGHT_BROWSERS_PATH=0 into the driver's environment for frozen
+    # builds, which points it at the read-only copy inside the .app instead of
+    # the cache the browser was actually downloaded to. Setting the variable
+    # explicitly (see chromium_setup.sanitize_browser_env) makes that
+    # setdefault a no-op. Idempotent, and a no-op when running from source.
+    from chromium_setup import sanitize_browser_env
+    sanitize_browser_env()
+
     session_exists = os.path.exists(SESSION_FILE)
     log(f"Brightspace session file exists before browser launch: {'yes' if session_exists else 'no'} ({SESSION_FILE})")
     if session_exists:
