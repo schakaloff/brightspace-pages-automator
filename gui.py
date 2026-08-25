@@ -538,11 +538,27 @@ class MainWindow(QMainWindow):
             if release:
                 self._show_update_dialog(release)
             else:
-                QMessageBox.warning(
-                    self,
-                    "Update check failed",
-                    "Could not reach the latest installer. Check your internet connection and try again.",
+                # The check records why it failed; telling someone to check
+                # their connection when GitHub rate-limited the request (or a
+                # certificate failed to verify) sends them after the wrong
+                # problem entirely.
+                message = diagnostics.get("fetch_user_message") or (
+                    "Could not reach the latest installer. Check your internet "
+                    "connection and try again."
                 )
+                status = diagnostics.get("fetch_http_status")
+                detail = diagnostics.get("last_update_detail", "")
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Icon.Warning)
+                box.setWindowTitle("Update check failed")
+                box.setText(message)
+                if detail:
+                    box.setDetailedText(
+                        f"{detail}\n\n"
+                        f"HTTP status: {status if status != '' else '(none)'}\n"
+                        f"Updater log: {diagnostics.get('updater_log_path', '')}"
+                    )
+                box.exec()
             return
         # check_for_update returns None when up to date, offline, or running
         # from source. Offline must not clear a badge we already earned.

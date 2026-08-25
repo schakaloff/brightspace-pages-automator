@@ -437,6 +437,12 @@ class SettingsPanel(QWidget):
         detail = diagnostics.get("last_update_detail", "")
         if detail:
             result = f"{result} - {detail}"
+        # Names the failure (rate_limit / ssl / timeout / network / malformed)
+        # so a support question can be answered from this panel alone.
+        kind = diagnostics.get("fetch_error_kind", "")
+        if kind:
+            status = diagnostics.get("fetch_http_status", "")
+            result = f"{result} [{kind}{f', HTTP {status}' if status != '' else ''}]"
         checked = diagnostics.get("last_update_at") or "not checked yet"
         latest = diagnostics.get("latest_build") or "(not known)"
         # A Setup that exited non-zero must never be readable as a success, so

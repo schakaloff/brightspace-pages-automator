@@ -17,6 +17,8 @@ import json
 import os
 import re
 import shutil
+import socket
+import ssl
 import subprocess
 import tempfile
 import sys
@@ -51,8 +53,29 @@ _STICKY_KEYS = (
 )
 
 
+API_TIMEOUT_SECONDS = 10
+
+
 class UpdateIntegrityError(Exception):
     """The downloaded installer could not be proven to match the release."""
+
+
+class UpdateFetchError(Exception):
+    """The release lookup failed, with the reason preserved.
+
+    Every failure used to collapse into "check your internet connection",
+    which is wrong for a rate limit, a certificate problem or a captive
+    portal — and left nothing in the log to tell them apart. The status code
+    and exception reason travel with the error so both the diagnostics and
+    the message the user reads can name the real cause.
+    """
+
+    def __init__(self, kind: str, detail: str, user_message: str, status: int | None = None):
+        super().__init__(detail)
+        self.kind = kind
+        self.detail = detail
+        self.user_message = user_message
+        self.status = status
 UPDATE_CHANNEL = os.environ.get("BPA_UPDATE_CHANNEL", "stable")
 UPDATE_BRANCH = os.environ.get("BPA_UPDATE_BRANCH", "main")
 
@@ -271,6 +294,11 @@ def get_update_diagnostics() -> dict:
         "last_install_detail": state.get("last_install_detail", ""),
         "last_install_at": state.get("last_install_at", ""),
         "setup_exit_code": state.get("setup_exit_code", ""),
+        # Present only when the last check failed; cleared by the next success,
+        # since record_update_result rebuilds the state from scratch.
+        "fetch_error_kind": state.get("fetch_error_kind", ""),
+        "fetch_http_status": state.get("fetch_http_status", ""),
+        "fetch_user_message": state.get("fetch_user_message", ""),
     }
 
 
@@ -439,13 +467,125 @@ def _pick_asset(assets: list) -> dict | None:
     return None
 
 
+def _rate_limit_reset_label(headers) -> str:
+    """"14:20:54" from X-RateLimit-Reset, or "" if the header is unusable."""
+    try:
+        reset = int(headers.get("X-RateLimit-Reset", ""))
+    except (TypeError, ValueError):
+        return ""
+    try:
+        return datetime.fromtimestamp(reset).strftime("%H:%M:%S")
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
+def _http_error(e: urllib.error.HTTPError) -> UpdateFetchError:
+    headers = e.headers or {}
+    remaining = headers.get("X-RateLimit-Remaining")
+    # GitHub answers an exhausted unauthenticated quota with 403 (older) or
+    # 429 (newer) and Remaining: 0. Nothing is wrong with the connection, so
+    # saying "check your internet" sends people chasing the wrong thing.
+    if e.code in (403, 429) and remaining == "0":
+        reset_at = _rate_limit_reset_label(headers)
+        detail = (
+            f"HTTP {e.code}: GitHub API rate limit exceeded "
+            f"(X-RateLimit-Remaining=0"
+            + (f", resets at {reset_at}" if reset_at else "")
+            + ")"
+        )
+        message = (
+            "GitHub is limiting how often update checks can run from this "
+            "network, so the check was refused"
+            + (f". Updates should work again after {reset_at}." if reset_at
+               else ". Try again later.")
+            + "\n\nYour internet connection is fine — this limit is shared by "
+            "everyone on the same network."
+        )
+        return UpdateFetchError("rate_limit", detail, message, status=e.code)
+
+    reason = e.reason or ""
+    detail = f"HTTP {e.code}: {reason}"
+    message = (
+        f"GitHub refused the update check with HTTP {e.code} ({reason}).\n\n"
+        "This is a problem at GitHub's end or with how this network reaches "
+        "it, not with the app."
+    )
+    return UpdateFetchError("http", detail, message, status=e.code)
+
+
+def _url_error(e: urllib.error.URLError) -> UpdateFetchError:
+    reason = e.reason
+    if isinstance(reason, ssl.SSLError):
+        code = getattr(reason, "reason", "") or type(reason).__name__
+        detail = f"SSL failure: {code}: {reason}"
+        message = (
+            "The secure connection to GitHub could not be verified "
+            f"({code}).\n\n"
+            "This is a certificate problem on this computer or network, not a "
+            "connection problem — the app can reach GitHub but cannot confirm "
+            "it is really GitHub."
+        )
+        return UpdateFetchError("ssl", detail, message)
+
+    if isinstance(reason, (socket.timeout, TimeoutError)):
+        return _timeout_error()
+
+    detail = f"{type(reason).__name__ if reason is not None else 'URLError'}: {reason}"
+    message = (
+        f"Could not reach github.com ({reason}).\n\n"
+        "Check your internet connection and try again."
+    )
+    return UpdateFetchError("network", detail, message)
+
+
+def _timeout_error() -> UpdateFetchError:
+    detail = f"Timed out after {API_TIMEOUT_SECONDS}s"
+    message = (
+        f"The update check timed out after {API_TIMEOUT_SECONDS} seconds.\n\n"
+        "The network may be slow, or something on it may be blocking "
+        "github.com."
+    )
+    return UpdateFetchError("timeout", detail, message)
+
+
+def _malformed_error(e: Exception) -> UpdateFetchError:
+    detail = f"Malformed response: {type(e).__name__}: {e}"
+    message = (
+        "GitHub's reply could not be read, so the update check was abandoned."
+        "\n\nA sign-in page or web filter may be intercepting the connection."
+    )
+    return UpdateFetchError("malformed", detail, message)
+
+
 def _fetch_latest_release() -> dict | None:
+    """The latest release, or UpdateFetchError naming why not.
+
+    Returning None is still honoured by the caller as an unexplained failure,
+    which keeps the contract for anything that stubs this out.
+    """
     try:
         req = urllib.request.Request(API_URL, headers={"Accept": "application/vnd.github+json"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT_SECONDS) as resp:
             return json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, ValueError):
-        return None
+    except urllib.error.HTTPError as e:
+        # Subclass of URLError, so it has to be caught first or a status code
+        # is silently downgraded to a generic network failure.
+        raise _http_error(e) from e
+    except urllib.error.URLError as e:
+        raise _url_error(e) from e
+    except (socket.timeout, TimeoutError) as e:
+        raise _timeout_error() from e
+    except ValueError as e:
+        # json.JSONDecodeError and UnicodeDecodeError are both ValueErrors.
+        raise _malformed_error(e) from e
+    except OSError as e:
+        # Anything urllib let through unwrapped (connection reset, no route).
+        raise UpdateFetchError(
+            "network",
+            f"{type(e).__name__}: {e}",
+            f"Could not reach github.com ({e}).\n\n"
+            "Check your internet connection and try again.",
+        ) from e
 
 
 def _pick_checksum_asset(assets: list) -> dict | None:
@@ -513,7 +653,27 @@ def check_for_update(force_install: bool = False) -> dict | None:
         log_update_event("Update check skipped: running from source/unversioned build")
         return None
 
-    release = _fetch_latest_release()
+    try:
+        release = _fetch_latest_release()
+    except UpdateFetchError as e:
+        record_update_result(
+            "Failed",
+            e.detail,
+            extra={
+                "fetch_error_kind": e.kind,
+                "fetch_http_status": e.status if e.status is not None else "",
+                "fetch_user_message": e.user_message,
+            },
+        )
+        log_update_event(
+            "Update check failed: "
+            f"kind={e.kind} "
+            f"status={e.status if e.status is not None else '(none)'} "
+            f"url={API_URL} "
+            f"detail={e.detail}"
+        )
+        return None
+
     if not release:
         record_update_result("Failed", "Could not fetch latest GitHub release.")
         log_update_event("Update check failed: could not fetch latest release")
