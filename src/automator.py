@@ -112,7 +112,6 @@ class PageAutomator:
     async def replace_html_in_editor(self, page: Page, html: str) -> bool:
         self.log("Pasting styled HTML (Ctrl+A, Ctrl+V)...", "info")
 
-        expected_len = len(html)
         pasted_ok = False
         for attempt in range(3):
             async with self._clipboard_lock:
@@ -126,17 +125,21 @@ class PageAutomator:
                 await page.keyboard.press("Control+v")
                 await page.wait_for_timeout(1500)
 
-                # Verify the paste actually landed in the CM6 doc model before trusting it
-                cm_len = len(await self._read_editor_full_text(page))
+                # Read the real CM6 document back and compare authored content,
+                # not just its character count. Brightspace may harmlessly add
+                # wrappers, entities, or absolute URLs.
+                pasted_html = await self._read_editor_full_text(page)
 
-            if cm_len >= expected_len * 0.9:
+            from content_preservation import content_is_equivalent
+            equivalent, reason = content_is_equivalent(html, pasted_html)
+            if equivalent:
                 pasted_ok = True
                 break
-            self.log(f"⚠ Paste verify failed (editor has {cm_len} chars, expected ~{expected_len}) — retrying", "warning")
+            self.log(f"⚠ Paste content verification failed ({reason}) — retrying", "warning")
             await page.wait_for_timeout(800)
 
         if not pasted_ok:
-            self.log("✗ Paste never landed in editor — aborting save to avoid overwriting with stale content", "error")
+            self.log("✗ Pasted content could not be verified — aborting without saving", "error")
             return False
 
         self.log("✓ HTML pasted", "success")
@@ -409,8 +412,8 @@ class PageAutomator:
             except Exception:
                 heading = ""
         if heading:
-            escaped = heading.replace("<", "&lt;").replace(">", "&gt;")
-            source_html = f"<h2>{escaped}</h2>\n{source_html}"
+            from content_preservation import add_generated_heading
+            source_html = add_generated_heading(heading, source_html)
 
         from ai_styler import apply_style, DEFAULT_MODEL
         styled_html, usage = await apply_style(
@@ -431,7 +434,8 @@ class PageAutomator:
             self._token_usage["output_tokens"] += usage["output_tokens"]
             self._token_usage["cost_cad"] += usage["cost_cad"]
 
-        await self.replace_html_in_editor(page, styled_html)
+        if not await self.replace_html_in_editor(page, styled_html):
+            return False
         await page.wait_for_timeout(1500)
         return True
 

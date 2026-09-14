@@ -11,7 +11,6 @@ import ai_styler
 
 
 SOURCE_HTML = "<p>hello world</p>"
-STYLED_HTML = "<p class='themed'>hello world, restyled for the theme</p>"
 
 
 class _Block:
@@ -69,7 +68,9 @@ class _Messages:
             raise anthropic.APIConnectionError(
                 request=httpx.Request("POST", "https://api.anthropic.com/v1/messages")
             )
-        return _Stream(STYLED_HTML)
+        prompt = kwargs["messages"][0]["content"]
+        protected_source = prompt.split("SOURCE_START\n", 1)[1].split("\nSOURCE_END", 1)[0]
+        return _Stream(protected_source.replace("<p", "<p class='themed'", 1))
 
 
 class _FakeClient:
@@ -84,7 +85,9 @@ async def _mock_sleep(_s):
 def _no_sleep_and_stub_prompt(monkeypatch):
     monkeypatch.setattr(ai_styler.asyncio, "sleep", _mock_sleep)
     monkeypatch.setattr(
-        ai_styler, "_load_prompt", lambda theme: "{source_html}|{style_reference_html}"
+        ai_styler,
+        "_load_prompt",
+        lambda theme: "SOURCE_START\n{source_html}\nSOURCE_END\n{style_reference_html}",
     )
 
 
@@ -108,7 +111,8 @@ async def test_connection_error_is_retried_then_succeeds(monkeypatch):
     calls, result, usage = await _run(monkeypatch, fail_times=1)
 
     assert calls == 2, "should have retried after the connection error"
-    assert result == STYLED_HTML
+    assert "hello world" in result
+    assert "themed" in result
     assert usage["input_tokens"] == 100
 
 
@@ -147,3 +151,41 @@ async def test_non_connection_error_still_fails_fast(monkeypatch):
 
     assert _Boom.calls == 1
     assert result is None and usage is None
+
+
+@pytest.mark.asyncio
+async def test_ai_result_that_drops_placeholders_is_rejected(monkeypatch):
+    class _UnsafeMessages:
+        def stream(self, **kwargs):
+            return _AsyncStreamContextManager(_Stream("<p>AI-rewritten words</p>"))
+
+    client = type("C", (), {"messages": _UnsafeMessages()})()
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", lambda **kwargs: client)
+    logs = []
+
+    result, usage = await ai_styler.apply_style(
+        source_html=SOURCE_HTML,
+        style_reference_html="",
+        theme_name="lake",
+        api_key="test-key",
+        log_callback=lambda message, level: logs.append(message),
+    )
+
+    assert result is None and usage is None
+    assert any("Content-integrity check failed" in message for message in logs)
+
+
+def test_existing_presentation_css_and_generic_scripts_can_still_be_cleaned():
+    from content_preservation import protect_html
+
+    source = (
+        '<style>.old { color: red; }</style>'
+        '<script src="/ordinary-widget.js">setupWidget()</script>'
+        '<p>Authored words remain.</p>'
+    )
+    protection = protect_html(source)
+    cleaned = ai_styler._clean_html(protection.protected_html)
+    restored = protection.restore_and_validate(cleaned)
+
+    assert "Authored words remain." in restored
+    assert "ordinary-widget.js" not in restored

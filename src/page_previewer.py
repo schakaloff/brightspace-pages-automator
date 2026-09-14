@@ -102,15 +102,24 @@ async def _call_claude_feedback(
 ) -> Optional[str]:
     """Re-run AI on already-styled HTML applying user feedback."""
     import anthropic
+    from content_preservation import ContentProtectionError, protect_html
+
+    try:
+        protection = protect_html(styled_html)
+    except Exception as e:
+        log(f"❌ Could not protect preview content: {e}", "error")
+        return None
 
     prompt = (
         "You are an expert front-end developer. The HTML below was already styled.\n"
         "Apply the user's feedback to adjust it. Keep the same theme, colors, and overall layout.\n"
         "Only make the specific changes the user requested.\n"
+        "Every __BPA_*__ placeholder is immutable. Keep every placeholder exactly once, "
+        "in its original order and context.\n"
         "Return ONLY the complete adjusted HTML. No explanation, no markdown fences.\n\n"
         f"User feedback: {feedback}\n\n"
         "CURRENT HTML:\n"
-        f"{styled_html}"
+        f"{protection.protected_html}"
     )
 
     client = anthropic.AsyncAnthropic(api_key=api_key)
@@ -129,6 +138,11 @@ async def _call_claude_feedback(
                 start = 1 if lines[0].startswith("```") else 0
                 end = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
                 result = "\n".join(lines[start:end]).strip()
+            try:
+                result = protection.restore_and_validate(result)
+            except ContentProtectionError as e:
+                log(f"❌ Feedback changed protected content: {e}", "error")
+                return None
             log(f"✅ Feedback applied ({len(result):,} chars)", "success")
             return result
         except anthropic.APIStatusError as e:
@@ -296,6 +310,17 @@ class PagePreviewer:
         self.log("✓ HTML pasted", "success")
         await page.wait_for_timeout(500)
 
+        pasted_html = await self._extract_source_html(page)
+        if not pasted_html:
+            self.log("✗ Could not read pasted HTML back — aborting without saving", "error")
+            return False
+        from content_preservation import content_is_equivalent
+        equivalent, reason = content_is_equivalent(styled_html, pasted_html)
+        if not equivalent:
+            self.log(f"✗ Pasted content failed verification ({reason}) — not saving", "error")
+            return False
+        self.log("✓ Pasted content verified", "success")
+
         for sel in ['[data-dialog-action="save"]', 'd2l-button:has-text("OK")', 'button:has-text("OK")',
                     'd2l-button:has-text("Update")', 'button:has-text("Update")']:
             _, btn = await _find_locator_any_frame(page, sel, retries=3, delay_ms=400)
@@ -428,7 +453,8 @@ class PagePreviewer:
 
                 if action == "apply":
                     self.log("─" * 52, "dim")
-                    await self._write_back_and_save(page, styled_html)
+                    if not await self._write_back_and_save(page, styled_html):
+                        self.log("✗ Preview was not saved because verification failed", "error")
                     break
                 elif action == "regenerate":
                     self.log(f"Regenerating with feedback: {feedback!r}", "info")

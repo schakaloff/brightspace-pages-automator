@@ -31,9 +31,13 @@ def _clean_html(html: str) -> str:
     # remove all data-* and aria-* attributes, plus common Brightspace noise
     noise_attrs = {"data-d2l-uid", "data-when-user-interacts", "data-placeholder"}
     for tag in soup.find_all(True):
+        # Content-bearing values have already been replaced by protection
+        # placeholders. Keep those attributes; removing one would make the
+        # placeholder audit fail before the AI is called.
         attrs_to_remove = [
             a for a in list(tag.attrs)
-            if a.startswith("data-") or a.startswith("aria-") or a in noise_attrs
+            if (a.startswith("data-") or a.startswith("aria-") or a in noise_attrs)
+            and "__BPA_" not in str(tag.attrs[a])
         ]
         for a in attrs_to_remove:
             del tag.attrs[a]
@@ -170,16 +174,32 @@ async def apply_style(
         log(f"❌ No prompt file for theme '{theme_name}'", "error")
         return None, None
 
-    cleaned_html = _clean_html(source_html)
+    from content_preservation import ContentProtectionError, protect_html
+
+    try:
+        protection = protect_html(source_html)
+        cleaned_html = _clean_html(protection.protected_html)
+        # Cleaning is allowed to alter presentation only. Prove that it did not
+        # discard any protected value before sending anything to Claude.
+        protection.restore_and_validate(cleaned_html)
+    except ContentProtectionError as e:
+        log(f"❌ Could not protect source content: {e}. Leaving existing content untouched.", "error")
+        return None, None
+
     log(
-        f"🧹 Cleaned HTML: {len(source_html):,} → {len(cleaned_html):,} chars"
-        f"  ({len(cleaned_html.split()):,} words)",
+        f"🔒 Protected {protection.placeholder_count:,} content value(s) before styling",
         "info",
     )
 
-    prompt = prompt_template.format(
-        source_html=cleaned_html,
-        style_reference_html=style_reference_html or "",
+    prompt = (
+        "CONTENT INTEGRITY RULES (mandatory): Every __BPA_*__ placeholder is an "
+        "immutable value. Keep every placeholder exactly once and in its original "
+        "order and context. Never edit, duplicate, remove, or invent a placeholder. "
+        "You may change CSS, classes, layout wrappers, and presentation-only HTML.\n\n"
+        + prompt_template.format(
+            source_html=cleaned_html,
+            style_reference_html=style_reference_html or "",
+        )
     )
 
     client = anthropic.AsyncAnthropic(api_key=api_key)
@@ -211,12 +231,21 @@ async def apply_style(
                 end   = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
                 result = "\n".join(lines[start:end]).strip()
 
-            result = _restore_kaltura_sizing(cleaned_html, result, log=log)
+            try:
+                result = protection.restore_and_validate(result)
+            except ContentProtectionError as e:
+                log(
+                    f"❌ Content-integrity check failed: {e}. Leaving existing content untouched.",
+                    "error",
+                )
+                return None, None
 
-            if len(result) < len(cleaned_html) * 0.5:
+            result = _restore_kaltura_sizing(source_html, result, log=log)
+
+            if len(result) < len(source_html) * 0.5:
                 log(
                     f"❌ Styled result ({len(result):,} chars) is suspiciously short "
-                    f"compared to the source ({len(cleaned_html):,} chars) — refusing to "
+                    f"compared to the source ({len(source_html):,} chars) — refusing to "
                     "overwrite existing content.",
                     "error",
                 )

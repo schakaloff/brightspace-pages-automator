@@ -738,12 +738,14 @@ class UnitCollector:
     # ── Assemble + Style ──────────────────────────────────────────────────────
 
     def _build_combined_html(self, items: list, has_files: bool = False) -> str:
+        from content_preservation import add_generated_heading
+
         parts = []
         for item in items:
             t = item.get("type")
             if t == "html" and item.get("html"):
-                label = item["label"].replace("<", "&lt;").replace(">", "&gt;")
-                parts.append(f"<h2>{label}</h2>\n{item['html']}\n<hr/>\n")
+                section = add_generated_heading(item["label"], item["html"])
+                parts.append(f"{section}\n<hr/>\n")
             elif t == "link" and item.get("link_url"):
                 label = item["label"].replace("<", "&lt;").replace(">", "&gt;")
                 parts.append(
@@ -809,7 +811,6 @@ class UnitCollector:
             return false;
         }"""
 
-        expected_len = len(html)
         for attempt in range(3):
             async with self._clipboard_lock:
                 await page.evaluate("(h) => navigator.clipboard.writeText(h)", html)
@@ -831,15 +832,17 @@ class UnitCollector:
                 await page.keyboard.press("Control+v")
                 await page.wait_for_timeout(1500)
 
-                cm_len = len(await self._read_editor_full_text(page))
-            if cm_len >= expected_len * 0.9:
+                pasted_html = await self._read_editor_full_text(page)
+            from content_preservation import content_is_equivalent
+            equivalent, reason = content_is_equivalent(html, pasted_html)
+            if equivalent:
                 self.log("✓ HTML pasted", "success")
                 await page.wait_for_timeout(1500)
                 return True
-            self.log(f"⚠ Paste verify failed (editor has {cm_len} chars, expected ~{expected_len}) — retrying", "warning")
+            self.log(f"⚠ Paste content verification failed ({reason}) — retrying", "warning")
             await page.wait_for_timeout(800)
 
-        self.log("✗ Paste never landed in editor — aborting save to avoid overwriting with stale content", "error")
+        self.log("✗ Pasted content could not be verified — aborting without saving", "error")
         return False
 
     async def _editor_cursor_end(self, page: Page):
@@ -1466,7 +1469,9 @@ class UnitCollector:
                 self.log("✗ Claude returned nothing", "error")
                 return False
 
-            await self._paste_html(page, styled_html)
+            if not await self._paste_html(page, styled_html):
+                self.log("✗ Styled HTML failed content verification; page was not saved", "error")
+                return False
             await page.wait_for_timeout(1500)
             if not await self._close_source_dialog(page):
                 return False
@@ -1568,6 +1573,8 @@ class UnitCollector:
             file_items: list = []
             html_count = link_count = file_count = file_link_count = 0
 
+            from content_preservation import add_generated_heading
+
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
                     self.log(f"✗ Topic {i + 1} scrape failed: {result}", "error")
@@ -1576,7 +1583,8 @@ class UnitCollector:
                 safe = topic["label"].replace("<", "&lt;").replace(">", "&gt;")
 
                 if result["html"]:
-                    sections.append(f"<h2>{safe}</h2>\n{result['html']}\n<hr/>\n")
+                    section = add_generated_heading(topic["label"], result["html"])
+                    sections.append(f"{section}\n<hr/>\n")
                     html_count += 1
                 elif result["link_url"]:
                     corrected = self._name_matcher(topic["label"])
