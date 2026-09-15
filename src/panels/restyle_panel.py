@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit,
+    QPushButton, QLineEdit, QCheckBox,
 )
 from PySide6.QtCore import Signal, QTimer
 
@@ -76,6 +76,15 @@ class RestylePanel(QWidget):
         layout.addWidget(url_hint)
         layout.addSpacing(12)
 
+        self._move_unit_content_chk = QCheckBox("Move unit content into an Overview page")
+        self._move_unit_content_chk.setChecked(True)
+        self._move_unit_content_chk.setToolTip(
+            "When the URL is a unit, safely transfers its description into a normal "
+            "first child page before restyling. The unit title is never changed."
+        )
+        layout.addWidget(self._move_unit_content_chk)
+        layout.addSpacing(12)
+
         layout.addWidget(_form_label("LOG"))
         layout.addSpacing(4)
         self._log = LogWidget()
@@ -85,12 +94,14 @@ class RestylePanel(QWidget):
         cfg = self._mw.load_config() if hasattr(self._mw, "load_config") else {}
         if cfg.get("automator_url"):
             self._url_entry.setText(cfg["automator_url"])
+        self._move_unit_content_chk.setChecked(cfg.get("restyle_move_unit_content", True))
 
     def save_state(self):
         if not hasattr(self._mw, "save_config"):
             return
         self._mw.save_config({
             "automator_url": self._url_entry.text().strip(),
+            "restyle_move_unit_content": self._move_unit_content_chk.isChecked(),
         })
 
     def _start_run(self):
@@ -139,6 +150,7 @@ class RestylePanel(QWidget):
                     bs_password=self._mw.bs_password,
                     sso_email=self._mw.sso_email,
                     sso_password=self._mw.sso_password,
+                    move_unit_content=self._move_unit_content_chk.isChecked(),
                 ))
             except Exception as e:
                 msg, detail = friendly_error(e)

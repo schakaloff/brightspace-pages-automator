@@ -341,6 +341,7 @@ class _ContentSnapshot:
     resources: tuple[tuple[str, str, str], ...]
     atomic_text: tuple[tuple[str, str], ...]
     generated_css_content: tuple[str, ...]
+    list_table_structure: tuple[str, ...]
 
 
 def _is_content_attribute(tag: Tag, attribute: str, value: str) -> bool:
@@ -404,6 +405,12 @@ def _snapshot(source_html: str) -> _ContentSnapshot:
         tuple(resources),
         tuple(atomic_text),
         tuple(generated_css_content),
+        tuple(
+            tag.name.casefold()
+            for tag in root.find_all(
+                ["ol", "ul", "li", "table", "caption", "colgroup", "thead", "tbody", "tfoot", "tr", "th", "td"]
+            )
+        ),
     )
 
 
@@ -480,4 +487,6 @@ def content_is_equivalent(expected_html: str, actual_html: str) -> tuple[bool, s
         return False, "a Kaltura, H5P, or complex embed payload changed"
     if expected.generated_css_content != actual.generated_css_content:
         return False, "CSS-generated visible content changed"
+    if expected.list_table_structure != actual.list_table_structure:
+        return False, "list or table structure changed"
     return True, ""

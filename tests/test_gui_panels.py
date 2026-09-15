@@ -175,6 +175,19 @@ def test_restyle_panel_builds(qtbot):
     mw = MagicMock(); mw.chromium_ready = False; mw.load_config.return_value = {}
     panel = RestylePanel(mw); qtbot.addWidget(panel)
     assert panel._run_btn.text() == "Start"
+    assert panel._move_unit_content_chk.isChecked() is True
+
+
+def test_restyle_unit_content_option_can_be_disabled_and_saved(qtbot):
+    from unittest.mock import MagicMock
+    from gui_panels import RestylePanel
+    mw = MagicMock(); mw.chromium_ready = False
+    mw.load_config.return_value = {"restyle_move_unit_content": False}
+    panel = RestylePanel(mw); qtbot.addWidget(panel)
+    assert panel._move_unit_content_chk.isChecked() is False
+    panel._move_unit_content_chk.setChecked(True)
+    panel.save_state()
+    assert mw.save_config.call_args.args[0]["restyle_move_unit_content"] is True
 
 
 def test_collector_panel_has_multi_unit_checkboxes(qtbot):

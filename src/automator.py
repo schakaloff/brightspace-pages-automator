@@ -1,4 +1,5 @@
 import asyncio
+import re
 from typing import Callable, List, Optional
 
 from playwright.async_api import Page
@@ -33,6 +34,7 @@ class PageAutomator:
         bs_password: str = "",
         sso_email: str = "",
         sso_password: str = "",
+        move_unit_content: bool = True,
     ):
         self.url = url
         self.log = log
@@ -46,6 +48,7 @@ class PageAutomator:
         self.bs_password = bs_password
         self.sso_email = sso_email
         self.sso_password = sso_password
+        self.move_unit_content = move_unit_content
         self._clipboard_lock = asyncio.Lock()  # one tab touches clipboard at a time
         self._token_usage = {"input_tokens": 0, "output_tokens": 0, "cost_cad": 0.0}
 
@@ -398,6 +401,17 @@ class PageAutomator:
             self.log("✗ Could not extract HTML — skipping", "error")
             return False
 
+        from youtube_embed import transform_standalone_youtube_urls
+
+        youtube = transform_standalone_youtube_urls(source_html)
+        source_html = youtube.html
+        if youtube.changed:
+            self.log(
+                f"▶ YouTube: created {youtube.embeds_created} player(s), removed "
+                f"{youtube.redundant_urls_removed} redundant raw URL(s)",
+                "info",
+            )
+
         # Unit Collector's assembled pages restyle far better than single topic pages
         # under the same prompt — the difference is the <h2>label</h2> section header
         # it prepends to every topic, which gives Claude a clear anchor to build a
@@ -456,11 +470,57 @@ class PageAutomator:
                 pass
             self.log("✓ Page loaded", "success")
 
+            completed_overview_url = ""
+            if self.move_unit_content and re.search(r"/units/\d+(?:/|$)", self.url):
+                self.log("Checking the unit description for transferable content…", "info")
+
+                async def restyle_overview(source_html: str):
+                    from ai_styler import apply_style, DEFAULT_MODEL
+
+                    return await apply_style(
+                        source_html=source_html,
+                        style_reference_html=self.style_reference_html,
+                        theme_name=self.theme_name,
+                        api_key=self.claude_api_key,
+                        model=self.claude_model or DEFAULT_MODEL,
+                        log_callback=self.log,
+                    )
+
+                from unit_overview import move_unit_url_to_overview
+
+                transfer = await move_unit_url_to_overview(
+                    page, self.url, restyle_overview, self.log
+                )
+                if not transfer.ok:
+                    self.log(f"✗ Unit Overview transfer failed: {transfer.reason}", "error")
+                    if self.on_complete:
+                        self.on_complete()
+                    return
+                if transfer.status == "no-content":
+                    self.log("○ Unit description has no editable content to move", "dim")
+                else:
+                    completed_overview_url = transfer.topic_url.rstrip("/")
+                    self.log(
+                        f"✓ Unit description moved safely to {transfer.topic_url}", "success"
+                    )
+                    if transfer.usage:
+                        self._token_usage["input_tokens"] += transfer.usage["input_tokens"]
+                        self._token_usage["output_tokens"] += transfer.usage["output_tokens"]
+                        self._token_usage["cost_cad"] += transfer.usage["cost_cad"]
+
             if "/topics/" not in self.url:
                 # Section URL: scrape all topic pages and let user pick
                 pages = await self.scrape_section_pages(page)
+                if completed_overview_url:
+                    pages = [
+                        item for item in pages
+                        if item["url"].rstrip("/") != completed_overview_url
+                    ]
                 if not pages:
-                    self.log("✗ No topic pages found in this section", "error")
+                    if completed_overview_url:
+                        self.log("○ Overview was the only page requiring work", "dim")
+                    else:
+                        self.log("✗ No topic pages found in this section", "error")
                     if self.on_complete:
                         self.on_complete()
                     while browser.is_connected():
@@ -526,6 +586,7 @@ async def run(
     bs_password: str = "",
     sso_email: str = "",
     sso_password: str = "",
+    move_unit_content: bool = True,
 ) -> None:
     await PageAutomator(
         url=url,
@@ -540,4 +601,5 @@ async def run(
         bs_password=bs_password,
         sso_email=sso_email,
         sso_password=sso_password,
+        move_unit_content=move_unit_content,
     ).run()

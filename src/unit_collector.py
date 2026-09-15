@@ -739,6 +739,7 @@ class UnitCollector:
 
     def _build_combined_html(self, items: list, has_files: bool = False) -> str:
         from content_preservation import add_generated_heading
+        from youtube_embed import parse_youtube_url
 
         parts = []
         for item in items:
@@ -748,10 +749,17 @@ class UnitCollector:
                 parts.append(f"{section}\n<hr/>\n")
             elif t == "link" and item.get("link_url"):
                 label = item["label"].replace("<", "&lt;").replace(">", "&gt;")
-                parts.append(
-                    f'<p><strong>{label}:</strong> '
-                    f'<a href="{item["link_url"]}">{item["link_url"]}</a></p>\n'
-                )
+                video = parse_youtube_url(item["link_url"])
+                if video:
+                    url = html.escape(item["link_url"], quote=True)
+                    parts.append(
+                        f'<h2>{label}</h2>\n<p><a href="{url}">{url}</a></p>\n'
+                    )
+                else:
+                    parts.append(
+                        f'<p><strong>{label}:</strong> '
+                        f'<a href="{item["link_url"]}">{item["link_url"]}</a></p>\n'
+                    )
         if has_files:
             parts.append("<h2>Files</h2>\n<p></p>\n")
         return "\n".join(parts)
@@ -1479,6 +1487,53 @@ class UnitCollector:
         finally:
             await page.close()
 
+    async def _apply_youtube_transforms(self, context, expected_min_chars: int = 0) -> bool:
+        """Read, transform, verify, then save the assembled page.
+
+        The first assembly save deliberately retains source URLs. They are only
+        removed during this second editor transaction, where `_paste_html`
+        proves the complete transformed document landed before Save is clicked.
+        """
+        page = await context.new_page()
+        try:
+            source_html = None
+            for attempt in range(1, STYLE_READBACK_RETRIES + 1):
+                if attempt > 1:
+                    await page.wait_for_timeout(STYLE_READBACK_DELAY_MS)
+                source_html = await self._read_back_for_styling(page, expected_min_chars)
+                if source_html:
+                    break
+            if not source_html:
+                self.log(
+                    "✗ Could not verify the assembled page before YouTube conversion; "
+                    "original links were left unchanged.",
+                    "error",
+                )
+                return False
+
+            from youtube_embed import transform_standalone_youtube_urls
+
+            transformed = transform_standalone_youtube_urls(source_html)
+            if not transformed.changed:
+                return await self._close_source_dialog(page)
+            self.log(
+                f"▶ YouTube: creating {transformed.embeds_created} player(s), "
+                f"removing {transformed.redundant_urls_removed} redundant raw URL(s)",
+                "info",
+            )
+            if not await self._paste_html(page, transformed.html):
+                self.log(
+                    "✗ YouTube conversion failed read-back verification; original links "
+                    "were left unchanged.",
+                    "error",
+                )
+                return False
+            if not await self._close_source_dialog(page):
+                return False
+            return await self._save_and_close(page)
+        finally:
+            await page.close()
+
     # ── Main run ──────────────────────────────────────────────────────────────
 
     async def run(self, context: Optional[BrowserContext] = None, page: Optional[Page] = None) -> bool:
@@ -1574,6 +1629,7 @@ class UnitCollector:
             html_count = link_count = file_count = file_link_count = 0
 
             from content_preservation import add_generated_heading
+            from youtube_embed import parse_youtube_url
 
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
@@ -1589,10 +1645,18 @@ class UnitCollector:
                 elif result["link_url"]:
                     corrected = self._name_matcher(topic["label"])
                     link_label = (corrected or topic["label"]).replace("<", "&lt;").replace(">", "&gt;")
-                    sections.append(
-                        f'<p><strong>{link_label}:</strong> '
-                        f'<a href="{result["link_url"]}">{result["link_url"]}</a></p>\n'
-                    )
+                    video = parse_youtube_url(result["link_url"])
+                    if video:
+                        url = html.escape(result["link_url"], quote=True)
+                        sections.append(
+                            f'<h2>{link_label}</h2>\n'
+                            f'<p><a href="{url}">{url}</a></p>\n<hr/>\n'
+                        )
+                    else:
+                        sections.append(
+                            f'<p><strong>{link_label}:</strong> '
+                            f'<a href="{result["link_url"]}">{result["link_url"]}</a></p>\n'
+                        )
                     link_count += 1
                 elif result["file"]:
                     # Keep both fallback link targets for when Insert Stuff can't
@@ -1689,8 +1753,18 @@ class UnitCollector:
                 "success",
             )
 
+            assembled_chars = sum(len(s) for s in sections)
+            if not await self._apply_youtube_transforms(
+                context, expected_min_chars=assembled_chars
+            ):
+                self.log(
+                    "✗ Unit is only partially complete: collected content was saved, "
+                    "but YouTube conversion was not applied.",
+                    "error",
+                )
+                return False
+
             if self.claude_api_key:
-                assembled_chars = sum(len(s) for s in sections)
                 if not await self._apply_claude_style(
                     context, expected_min_chars=assembled_chars
                 ):

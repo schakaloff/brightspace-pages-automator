@@ -174,6 +174,23 @@ def test_semantic_readback_rejects_changed_text_resources_and_order(changed):
     assert not equivalent
 
 
+@pytest.mark.parametrize(
+    "changed",
+    [
+        "<p>One</p><p>Two</p>",
+        "<table><tr><td>A</td><td>B</td></tr></table>",
+    ],
+)
+def test_semantic_readback_rejects_lost_list_or_table_structure(changed):
+    if changed.startswith("<p>"):
+        original = "<ul><li>One</li><li>Two</li></ul>"
+    else:
+        original = "<table><tr><th>A</th><th>B</th></tr></table>"
+    equivalent, reason = content_is_equivalent(original, changed)
+    assert not equivalent
+    assert "list or table structure" in reason
+
+
 class _Keyboard:
     async def press(self, _keys):
         return None
