@@ -31,13 +31,9 @@ def _clean_html(html: str) -> str:
     # remove all data-* and aria-* attributes, plus common Brightspace noise
     noise_attrs = {"data-d2l-uid", "data-when-user-interacts", "data-placeholder"}
     for tag in soup.find_all(True):
-        # Content-bearing values have already been replaced by protection
-        # placeholders. Keep those attributes; removing one would make the
-        # placeholder audit fail before the AI is called.
         attrs_to_remove = [
             a for a in list(tag.attrs)
-            if (a.startswith("data-") or a.startswith("aria-") or a in noise_attrs)
-            and "__BPA_" not in str(tag.attrs[a])
+            if a.startswith("data-") or a.startswith("aria-") or a in noise_attrs
         ]
         for a in attrs_to_remove:
             del tag.attrs[a]
@@ -185,44 +181,23 @@ async def apply_style(
         log(f"❌ No prompt file for theme '{theme_name}'", "error")
         return None, None
 
-    from content_preservation import ContentProtectionError, protect_html
-
-    try:
-        protection = protect_html(source_html)
-        cleaned_html = _clean_html(protection.protected_html)
-        # Cleaning is allowed to alter presentation only. Prove that it did not
-        # discard any protected value before sending anything to Claude.
-        protection.restore_and_validate(cleaned_html)
-    except ContentProtectionError as e:
-        log(f"❌ Could not protect source content: {e}. Leaving existing content untouched.", "error")
-        return None, None
-
+    cleaned_html = _clean_html(source_html)
     log(
-        f"🔒 Protected {protection.placeholder_count:,} content value(s) before styling",
+        f"🧹 Cleaned HTML: {len(source_html):,} → {len(cleaned_html):,} chars"
+        f"  ({len(cleaned_html.split()):,} words)",
         "info",
     )
 
-    prompt = (
-        "CONTENT INTEGRITY RULES (mandatory): Every __BPA_*__ placeholder is an "
-        "immutable value. Keep every placeholder exactly once and in its original "
-        "order and context. Never edit, duplicate, remove, or invent a placeholder. "
-        "You may change CSS, classes, layout wrappers, and presentation-only HTML.\n\n"
-        + prompt_template.format(
-            source_html=cleaned_html,
-            style_reference_html=style_reference_html or "",
-        )
+    prompt = prompt_template.format(
+        source_html=cleaned_html,
+        style_reference_html=style_reference_html or "",
     )
 
     client = anthropic.AsyncAnthropic(api_key=api_key)
 
-    max_attempts = _MAX_RETRIES
-    integrity_retry_used = False
-    rejected_input_tokens = rejected_output_tokens = 0
-    attempt = 0
-    while attempt < max_attempts:
-        attempt += 1
+    for attempt in range(1, _MAX_RETRIES + 1):
         try:
-            log(f"🤖 {model} — attempt {attempt}/{max_attempts} (theme: {theme_name})", "info")
+            log(f"🤖 {model} — attempt {attempt}/{_MAX_RETRIES} (theme: {theme_name})", "info")
             async with client.messages.stream(
                 model=model,
                 max_tokens=_MAX_TOKENS,
@@ -250,12 +225,11 @@ async def apply_style(
                 # transport failure, so retrying the same model would only
                 # repeat it. Opus can be more conservative for ordinary
                 # formatting requests; give a non-default choice one safe
-                # retry with the app default. That result still must pass all
-                # content-protection checks before it can be saved.
+                # retry with the app default.
                 if _allow_refusal_fallback and model != DEFAULT_MODEL:
                     log(
                         f"⚠ {model} refused this formatting request{detail}. "
-                        f"Retrying once with {DEFAULT_MODEL}; existing content remains protected.",
+                        f"Retrying once with {DEFAULT_MODEL}.",
                         "warning",
                     )
                     return await apply_style(
@@ -300,58 +274,20 @@ async def apply_style(
                 end   = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
                 result = "\n".join(lines[start:end]).strip()
 
-            result, discarded_text_nodes = protection.discard_unprotected_visible_text(result)
-            if discarded_text_nodes:
-                log(
-                    f"🛡 Removed {discarded_text_nodes} AI-added presentation "
-                    "label(s); checking against the saved page.",
-                    "warning",
-                )
+            result = _restore_kaltura_sizing(cleaned_html, result, log=log)
 
-            try:
-                result = protection.restore_and_validate(result)
-            except ContentProtectionError as e:
-                # The rejected response is never saved. Give Claude one more
-                # chance with the exact rule it broke; the retry must pass the
-                # same checks, and a second failure leaves the page untouched.
-                if not integrity_retry_used:
-                    integrity_retry_used = True
-                    max_attempts += 1
-                    rejected_input_tokens += response.usage.input_tokens
-                    rejected_output_tokens += response.usage.output_tokens
-                    log(
-                        f"⚠ Content-integrity check failed: {e}. Retrying once and "
-                        "telling Claude what it changed; nothing has been saved.",
-                        "warning",
-                    )
-                    prompt += (
-                        "\n\nYOUR PREVIOUS RESPONSE WAS REJECTED because it failed "
-                        f"the content-integrity check: {e}. Produce the styled HTML "
-                        "again. Keep every __BPA_*__ placeholder exactly once, in "
-                        "its original order and context, and do not add headings, "
-                        "labels, icons, links, or other visible text of your own."
-                    )
-                    continue
-                log(
-                    f"❌ Content-integrity check failed: {e}. Leaving existing content untouched.",
-                    "error",
-                )
-                return None, None
-
-            result = _restore_kaltura_sizing(source_html, result, log=log)
-
-            if len(result) < len(source_html) * 0.5:
+            if len(result) < len(cleaned_html) * 0.5:
                 log(
                     f"❌ Styled result ({len(result):,} chars) is suspiciously short "
-                    f"compared to the source ({len(source_html):,} chars) — refusing to "
+                    f"compared to the source ({len(cleaned_html):,} chars) — refusing to "
                     "overwrite existing content.",
                     "error",
                 )
                 return None, None
 
             usage = {
-                "input_tokens": response.usage.input_tokens + rejected_input_tokens,
-                "output_tokens": response.usage.output_tokens + rejected_output_tokens,
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
             }
             usage["cost_cad"] = _cost_cad(model, usage["input_tokens"], usage["output_tokens"])
 
@@ -364,7 +300,7 @@ async def apply_style(
             return result, usage
 
         except anthropic.APIStatusError as e:
-            if e.status_code in (429, 529) and attempt < max_attempts:
+            if e.status_code in (429, 529) and attempt < _MAX_RETRIES:
                 log(f"⚠ Server busy ({e.status_code}) — retrying in {_RETRY_DELAY}s...", "warning")
                 await asyncio.sleep(_RETRY_DELAY)
             else:
@@ -380,7 +316,7 @@ async def apply_style(
         # reached the retry above — a single blip used to abandon the whole
         # page. Covers APITimeoutError too, which subclasses this.
         except anthropic.APIConnectionError as e:
-            if attempt < max_attempts:
+            if attempt < _MAX_RETRIES:
                 log(f"⚠ Connection error — retrying in {_RETRY_DELAY}s...", "warning")
                 await asyncio.sleep(_RETRY_DELAY)
             else:

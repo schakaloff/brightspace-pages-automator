@@ -115,6 +115,7 @@ class PageAutomator:
     async def replace_html_in_editor(self, page: Page, html: str) -> bool:
         self.log("Pasting styled HTML (Ctrl+A, Ctrl+V)...", "info")
 
+        expected_len = len(html)
         pasted_ok = False
         for attempt in range(3):
             async with self._clipboard_lock:
@@ -128,21 +129,17 @@ class PageAutomator:
                 await page.keyboard.press("Control+v")
                 await page.wait_for_timeout(1500)
 
-                # Read the real CM6 document back and compare authored content,
-                # not just its character count. Brightspace may harmlessly add
-                # wrappers, entities, or absolute URLs.
-                pasted_html = await self._read_editor_full_text(page)
+                # Verify the paste actually landed in the CM6 doc model before trusting it
+                cm_len = len(await self._read_editor_full_text(page))
 
-            from content_preservation import content_is_equivalent
-            equivalent, reason = content_is_equivalent(html, pasted_html)
-            if equivalent:
+            if cm_len >= expected_len * 0.9:
                 pasted_ok = True
                 break
-            self.log(f"⚠ Paste content verification failed ({reason}) — retrying", "warning")
+            self.log(f"⚠ Paste verify failed (editor has {cm_len} chars, expected ~{expected_len}) — retrying", "warning")
             await page.wait_for_timeout(800)
 
         if not pasted_ok:
-            self.log("✗ Pasted content could not be verified — aborting without saving", "error")
+            self.log("✗ Paste never landed in editor — aborting save to avoid overwriting with stale content", "error")
             return False
 
         self.log("✓ HTML pasted", "success")

@@ -5,7 +5,7 @@ from bs4 import BeautifulSoup
 
 sys.path.insert(0, "src")
 
-from content_preservation import content_is_equivalent, protect_html
+from content_preservation import content_is_preserved
 from unit_collector import UnitCollector
 from youtube_embed import parse_youtube_url, transform_standalone_youtube_urls
 
@@ -102,19 +102,19 @@ def test_repeat_run_does_not_duplicate_embed():
     assert second.html.count("<iframe") == 1
 
 
-def test_generated_embed_is_atomic_and_compatible_with_ai_protection():
+def test_generated_embed_survives_ai_layout_changes():
     transformed = transform_standalone_youtube_urls(
         "<p>Intro text.</p><p>https://youtu.be/dQw4w9WgXcQ?t=30</p>"
     ).html
-    protection = protect_html(transformed)
-    assert "dQw4w9WgXcQ" not in protection.protected_html
-    candidate = protection.protected_html.replace("<body>", '<body><main class="card">')
-    candidate = candidate.replace("</body>", "</main></body>")
-    restored = protection.restore_and_validate(candidate)
-    equivalent, reason = content_is_equivalent(transformed, restored)
-    assert equivalent, reason
-    soup = BeautifulSoup(restored, "lxml")
+    styled = f'<main class="card"><h4>Video</h4>{transformed}</main>'
+    preserved, reason = content_is_preserved(transformed, styled)
+    assert preserved, reason
+    soup = BeautifulSoup(styled, "lxml")
     assert soup.iframe["src"].endswith("/dQw4w9WgXcQ?start=30")
+
+    without_video = styled.replace(str(BeautifulSoup(transformed, "lxml").iframe), "")
+    preserved, _ = content_is_preserved(transformed, without_video)
+    assert not preserved
 
 
 def test_collector_assembles_youtube_topic_as_a_transformable_raw_url():

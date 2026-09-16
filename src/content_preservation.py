@@ -1,28 +1,20 @@
-"""Protect course content while allowing an AI to restyle its presentation.
+"""Compare course content before and after it is written or restyled.
 
-The AI receives opaque placeholders instead of authored text, URLs, attributes,
-or embedded players.  A result is accepted only when every placeholder returns
-exactly once, in its original document order and in the expected kind of DOM
-location.  The original values are then restored and compared semantically.
+`content_is_equivalent` is strict and is used for read-backs of HTML the app
+wrote itself. `content_is_preserved` is lenient and is used for AI-styled
+output, which may add headings or reorder layout but must keep every authored
+passage and every link, image, file, and embed.
 """
 
 from __future__ import annotations
 
-import copy
 import html
 import re
 import unicodedata
-import uuid
 from dataclasses import dataclass
-from html.parser import HTMLParser
-from typing import Optional
 from urllib.parse import unquote, urlsplit
 
-from bs4 import BeautifulSoup, NavigableString, Tag
-
-
-class ContentProtectionError(ValueError):
-    """Raised when generated HTML cannot safely be restored."""
+from bs4 import BeautifulSoup, Tag
 
 
 _PRESENTATION_ATTRIBUTES = {"class", "style"}
@@ -43,24 +35,6 @@ _ATOMIC_TAGS = {
 }
 _ATOMIC_MARKERS = ("h5p", "kaltura")
 _NON_VISIBLE_PARENTS = {"head", "noscript", "script", "style", "template"}
-# Text-only wrappers that may be dropped once model-invented text is removed.
-# List and table cells are excluded: their structure is validated separately.
-_LABEL_TAGS = {
-    "b", "button", "em", "figcaption", "h1", "h2", "h3", "h4", "h5", "h6",
-    "i", "label", "p", "small", "span", "strong",
-}
-_CSS_CONTENT_DECLARATION_RE = re.compile(
-    r"""(^|[;{])\s*content\s*:\s*((?:"[^"]*"|'[^']*'|[^;}"'])+);?""",
-    re.IGNORECASE,
-)
-_VOID_TAGS = {
-    "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
-    "meta", "param", "source", "track", "wbr",
-}
-_OPTIONAL_END_TAGS = {
-    "body", "colgroup", "dd", "dt", "head", "html", "li", "option", "p",
-    "tbody", "td", "tfoot", "th", "thead", "tr",
-}
 
 
 def _normalise_text(value: str, *, casefold: bool = False, unicode_form: str = "NFC") -> str:
@@ -127,21 +101,6 @@ def add_generated_heading(title: str, source_html: str) -> str:
     return f"<h2>{html.escape(title)}</h2>\n{source_html}"
 
 
-def _strip_generated_css_content(css: str) -> tuple[str, int]:
-    """Remove CSS `content:` declarations that would draw visible text."""
-    removed = 0
-
-    def replace(match: re.Match) -> str:
-        nonlocal removed
-        value = _normalise_text(match.group(2))
-        if value.casefold() in {"", "''", '""', "none", "normal"}:
-            return match.group(0)
-        removed += 1
-        return match.group(1)
-
-    return _CSS_CONTENT_DECLARATION_RE.sub(replace, css), removed
-
-
 def _attribute_text(value) -> str:
     if isinstance(value, (list, tuple)):
         return " ".join(str(v) for v in value)
@@ -164,286 +123,9 @@ def _is_atomic(tag: Tag) -> bool:
 
 
 @dataclass(frozen=True)
-class _ProtectedValue:
-    token: str
-    kind: str
-    value: object
-    attribute: Optional[str] = None
-
-
-class _BalancedHTMLParser(HTMLParser):
-    """A conservative structural check for generated markup.
-
-    HTML browsers recover from almost any truncation. That is undesirable here:
-    an ambiguous AI response should be rejected rather than silently repaired.
-    """
-
-    def __init__(self):
-        super().__init__(convert_charrefs=False)
-        self.stack: list[str] = []
-        self.errors: list[str] = []
-
-    def handle_starttag(self, tag, attrs):
-        tag = tag.casefold()
-        if tag not in _VOID_TAGS:
-            self.stack.append(tag)
-
-    def handle_startendtag(self, tag, attrs):
-        return
-
-    def handle_endtag(self, tag):
-        tag = tag.casefold()
-        while self.stack and self.stack[-1] in _OPTIONAL_END_TAGS and self.stack[-1] != tag:
-            self.stack.pop()
-        if not self.stack or self.stack[-1] != tag:
-            self.errors.append(f"unexpected closing </{tag}>")
-            return
-        self.stack.pop()
-
-    def close(self):
-        super().close()
-        required = [tag for tag in self.stack if tag not in _OPTIONAL_END_TAGS]
-        if required:
-            self.errors.append(f"unclosed <{required[-1]}>")
-
-
-def _assert_well_formed_enough(candidate_html: str) -> None:
-    if not candidate_html or "<" not in candidate_html or ">" not in candidate_html:
-        raise ContentProtectionError("Claude returned empty or non-HTML content")
-    parser = _BalancedHTMLParser()
-    try:
-        parser.feed(candidate_html)
-        parser.close()
-    except Exception as exc:
-        raise ContentProtectionError(f"Claude returned malformed HTML: {exc}") from exc
-    if parser.errors:
-        raise ContentProtectionError("Claude returned malformed HTML: " + parser.errors[0])
-
-
-def _iter_token_locations(node, token_re: re.Pattern):
-    if isinstance(node, Tag):
-        for name in sorted(node.attrs):
-            value = _attribute_text(node.attrs[name])
-            for match in token_re.findall(value):
-                yield match, "attribute", name, node
-        for child in node.children:
-            yield from _iter_token_locations(child, token_re)
-    elif isinstance(node, NavigableString):
-        value = str(node)
-        for match in token_re.findall(value):
-            yield match, "text", None, node
-
-
-def _fragment_nodes(markup: str) -> list:
-    fragment = BeautifulSoup(markup, "lxml")
-    root = fragment.body or fragment
-    return [copy.copy(node) for node in list(root.contents)]
-
-
-@dataclass
-class ProtectedHTML:
-    protected_html: str
-    values: list[_ProtectedValue]
-    nonce: str
-    original_html: str
-
-    @property
-    def tokens(self) -> tuple[str, ...]:
-        return tuple(item.token for item in self.values)
-
-    @property
-    def placeholder_count(self) -> int:
-        return len(self.values)
-
-    def discard_unprotected_visible_text(self, candidate_html: str) -> tuple[str, int]:
-        """Remove presentation labels invented by the styling model.
-
-        Every authored visible string has already been replaced by a unique
-        placeholder. Any other visible text in the model response therefore
-        came from the model rather than the saved local HTML. Removing it lets
-        harmless labels such as "Download" be discarded while the normal
-        placeholder and semantic validation remains authoritative.
-        """
-        soup = BeautifulSoup(candidate_html or "", "lxml")
-        root = soup.body or soup
-        token_re = re.compile(rf"__BPA_{re.escape(self.nonce)}_\d{{6}}__")
-        removed = 0
-        emptied_parents: list[Tag] = []
-
-        # Source cleaning removes ordinary scripts before styling, so any
-        # ordinary script returned here was introduced by the model.
-        for script in list(root.find_all("script")):
-            if not _is_atomic(script):
-                script.decompose()
-
-        # CSS `content:` draws visible text (arrows, "Download", icons). When
-        # the saved page has none, every such declaration came from the model.
-        if not _snapshot(self.original_html).generated_css_content:
-            for style in soup.find_all("style"):
-                css, count = _strip_generated_css_content(style.get_text())
-                if count:
-                    style.string = css
-                    removed += count
-            for tag in root.find_all(style=True):
-                css, count = _strip_generated_css_content(_attribute_text(tag["style"]))
-                if count:
-                    tag["style"] = css
-                    removed += count
-
-        for text_node in list(root.find_all(string=True)):
-            if not text_node.parent:
-                continue
-            parent_name = (
-                text_node.parent.name.casefold()
-                if text_node.parent.name
-                else ""
-            )
-            if parent_name in _NON_VISIBLE_PARENTS:
-                continue
-
-            raw = str(text_node)
-            tokens = token_re.findall(raw)
-            if not tokens:
-                if _normalise_text(raw):
-                    emptied_parents.append(text_node.parent)
-                    text_node.extract()
-                    removed += 1
-                continue
-
-            # A token surrounded by model-authored words or punctuation is
-            # safely reduced to the token. Multiple tokens merged into one
-            # node remain untouched so strict validation can reject the
-            # structural ambiguity.
-            if len(tokens) == 1 and _normalise_text(token_re.sub("", raw)):
-                text_node.replace_with(NavigableString(tokens[0]))
-                removed += 1
-
-        # A heading or label whose only text was invented would otherwise be
-        # left behind as an empty, still-styled box. Only elements that lost
-        # text above are considered, so authored spacer paragraphs remain.
-        for tag in emptied_parents:
-            while (
-                tag is not None
-                and tag.parent is not None
-                and tag.name in _LABEL_TAGS
-                and not tag.find(True)
-                and not tag.get_text(strip=True)
-                and not token_re.search(str(tag))
-            ):
-                parent = tag.parent
-                tag.decompose()
-                tag = parent
-
-        return str(soup), removed
-
-    def restore_and_validate(self, candidate_html: str) -> str:
-        _assert_well_formed_enough(candidate_html)
-        soup = BeautifulSoup(candidate_html, "lxml")
-        token_re = re.compile(rf"__BPA_{re.escape(self.nonce)}_\d{{6}}__")
-        occurrences = list(_iter_token_locations(soup, token_re))
-        found_tokens = [item[0] for item in occurrences]
-        expected_tokens = list(self.tokens)
-        if found_tokens != expected_tokens:
-            missing = [token for token in expected_tokens if found_tokens.count(token) == 0]
-            duplicated = [token for token in expected_tokens if found_tokens.count(token) > 1]
-            if missing:
-                detail = f"missing {len(missing)} protected placeholder(s)"
-            elif duplicated:
-                detail = f"duplicated {len(duplicated)} protected placeholder(s)"
-            else:
-                detail = "protected placeholders were reordered"
-            raise ContentProtectionError(detail)
-
-        for protected, occurrence in zip(self.values, occurrences):
-            token, location_kind, attribute, node = occurrence
-            expected_location = "attribute" if protected.kind == "attribute" else "text"
-            if location_kind != expected_location:
-                raise ContentProtectionError(f"protected placeholder {token} moved to a different context")
-            if protected.kind == "attribute":
-                if attribute != protected.attribute or _attribute_text(node.attrs[attribute]) != token:
-                    raise ContentProtectionError(f"protected attribute {protected.attribute} was altered")
-                node.attrs[attribute] = copy.deepcopy(protected.value)
-                continue
-
-            if str(node).strip() != token:
-                raise ContentProtectionError(f"protected placeholder {token} was modified")
-            if protected.kind == "text":
-                node.replace_with(NavigableString(str(protected.value)))
-                continue
-
-            replacement_nodes = _fragment_nodes(str(protected.value))
-            if not replacement_nodes:
-                raise ContentProtectionError("could not restore a protected embedded block")
-            first = replacement_nodes[0]
-            target = node
-            if (
-                node.parent
-                and node.parent.name == "bpa-protected-block"
-                and node.parent.get_text(strip=True) == token
-            ):
-                target = node.parent
-            target.replace_with(first)
-            cursor = first
-            for extra in replacement_nodes[1:]:
-                cursor.insert_after(extra)
-                cursor = extra
-
-        restored = str(soup)
-        equivalent, reason = content_is_equivalent(self.original_html, restored)
-        if not equivalent:
-            raise ContentProtectionError(reason)
-        return restored
-
-
-def protect_html(source_html: str) -> ProtectedHTML:
-    """Return HTML whose authored content has been replaced by unique tokens."""
-    soup = BeautifulSoup(source_html or "", "lxml")
-    nonce = uuid.uuid4().hex
-    values: list[_ProtectedValue] = []
-
-    def new_value(kind: str, value: object, attribute: Optional[str] = None) -> str:
-        token = f"__BPA_{nonce}_{len(values):06d}__"
-        values.append(_ProtectedValue(token, kind, copy.deepcopy(value), attribute))
-        return token
-
-    def visit(tag: Tag) -> None:
-        if _is_atomic(tag):
-            token = new_value("atomic", str(tag))
-            carrier = soup.new_tag("bpa-protected-block")
-            carrier.string = token
-            tag.replace_with(carrier)
-            return
-
-        # The existing cleaner deliberately discards presentation CSS and
-        # ordinary executable scripts. They are not visible authored content.
-        # Kaltura/H5P scripts have already taken the atomic path above.
-        if tag.name in {"script", "style"}:
-            return
-
-        for attribute in sorted(list(tag.attrs)):
-            if attribute.casefold() in _PRESENTATION_ATTRIBUTES:
-                continue
-            tag.attrs[attribute] = new_value("attribute", tag.attrs[attribute], attribute)
-
-        for child in list(tag.children):
-            if isinstance(child, Tag):
-                visit(child)
-            elif isinstance(child, NavigableString) and str(child).strip():
-                child.replace_with(NavigableString(new_value("text", str(child))))
-
-    root = soup.body or soup
-    for child in list(root.children):
-        if isinstance(child, Tag):
-            visit(child)
-        elif isinstance(child, NavigableString) and str(child).strip():
-            child.replace_with(NavigableString(new_value("text", str(child))))
-
-    return ProtectedHTML(str(soup), values, nonce, source_html)
-
-
-@dataclass(frozen=True)
 class _ContentSnapshot:
     visible_text: str
+    visible_parts: tuple[str, ...]
     resources: tuple[tuple[str, str, str], ...]
     atomic_text: tuple[tuple[str, str], ...]
     generated_css_content: tuple[str, ...]
@@ -508,6 +190,7 @@ def _snapshot(source_html: str) -> _ContentSnapshot:
                 atomic_text.append((tag.name.casefold(), " ".join(non_visible)))
     return _ContentSnapshot(
         " ".join(visible_parts),
+        tuple(visible_parts),
         tuple(resources),
         tuple(atomic_text),
         tuple(generated_css_content),
@@ -595,4 +278,38 @@ def content_is_equivalent(expected_html: str, actual_html: str) -> tuple[bool, s
         return False, "CSS-generated visible content changed"
     if expected.list_table_structure != actual.list_table_structure:
         return False, "list or table structure changed"
+    return True, ""
+
+
+def _compact_text(value: str) -> str:
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value).casefold())
+
+
+def content_is_preserved(original_html: str, styled_html: str) -> tuple[bool, str]:
+    """Lenient check for AI-styled output.
+
+    Every authored text passage and every link, image, file, or embed URL from
+    the original must still be present. Added headings or labels, reordering,
+    and layout changes are allowed.
+    """
+    original = _snapshot(original_html)
+    styled = _snapshot(styled_html)
+
+    styled_text = _compact_text(styled.visible_text)
+    for part in original.visible_parts:
+        if _compact_text(part) not in styled_text:
+            preview = part if len(part) <= 60 else part[:57] + "..."
+            return False, f"text is missing: {preview!r}"
+
+    styled_urls = [
+        value for _tag, attribute, value in styled.resources
+        if attribute in _URL_ATTRIBUTES - {"srcset"}
+    ]
+    for _tag, attribute, value in original.resources:
+        if attribute not in _URL_ATTRIBUTES - {"srcset"}:
+            continue
+        match = next((i for i, url in enumerate(styled_urls) if _urls_equivalent(value, url)), None)
+        if match is None:
+            return False, f"link, image, file, or embed is missing: {value}"
+        del styled_urls[match]
     return True, ""

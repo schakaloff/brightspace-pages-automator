@@ -1,8 +1,7 @@
 """Deterministic, idempotent conversion of standalone YouTube URLs to players.
 
-This runs before AI styling.  The resulting iframe is therefore handled as an
-atomic protected block by :mod:`content_preservation`; the model never sees or
-gets an opportunity to rewrite the video ID or URL.
+This runs before AI styling, so the player is created deterministically rather
+than by the model.
 """
 
 from __future__ import annotations

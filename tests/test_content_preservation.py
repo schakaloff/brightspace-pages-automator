@@ -5,11 +5,10 @@ import pytest
 sys.path.insert(0, "src")
 
 from content_preservation import (
-    ContentProtectionError,
     add_generated_heading,
     content_is_equivalent,
+    content_is_preserved,
     generated_title_matches_leading_content,
-    protect_html,
 )
 from automator import PageAutomator
 from unit_collector import UnitCollector
@@ -86,143 +85,61 @@ COMPLEX_HTML = """
 """
 
 
-def test_parser_protection_round_trips_text_lists_tables_files_images_and_embeds():
-    protection = protect_html(COMPLEX_HTML)
-    assert "Keep every word" not in protection.protected_html
-    assert "file%20one.pdf" not in protection.protected_html
-    assert "kaltura_player_123" not in protection.protected_html
-    assert "ocedtech.h5p.com" not in protection.protected_html
-
-    candidate = protection.protected_html.replace('class="old-layout"', 'class="new-layout card"')
-    restored = protection.restore_and_validate(candidate)
-    equivalent, reason = content_is_equivalent(COMPLEX_HTML, restored)
-    assert equivalent, reason
-    assert "Keep every word, including café, λ, and 한국어." in restored
-    assert "kaltura_player_123" in restored
-    assert "ocedtech.h5p.com/content/456/embed" in restored
-
-
-def test_missing_placeholder_is_rejected():
-    protection = protect_html("<p>One</p><p>Two</p>")
-    candidate = protection.protected_html.replace(protection.tokens[0], "", 1)
-    with pytest.raises(ContentProtectionError, match="missing"):
-        protection.restore_and_validate(candidate)
+def test_ai_styling_may_add_headings_and_rearrange_layout():
+    styled = """
+    <div class="hero"><h1>Week one</h1></div>
+    <div class="card"><h4>Overview</h4>
+      <h2>Clinical <strong>résumé</strong> — week one</h2>
+      <p>Keep every word, including café, λ, and 한국어.</p>
+      <ol><li>First item</li><li>Second item</li></ol>
+    </div>
+    <div class="card"><h4>Files</h4>
+      <iframe src="https://ocedtech.h5p.com/content/456/embed"></iframe>
+      <a href="https://learn.example.test/content/enforced/123/file%20one.pdf?download=1">Course file</a>
+      <img src="/content/enforced/123/diagram.png">
+      <table><tr><th>Day</th><th>Room</th></tr><tr><td>Monday</td><td>HSC 101</td></tr></table>
+      <div id="kaltura_player_123"><script>KalturaPlayer.setup({});</script></div>
+    </div>
+    """
+    preserved, reason = content_is_preserved(COMPLEX_HTML, styled)
+    assert preserved, reason
 
 
-def test_duplicated_placeholder_is_rejected():
-    protection = protect_html("<p>One</p><p>Two</p>")
-    candidate = protection.protected_html.replace(
-        "</body>", f"{protection.tokens[0]}</body>", 1
-    )
-    with pytest.raises(ContentProtectionError, match="duplicated"):
-        protection.restore_and_validate(candidate)
+def test_ai_styling_that_drops_text_is_rejected():
+    styled = COMPLEX_HTML.replace("<p>Keep every word, including café, λ, and 한국어.</p>", "")
+    preserved, reason = content_is_preserved(COMPLEX_HTML, styled)
+    assert not preserved
+    assert "Keep every word" in reason
 
 
-def test_reordered_placeholders_are_rejected():
-    protection = protect_html("<p>One</p><p>Two</p>")
-    first, second = protection.tokens[:2]
-    candidate = protection.protected_html.replace(first, "__SWAP__").replace(second, first).replace("__SWAP__", second)
-    with pytest.raises(ContentProtectionError, match="reordered"):
-        protection.restore_and_validate(candidate)
+def test_ai_styling_that_rewords_text_is_rejected():
+    styled = COMPLEX_HTML.replace("Second item", "Item two")
+    preserved, reason = content_is_preserved(COMPLEX_HTML, styled)
+    assert not preserved
+    assert "Second item" in reason
 
 
-def test_new_unprotected_ai_text_is_rejected():
-    protection = protect_html("<p>Original sentence.</p>")
-    candidate = protection.protected_html.replace("</body>", "<p>AI-added sentence.</p></body>")
-    with pytest.raises(ContentProtectionError, match="visible text changed"):
-        protection.restore_and_validate(candidate)
+@pytest.mark.parametrize(
+    "removed",
+    [
+        '<a href="/content/enforced/123/file%20one.pdf?download=1" download="file one.pdf">Course file</a>',
+        '<iframe src="https://ocedtech.h5p.com/content/456/embed" title="H5P practice"></iframe>',
+        '<img src="/content/enforced/123/diagram.png" alt="Anatomy diagram" title="Reference image">',
+    ],
+)
+def test_ai_styling_that_drops_a_file_embed_or_image_is_rejected(removed):
+    # Keep the visible link text so only the resource itself is missing.
+    styled = COMPLEX_HTML.replace(removed, "Course file" if "Course file" in removed else "")
+    preserved, reason = content_is_preserved(COMPLEX_HTML, styled)
+    assert not preserved
+    assert "missing" in reason
 
 
-def test_ai_added_labels_can_be_discarded_before_strict_validation():
-    protection = protect_html('<p>Original sentence.</p><a href="/file.pdf">Course file</a>')
-    candidate = protection.protected_html.replace(
-        "</body>",
-        '<script>window.badIdea = true</script>'
-        '<span class="download-label">Download now</span></body>',
-    )
+def test_ai_styling_that_changes_a_link_target_is_rejected():
+    styled = COMPLEX_HTML.replace("file%20one.pdf", "file%20two.pdf")
+    preserved, _ = content_is_preserved(COMPLEX_HTML, styled)
+    assert not preserved
 
-    sanitized, removed = protection.discard_unprotected_visible_text(candidate)
-    restored = protection.restore_and_validate(sanitized)
-
-    assert removed == 1
-    assert "Download now" not in restored
-    assert "badIdea" not in restored
-    assert "Original sentence." in restored
-    assert 'href="/file.pdf"' in restored
-
-
-def test_headings_emptied_by_label_removal_are_dropped():
-    source = '<p>Original sentence.</p><p></p><a href="/file.pdf">Course file</a>'
-    protection = protect_html(source)
-    candidate = protection.protected_html.replace(
-        "<body>", '<body><div class="card"><h4><span>Assessment</span></h4></div>'
-    )
-
-    sanitized, _ = protection.discard_unprotected_visible_text(candidate)
-    restored = protection.restore_and_validate(sanitized)
-
-    assert "<h4" not in restored
-    assert "<span" not in restored
-    assert '<div class="card"></div>' in restored
-    # An authored empty paragraph did not lose text, so it is left alone.
-    assert "<p></p>" in restored
-
-
-def test_ai_added_css_generated_text_is_discarded():
-    protection = protect_html('<p>Original sentence.</p><a href="/file.pdf">Course file</a>')
-    candidate = protection.protected_html.replace(
-        "<body>",
-        "<body><style>.card{justify-content:center;content:none}"
-        'a::after{content:"; →";color:red}</style>',
-    ).replace("<a ", '<a style="display:block;content:\'Download\'" ')
-
-    sanitized, removed = protection.discard_unprotected_visible_text(candidate)
-    restored = protection.restore_and_validate(sanitized)
-
-    assert removed == 2
-    assert "→" not in restored
-    assert "Download" not in restored
-    assert "justify-content:center" in restored
-    assert "content:none" in restored
-    assert "color:red" in restored
-
-
-def test_authored_css_generated_text_is_not_silently_rewritten():
-    protection = protect_html('<p style="content:\'Note\'">Original sentence.</p>')
-    candidate = protection.protected_html.replace("content:'Note'", "content:'Changed'")
-
-    sanitized, removed = protection.discard_unprotected_visible_text(candidate)
-
-    assert removed == 0
-    with pytest.raises(ContentProtectionError, match="CSS-generated"):
-        protection.restore_and_validate(sanitized)
-
-
-def test_discarding_ai_labels_does_not_allow_new_resources():
-    protection = protect_html("<p>Original sentence.</p>")
-    candidate = protection.protected_html.replace(
-        "</body>", '<a href="/invented.pdf">Download</a></body>'
-    )
-
-    sanitized, _ = protection.discard_unprotected_visible_text(candidate)
-    with pytest.raises(ContentProtectionError, match="resource"):
-        protection.restore_and_validate(sanitized)
-
-
-def test_ai_cannot_add_visible_text_through_css_pseudo_content():
-    protection = protect_html("<p>Original sentence.</p>")
-    candidate = protection.protected_html.replace(
-        "<body>", '<head><style>p::after { content: "AI-added words"; }</style></head><body>'
-    )
-    with pytest.raises(ContentProtectionError, match="CSS-generated visible content"):
-        protection.restore_and_validate(candidate)
-
-
-def test_malformed_claude_html_is_rejected_even_if_the_placeholder_survives():
-    protection = protect_html("<p>Original sentence.</p>")
-    candidate = f"<div><span>{protection.tokens[0]}</div>"
-    with pytest.raises(ContentProtectionError, match="malformed HTML"):
-        protection.restore_and_validate(candidate)
 
 
 def test_semantic_readback_allows_wrappers_entities_unicode_and_absolute_urls():
@@ -287,33 +204,53 @@ class _FakeEditorPage:
 
 
 @pytest.mark.asyncio
-async def test_page_changer_never_saves_when_pasted_content_differs():
+async def test_page_changer_never_saves_when_paste_does_not_land():
     logs = []
     automator = PageAutomator("https://example.test/topics/1", lambda message, level: logs.append(message))
 
     async def focus(_page):
         return True
 
-    async def changed_readback(_page):
-        return "<p>Claude changed this wording.</p>"
+    async def stale_readback(_page):
+        return "<p>Old</p>"
 
     automator._focus_codemirror = focus
-    automator._read_editor_full_text = changed_readback
-    assert not await automator.replace_html_in_editor(_FakeEditorPage(), "<p>Original wording.</p>")
-    assert any("aborting without saving" in message for message in logs)
+    automator._read_editor_full_text = stale_readback
+    assert not await automator.replace_html_in_editor(
+        _FakeEditorPage(), "<p>Much longer newly styled wording.</p>"
+    )
+    assert any("aborting save" in message for message in logs)
 
 
 @pytest.mark.asyncio
-async def test_unit_collector_never_saves_when_pasted_content_differs():
+async def test_unit_collector_never_saves_when_paste_does_not_land():
     logs = []
     collector = UnitCollector.__new__(UnitCollector)
     collector.log = lambda message, level="info": logs.append(message)
     collector._clipboard_lock = __import__("asyncio").Lock()
 
-    async def changed_readback(_page):
-        return '<p>Original wording.</p><a href="/changed.pdf">File</a>'
+    async def stale_readback(_page):
+        return "<p>Old</p>"
 
-    collector._read_editor_full_text = changed_readback
-    original = '<p>Original wording.</p><a href="/original.pdf">File</a>'
-    assert not await collector._paste_html(_FakeEditorPage(), original)
-    assert any("aborting without saving" in message for message in logs)
+    collector._read_editor_full_text = stale_readback
+    styled = '<p>Original wording.</p><a href="/original.pdf">File</a>'
+    assert not await collector._paste_html(_FakeEditorPage(), styled)
+    assert any("aborting save" in message for message in logs)
+
+
+@pytest.mark.asyncio
+async def test_unit_collector_accepts_paste_that_brightspace_reformats():
+    logs = []
+    collector = UnitCollector.__new__(UnitCollector)
+    collector.log = lambda message, level="info": logs.append(message)
+    collector._clipboard_lock = __import__("asyncio").Lock()
+    styled = '<h4>Files</h4><p>Original wording.</p><a href="/original.pdf">File</a>'
+
+    async def reformatted_readback(_page):
+        return (
+            '<h4>Files</h4>\n<p>Original wording.</p>\n'
+            '<p><a href="https://x.test/original.pdf">File</a></p>'
+        )
+
+    collector._read_editor_full_text = reformatted_readback
+    assert await collector._paste_html(_FakeEditorPage(), styled)

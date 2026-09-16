@@ -5,6 +5,19 @@ Add a new `## X.Y.Z` section here whenever you bump `APP_VERSION` in
 The matching section is pulled into the GitHub Release notes automatically,
 and shown to users in the in-app "Update available" dialog.
 
+## 0.8.9
+- Rolled back the strict content guardrails added since September 14. Claude
+  styling works as it did before them: Claude sees the real page HTML, and
+  pages are no longer rejected for added headings, labels, or layout changes.
+- Pasting checks are back to the earlier "did the paste land" check. A paste
+  that never lands is still not saved.
+- Kept: unit description → Overview pages, YouTube players, skipping
+  blueprint units, clearer Claude error messages, and switching to Sonnet
+  when Opus refuses.
+- Moving a unit description to an Overview page still checks that every
+  passage of text and every link, file, and video made it onto the new page
+  before the description is cleared. Added headings and reordering are fine.
+
 ## 0.8.8
 - Claude styling now removes labels invented by the model, such as
   "Download" or template headings like "Assessment", before comparing the

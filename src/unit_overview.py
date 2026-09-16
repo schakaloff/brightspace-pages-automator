@@ -10,7 +10,11 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
-from content_preservation import add_generated_heading, content_is_equivalent
+from content_preservation import (
+    add_generated_heading,
+    content_is_equivalent,
+    content_is_preserved,
+)
 from target_page_creator import _parse_ids
 from youtube_embed import transform_standalone_youtube_urls
 
@@ -370,7 +374,7 @@ async def move_unit_content_to_overview(
             if topic_id is None:
                 return TransferResult(False, "conflict", "existing Overview page has no readable ID")
             existing_html = await api.get_topic_html(topic_id)
-            equivalent, reason = content_is_equivalent(source_for_style, existing_html)
+            equivalent, reason = content_is_preserved(source_for_style, existing_html)
             if not equivalent:
                 return TransferResult(
                     False, "conflict",
@@ -390,7 +394,9 @@ async def move_unit_content_to_overview(
             styled_html, usage = await restyle_html(source_for_style)
             if not styled_html:
                 raise RuntimeError("Restyle returned no verified HTML")
-            equivalent, reason = content_is_equivalent(source_for_style, styled_html)
+            # Claude may add headings or rearrange layout; it must not lose
+            # any text or link, because the unit description is cleared below.
+            equivalent, reason = content_is_preserved(source_for_style, styled_html)
             if not equivalent:
                 raise RuntimeError(f"styled content verification failed: {reason}")
             await api.replace_topic_html(topic_id, styled_html)
