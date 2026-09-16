@@ -5,6 +5,17 @@ Add a new `## X.Y.Z` section here whenever you bump `APP_VERSION` in
 The matching section is pulled into the GitHub Release notes automatically,
 and shown to users in the in-app "Update available" dialog.
 
+## 0.8.8
+- Claude styling now removes labels invented by the model, such as
+  "Download" or template headings like "Assessment", before comparing the
+  result with the locally saved page. Headings left empty by that removal are
+  dropped, and CSS-drawn text (such as `::after` arrows) is removed too.
+- If a styled page still fails the content check (for example, files moved
+  out of order), Claude is asked once more with the exact problem. A second
+  failure leaves the page unstyled, as before.
+- Authored text, file links, URLs, embedded media, lists, and tables remain
+  protected and must still match before a styled page can be saved.
+
 ## 0.8.7
 - When a selected non-default Claude model refuses an otherwise valid styling
   request, the app retries exactly once with Claude Sonnet. Existing content is

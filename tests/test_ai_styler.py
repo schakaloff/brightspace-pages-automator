@@ -323,6 +323,92 @@ async def test_ai_result_that_drops_placeholders_is_rejected(monkeypatch):
     assert any("Content-integrity check failed" in message for message in logs)
 
 
+@pytest.mark.asyncio
+async def test_integrity_failure_is_retried_once_with_feedback(monkeypatch):
+    class _BadThenGoodMessages:
+        def __init__(self):
+            self.prompts = []
+
+        def stream(self, **kwargs):
+            prompt = kwargs["messages"][0]["content"]
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                return _AsyncStreamContextManager(_Stream("<p>AI-rewritten words</p>"))
+            protected_source = prompt.split("SOURCE_START\n", 1)[1].split("\nSOURCE_END", 1)[0]
+            return _AsyncStreamContextManager(_Stream(protected_source))
+
+    messages = _BadThenGoodMessages()
+    client = type("C", (), {"messages": messages})()
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", lambda **kwargs: client)
+    logs = []
+
+    result, usage = await ai_styler.apply_style(
+        source_html=SOURCE_HTML,
+        style_reference_html="",
+        theme_name="lake",
+        api_key="test-key",
+        log_callback=lambda message, level: logs.append(message),
+    )
+
+    assert "hello world" in result
+    assert len(messages.prompts) == 2
+    assert "YOUR PREVIOUS RESPONSE WAS REJECTED" not in messages.prompts[0]
+    assert "YOUR PREVIOUS RESPONSE WAS REJECTED" in messages.prompts[1]
+    # Both calls are billed, so both are counted.
+    assert usage["input_tokens"] == 200 and usage["output_tokens"] == 400
+    assert any("Retrying once" in message for message in logs)
+
+
+@pytest.mark.asyncio
+async def test_integrity_failure_is_not_retried_twice(monkeypatch):
+    class _AlwaysBadMessages:
+        calls = 0
+
+        def stream(self, **kwargs):
+            type(self).calls += 1
+            return _AsyncStreamContextManager(_Stream("<p>AI-rewritten words</p>"))
+
+    client = type("C", (), {"messages": _AlwaysBadMessages()})()
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", lambda **kwargs: client)
+
+    result, usage = await ai_styler.apply_style(
+        source_html=SOURCE_HTML,
+        style_reference_html="",
+        theme_name="lake",
+        api_key="test-key",
+    )
+
+    assert result is None and usage is None
+    assert _AlwaysBadMessages.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_ai_added_presentation_label_is_removed_before_validation(monkeypatch):
+    class _ExtraLabelMessages:
+        def stream(self, **kwargs):
+            prompt = kwargs["messages"][0]["content"]
+            protected_source = prompt.split("SOURCE_START\n", 1)[1].split("\nSOURCE_END", 1)[0]
+            candidate = protected_source + '<span class="download-label">Download</span>'
+            return _AsyncStreamContextManager(_Stream(candidate))
+
+    logs = []
+    client = type("C", (), {"messages": _ExtraLabelMessages()})()
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", lambda **kwargs: client)
+
+    result, usage = await ai_styler.apply_style(
+        source_html=SOURCE_HTML,
+        style_reference_html="",
+        theme_name="lake",
+        api_key="test-key",
+        log_callback=lambda message, level: logs.append(message),
+    )
+
+    assert usage is not None
+    assert "hello world" in result
+    assert "Download" not in result
+    assert any("AI-added presentation label" in message for message in logs)
+
+
 def test_existing_presentation_css_and_generic_scripts_can_still_be_cleaned():
     from content_preservation import protect_html
 

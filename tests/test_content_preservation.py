@@ -133,6 +133,82 @@ def test_new_unprotected_ai_text_is_rejected():
         protection.restore_and_validate(candidate)
 
 
+def test_ai_added_labels_can_be_discarded_before_strict_validation():
+    protection = protect_html('<p>Original sentence.</p><a href="/file.pdf">Course file</a>')
+    candidate = protection.protected_html.replace(
+        "</body>",
+        '<script>window.badIdea = true</script>'
+        '<span class="download-label">Download now</span></body>',
+    )
+
+    sanitized, removed = protection.discard_unprotected_visible_text(candidate)
+    restored = protection.restore_and_validate(sanitized)
+
+    assert removed == 1
+    assert "Download now" not in restored
+    assert "badIdea" not in restored
+    assert "Original sentence." in restored
+    assert 'href="/file.pdf"' in restored
+
+
+def test_headings_emptied_by_label_removal_are_dropped():
+    source = '<p>Original sentence.</p><p></p><a href="/file.pdf">Course file</a>'
+    protection = protect_html(source)
+    candidate = protection.protected_html.replace(
+        "<body>", '<body><div class="card"><h4><span>Assessment</span></h4></div>'
+    )
+
+    sanitized, _ = protection.discard_unprotected_visible_text(candidate)
+    restored = protection.restore_and_validate(sanitized)
+
+    assert "<h4" not in restored
+    assert "<span" not in restored
+    assert '<div class="card"></div>' in restored
+    # An authored empty paragraph did not lose text, so it is left alone.
+    assert "<p></p>" in restored
+
+
+def test_ai_added_css_generated_text_is_discarded():
+    protection = protect_html('<p>Original sentence.</p><a href="/file.pdf">Course file</a>')
+    candidate = protection.protected_html.replace(
+        "<body>",
+        "<body><style>.card{justify-content:center;content:none}"
+        'a::after{content:"; →";color:red}</style>',
+    ).replace("<a ", '<a style="display:block;content:\'Download\'" ')
+
+    sanitized, removed = protection.discard_unprotected_visible_text(candidate)
+    restored = protection.restore_and_validate(sanitized)
+
+    assert removed == 2
+    assert "→" not in restored
+    assert "Download" not in restored
+    assert "justify-content:center" in restored
+    assert "content:none" in restored
+    assert "color:red" in restored
+
+
+def test_authored_css_generated_text_is_not_silently_rewritten():
+    protection = protect_html('<p style="content:\'Note\'">Original sentence.</p>')
+    candidate = protection.protected_html.replace("content:'Note'", "content:'Changed'")
+
+    sanitized, removed = protection.discard_unprotected_visible_text(candidate)
+
+    assert removed == 0
+    with pytest.raises(ContentProtectionError, match="CSS-generated"):
+        protection.restore_and_validate(sanitized)
+
+
+def test_discarding_ai_labels_does_not_allow_new_resources():
+    protection = protect_html("<p>Original sentence.</p>")
+    candidate = protection.protected_html.replace(
+        "</body>", '<a href="/invented.pdf">Download</a></body>'
+    )
+
+    sanitized, _ = protection.discard_unprotected_visible_text(candidate)
+    with pytest.raises(ContentProtectionError, match="resource"):
+        protection.restore_and_validate(sanitized)
+
+
 def test_ai_cannot_add_visible_text_through_css_pseudo_content():
     protection = protect_html("<p>Original sentence.</p>")
     candidate = protection.protected_html.replace(

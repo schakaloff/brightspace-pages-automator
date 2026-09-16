@@ -215,9 +215,14 @@ async def apply_style(
 
     client = anthropic.AsyncAnthropic(api_key=api_key)
 
-    for attempt in range(1, _MAX_RETRIES + 1):
+    max_attempts = _MAX_RETRIES
+    integrity_retry_used = False
+    rejected_input_tokens = rejected_output_tokens = 0
+    attempt = 0
+    while attempt < max_attempts:
+        attempt += 1
         try:
-            log(f"🤖 {model} — attempt {attempt}/{_MAX_RETRIES} (theme: {theme_name})", "info")
+            log(f"🤖 {model} — attempt {attempt}/{max_attempts} (theme: {theme_name})", "info")
             async with client.messages.stream(
                 model=model,
                 max_tokens=_MAX_TOKENS,
@@ -295,9 +300,38 @@ async def apply_style(
                 end   = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
                 result = "\n".join(lines[start:end]).strip()
 
+            result, discarded_text_nodes = protection.discard_unprotected_visible_text(result)
+            if discarded_text_nodes:
+                log(
+                    f"🛡 Removed {discarded_text_nodes} AI-added presentation "
+                    "label(s); checking against the saved page.",
+                    "warning",
+                )
+
             try:
                 result = protection.restore_and_validate(result)
             except ContentProtectionError as e:
+                # The rejected response is never saved. Give Claude one more
+                # chance with the exact rule it broke; the retry must pass the
+                # same checks, and a second failure leaves the page untouched.
+                if not integrity_retry_used:
+                    integrity_retry_used = True
+                    max_attempts += 1
+                    rejected_input_tokens += response.usage.input_tokens
+                    rejected_output_tokens += response.usage.output_tokens
+                    log(
+                        f"⚠ Content-integrity check failed: {e}. Retrying once and "
+                        "telling Claude what it changed; nothing has been saved.",
+                        "warning",
+                    )
+                    prompt += (
+                        "\n\nYOUR PREVIOUS RESPONSE WAS REJECTED because it failed "
+                        f"the content-integrity check: {e}. Produce the styled HTML "
+                        "again. Keep every __BPA_*__ placeholder exactly once, in "
+                        "its original order and context, and do not add headings, "
+                        "labels, icons, links, or other visible text of your own."
+                    )
+                    continue
                 log(
                     f"❌ Content-integrity check failed: {e}. Leaving existing content untouched.",
                     "error",
@@ -316,8 +350,8 @@ async def apply_style(
                 return None, None
 
             usage = {
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
+                "input_tokens": response.usage.input_tokens + rejected_input_tokens,
+                "output_tokens": response.usage.output_tokens + rejected_output_tokens,
             }
             usage["cost_cad"] = _cost_cad(model, usage["input_tokens"], usage["output_tokens"])
 
@@ -330,7 +364,7 @@ async def apply_style(
             return result, usage
 
         except anthropic.APIStatusError as e:
-            if e.status_code in (429, 529) and attempt < _MAX_RETRIES:
+            if e.status_code in (429, 529) and attempt < max_attempts:
                 log(f"⚠ Server busy ({e.status_code}) — retrying in {_RETRY_DELAY}s...", "warning")
                 await asyncio.sleep(_RETRY_DELAY)
             else:
@@ -346,7 +380,7 @@ async def apply_style(
         # reached the retry above — a single blip used to abandon the whole
         # page. Covers APITimeoutError too, which subclasses this.
         except anthropic.APIConnectionError as e:
-            if attempt < _MAX_RETRIES:
+            if attempt < max_attempts:
                 log(f"⚠ Connection error — retrying in {_RETRY_DELAY}s...", "warning")
                 await asyncio.sleep(_RETRY_DELAY)
             else:

@@ -43,6 +43,16 @@ _ATOMIC_TAGS = {
 }
 _ATOMIC_MARKERS = ("h5p", "kaltura")
 _NON_VISIBLE_PARENTS = {"head", "noscript", "script", "style", "template"}
+# Text-only wrappers that may be dropped once model-invented text is removed.
+# List and table cells are excluded: their structure is validated separately.
+_LABEL_TAGS = {
+    "b", "button", "em", "figcaption", "h1", "h2", "h3", "h4", "h5", "h6",
+    "i", "label", "p", "small", "span", "strong",
+}
+_CSS_CONTENT_DECLARATION_RE = re.compile(
+    r"""(^|[;{])\s*content\s*:\s*((?:"[^"]*"|'[^']*'|[^;}"'])+);?""",
+    re.IGNORECASE,
+)
 _VOID_TAGS = {
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
     "meta", "param", "source", "track", "wbr",
@@ -115,6 +125,21 @@ def add_generated_heading(title: str, source_html: str) -> str:
     if not title or generated_title_matches_leading_content(title, source_html):
         return source_html
     return f"<h2>{html.escape(title)}</h2>\n{source_html}"
+
+
+def _strip_generated_css_content(css: str) -> tuple[str, int]:
+    """Remove CSS `content:` declarations that would draw visible text."""
+    removed = 0
+
+    def replace(match: re.Match) -> str:
+        nonlocal removed
+        value = _normalise_text(match.group(2))
+        if value.casefold() in {"", "''", '""', "none", "normal"}:
+            return match.group(0)
+        removed += 1
+        return match.group(1)
+
+    return _CSS_CONTENT_DECLARATION_RE.sub(replace, css), removed
 
 
 def _attribute_text(value) -> str:
@@ -229,6 +254,87 @@ class ProtectedHTML:
     @property
     def placeholder_count(self) -> int:
         return len(self.values)
+
+    def discard_unprotected_visible_text(self, candidate_html: str) -> tuple[str, int]:
+        """Remove presentation labels invented by the styling model.
+
+        Every authored visible string has already been replaced by a unique
+        placeholder. Any other visible text in the model response therefore
+        came from the model rather than the saved local HTML. Removing it lets
+        harmless labels such as "Download" be discarded while the normal
+        placeholder and semantic validation remains authoritative.
+        """
+        soup = BeautifulSoup(candidate_html or "", "lxml")
+        root = soup.body or soup
+        token_re = re.compile(rf"__BPA_{re.escape(self.nonce)}_\d{{6}}__")
+        removed = 0
+        emptied_parents: list[Tag] = []
+
+        # Source cleaning removes ordinary scripts before styling, so any
+        # ordinary script returned here was introduced by the model.
+        for script in list(root.find_all("script")):
+            if not _is_atomic(script):
+                script.decompose()
+
+        # CSS `content:` draws visible text (arrows, "Download", icons). When
+        # the saved page has none, every such declaration came from the model.
+        if not _snapshot(self.original_html).generated_css_content:
+            for style in soup.find_all("style"):
+                css, count = _strip_generated_css_content(style.get_text())
+                if count:
+                    style.string = css
+                    removed += count
+            for tag in root.find_all(style=True):
+                css, count = _strip_generated_css_content(_attribute_text(tag["style"]))
+                if count:
+                    tag["style"] = css
+                    removed += count
+
+        for text_node in list(root.find_all(string=True)):
+            if not text_node.parent:
+                continue
+            parent_name = (
+                text_node.parent.name.casefold()
+                if text_node.parent.name
+                else ""
+            )
+            if parent_name in _NON_VISIBLE_PARENTS:
+                continue
+
+            raw = str(text_node)
+            tokens = token_re.findall(raw)
+            if not tokens:
+                if _normalise_text(raw):
+                    emptied_parents.append(text_node.parent)
+                    text_node.extract()
+                    removed += 1
+                continue
+
+            # A token surrounded by model-authored words or punctuation is
+            # safely reduced to the token. Multiple tokens merged into one
+            # node remain untouched so strict validation can reject the
+            # structural ambiguity.
+            if len(tokens) == 1 and _normalise_text(token_re.sub("", raw)):
+                text_node.replace_with(NavigableString(tokens[0]))
+                removed += 1
+
+        # A heading or label whose only text was invented would otherwise be
+        # left behind as an empty, still-styled box. Only elements that lost
+        # text above are considered, so authored spacer paragraphs remain.
+        for tag in emptied_parents:
+            while (
+                tag is not None
+                and tag.parent is not None
+                and tag.name in _LABEL_TAGS
+                and not tag.find(True)
+                and not tag.get_text(strip=True)
+                and not token_re.search(str(tag))
+            ):
+                parent = tag.parent
+                tag.decompose()
+                tag = parent
+
+        return str(soup), removed
 
     def restore_and_validate(self, candidate_html: str) -> str:
         _assert_well_formed_enough(candidate_html)
