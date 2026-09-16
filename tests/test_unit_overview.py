@@ -59,6 +59,7 @@ class FakeContentAPI:
         self.corrupt_topic_readback = False
         self.fail_delete = False
         self.fail_clear = False
+        self.fail_restore = False
 
     async def get_module(self):
         if self.fail_get_module:
@@ -115,6 +116,8 @@ class FakeContentAPI:
         self.structure.insert(0, topic)
 
     async def replace_module_description(self, original_module, source_html):
+        if self.fail_restore and source_html:
+            raise RuntimeError("restore response lost")
         self.module["Title"] = original_module["Title"]
         self.module["Description"] = {"Html": source_html, "Text": ""}
         if self.fail_clear and not source_html:
@@ -309,3 +312,20 @@ async def test_ambiguous_clear_failure_restores_original_then_removes_child():
     assert not result.ok
     assert extract_description_html(api.module) == original
     assert api.deleted_ids == [100]
+
+
+@pytest.mark.asyncio
+async def test_unverified_restore_keeps_verified_overview_hidden_for_recovery():
+    api = FakeContentAPI()
+    api.fail_clear = True
+    api.fail_restore = True
+
+    result = await move_unit_content_to_overview(api, _style, _logs()[1])
+
+    assert not result.ok
+    assert result.status == "failed"
+    assert api.deleted_ids == []
+    overview = next(item for item in api.structure if item["Id"] == 100)
+    assert overview["IsHidden"] is True
+    assert "course 42, unit 7, topic 100" in result.reason
+    assert "Preserved Overview for manual recovery" in result.reason

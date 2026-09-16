@@ -1,7 +1,12 @@
 import sys
 sys.path.insert(0, "src")
 
-from multi_unit_selector import select_next_unit, _flatten_modules
+from multi_unit_selector import (
+    STANDARD_TEMPLATE_UNIT_TITLES,
+    _flatten_modules,
+    is_standard_template_unit,
+    select_next_unit,
+)
 
 
 def _mod(module_id, title, sort_order, topic_titles):
@@ -51,6 +56,71 @@ def test_select_next_unit_returns_none_when_all_done_or_empty():
 
 def test_select_next_unit_empty_list():
     assert select_next_unit([]) is None
+
+
+def test_each_standard_template_title_is_skipped_by_automatic_selection():
+    modules = [
+        _mod(index, title, index, ["Template topic"])
+        for index, title in enumerate(STANDARD_TEMPLATE_UNIT_TITLES, start=1)
+    ] + [_mod(99, "Module 1: Introduction", 99, ["Real topic"])]
+
+    assert select_next_unit(modules)["module_id"] == 99
+
+
+def test_template_title_matching_normalizes_case_unicode_and_whitespace():
+    assert is_standard_template_unit("  welcome   MODULE  ")
+    assert is_standard_template_unit("How\u00a0to Use This Blueprint")
+
+
+def test_template_title_matching_is_exact_not_fuzzy():
+    for title in (
+        "Final Conclusion Notes",
+        "Module 1: Introduction",
+        "Module [1]: Introduction",
+        "Welcome Module for Students",
+    ):
+        assert not is_standard_template_unit(title)
+
+
+def test_select_next_unit_keeps_similar_or_populated_module_titles():
+    modules = [
+        _mod(1, "Conclusion", 1, ["Template topic"]),
+        _mod(2, "Module 1: Introduction", 2, ["Real topic"]),
+    ]
+    assert select_next_unit(modules)["module_id"] == 2
+
+
+def test_manual_collector_url_does_not_apply_template_filter(monkeypatch):
+    import unit_collector
+
+    captured = {}
+
+    class _ManualCollector:
+        def __init__(self, **kwargs):
+            captured["unit_url"] = kwargs["unit_url"]
+
+        async def run(self, *, context=None, page=None):
+            captured["context"] = context
+            captured["page"] = page
+            return True
+
+    monkeypatch.setattr(unit_collector, "UnitCollector", _ManualCollector)
+    manual_url = "https://learn.example.test/d2l/le/lessons/8520/units/1"
+    result = asyncio.run(unit_collector.run(
+        unit_url=manual_url,
+        target_url="",
+        theme_name="lake",
+        theme_colors={},
+        context="manual-context",
+        page="manual-page",
+    ))
+
+    assert result is True
+    assert captured == {
+        "unit_url": manual_url,
+        "context": "manual-context",
+        "page": "manual-page",
+    }
 
 
 def test_flatten_modules_matches_live_toc_shape():
@@ -271,3 +341,58 @@ def test_run_multi_stops_at_safety_cap():
     summary = asyncio.run(_run())
     assert summary["stopped_reason"] == "cap"
     assert len(summary["processed"]) == 3
+
+
+def test_run_multi_skips_templates_without_spending_the_safety_cap():
+    templates = [
+        _mod(index, title, index, ["Template topic"])
+        for index, title in enumerate(STANDARD_TEMPLATE_UNIT_TITLES, start=1)
+    ]
+    eligible = _mod(99, "Module 1: Introduction", 99, ["Real topic"])
+    called_urls = []
+    messages = []
+
+    async def run_unit(unit_url):
+        called_urls.append(unit_url)
+        return True
+
+    async def _run():
+        return await run_multi(
+            page=None, course_id="8520", base_url="https://learn.example.test",
+            run_unit=run_unit, confirm_fn=lambda _message: True,
+            fetch_toc_fn=_make_fetch_toc_fn([templates + [eligible]]),
+            log=lambda message, _level="info": messages.append(message), max_units=1,
+        )
+
+    summary = asyncio.run(_run())
+    assert summary["stopped_reason"] == "cap"
+    assert [m["module_id"] for m in summary["processed"]] == [99]
+    assert called_urls == ["https://learn.example.test/d2l/le/lessons/8520/units/99"]
+    assert messages.count("Skipped standard template unit: Welcome Module") == 1
+    assert all("/units/1" not in url for url in called_urls)
+
+
+def test_run_multi_resume_keeps_template_units_intentionally_skipped():
+    template = _mod(1, "Welcome Module", 1, ["Template topic"])
+    eligible = _mod(2, "Module 1: Introduction", 2, ["Real topic"])
+    eligible_done = {**eligible, "topic_titles": ["Real topic", "Module 1: Introduction — Combined"]}
+    called_urls = []
+    messages = []
+
+    async def run_unit(unit_url):
+        called_urls.append(unit_url)
+        return True
+
+    async def _run():
+        return await run_multi(
+            page=None, course_id="8520", base_url="https://learn.example.test",
+            run_unit=run_unit, confirm_fn=lambda _message: True,
+            fetch_toc_fn=_make_fetch_toc_fn([[template, eligible], [template, eligible_done]]),
+            log=lambda message, _level="info": messages.append(message), max_units=2,
+        )
+
+    summary = asyncio.run(_run())
+    assert summary["stopped_reason"] == "complete"
+    assert [m["module_id"] for m in summary["processed"]] == [2]
+    assert called_urls == ["https://learn.example.test/d2l/le/lessons/8520/units/2"]
+    assert messages.count("Skipped standard template unit: Welcome Module") == 1

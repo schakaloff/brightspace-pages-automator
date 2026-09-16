@@ -443,7 +443,24 @@ async def move_unit_content_to_overview(
                 restore_error = str(exc)
             detail = f"failed to clear and verify unit description: {clear_error}"
             if restore_error:
-                detail += f"; CRITICAL: original description restore could not be verified: {restore_error}"
+                # The clear request may have succeeded even when its response was
+                # lost.  If the restoration cannot be proven, the Overview is the
+                # only confirmed copy of the original content.  Never delete it.
+                hidden_detail = ""
+                try:
+                    await api.set_topic_hidden(topic_id, True)
+                    hidden_ok, hidden_reason = await _verify_page(api, topic_id, title, True)
+                    if not hidden_ok:
+                        hidden_detail = f"; could not verify Overview was hidden: {hidden_reason}"
+                except Exception as hide_error:
+                    hidden_detail = f"; could not hide Overview for review: {hide_error}"
+                detail += (
+                    "; CRITICAL: original description restore could not be verified: "
+                    f"{restore_error}. Preserved Overview for manual recovery "
+                    f"(course {api.course_id}, unit {api.module_id}, topic {topic_id})"
+                    f"{hidden_detail}"
+                )
+                return TransferResult(False, "failed", detail, topic_id=topic_id, created=created)
             if created_id is not None:
                 detail += "; " + await _rollback_created(api, created_id, log)
             return TransferResult(False, "failed", detail, topic_id=topic_id, created=created)

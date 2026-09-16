@@ -11,10 +11,10 @@ To rip the feature out completely:
 How "next unit" is chosen:
   - GET /d2l/api/le/1.95/{courseId}/content/toc returns every top-level
     module in the course with its SortOrder and Topics.
-  - Walk modules in SortOrder order. Skip any with zero topics (empty
-    placeholder units). Skip any that already contain a topic titled
-    "<something> — Combined" (a prior run already finished it). The first
-    module that survives both filters is "next".
+  - Walk modules in SortOrder order. Skip the exact standard blueprint
+    template titles, modules with zero topics (empty placeholder units), and
+    modules that already contain a topic titled "<something> — Combined" (a
+    prior run already finished it). The first remaining module is "next".
   - No separate progress file: a module's own "— Combined" topic, visible
     to this same TOC call, IS the record of what's already done. Re-running
     after a stop (cap, failure, or crash) re-derives from live Brightspace
@@ -26,9 +26,36 @@ Field names confirmed live against a real course (2026-07-14):
 """
 
 import asyncio
+import unicodedata
 from typing import Awaitable, Callable, Optional
 
 from playwright.async_api import Page
+
+
+# These are course-blueprint scaffolding units, not teaching units.  Keep the
+# display titles here (rather than their normalised form) so the list is easy
+# to review and update with the blueprint.
+STANDARD_TEMPLATE_UNIT_TITLES = frozenset({
+    "How to Use This Blueprint",
+    "Welcome Module",
+    "Module [#]: [Module Title]",
+    "Conclusion",
+})
+
+
+def normalize_unit_title(title: str) -> str:
+    """Return the exact-match comparison form used for template units."""
+    return " ".join(unicodedata.normalize("NFKC", title or "").split()).casefold()
+
+
+_NORMALIZED_STANDARD_TEMPLATE_UNIT_TITLES = frozenset(
+    normalize_unit_title(title) for title in STANDARD_TEMPLATE_UNIT_TITLES
+)
+
+
+def is_standard_template_unit(title: str) -> bool:
+    """Whether *title* is one of the exact standard blueprint unit titles."""
+    return normalize_unit_title(title) in _NORMALIZED_STANDARD_TEMPLATE_UNIT_TITLES
 
 
 def _flatten_modules(raw_modules: list) -> list:
@@ -47,10 +74,15 @@ def _flatten_modules(raw_modules: list) -> list:
 
 
 def select_next_unit(modules: list, combined_suffix: str = "— Combined") -> Optional[dict]:
-    """Pure. Sort by sort_order, skip empty modules, skip modules already
-    containing a "<title> — Combined" topic. Return the first survivor, or
-    None if the course has no more units to process."""
+    """Pure automatic selector for the next eligible course unit.
+
+    It intentionally skips exact standard blueprint-template titles, empty
+    modules, and modules already marked with a Combined topic. Manual unit
+    collection does not call this selector and is therefore unaffected.
+    """
     for m in sorted(modules, key=lambda m: m["sort_order"]):
+        if is_standard_template_unit(m["title"]):
+            continue
         if m["topic_count"] == 0:
             continue
         if any(combined_suffix in t for t in m["topic_titles"]):
@@ -127,6 +159,7 @@ async def run_multi(
     processed: list = []
     failed_unit = None
     stopped_reason = "complete"
+    logged_template_unit_ids = set()
 
     while True:
         modules = await fetch(page, course_id)
@@ -134,6 +167,14 @@ async def run_multi(
             stopped_reason = "toc-failure"
             _log("✗ Stopped: could not verify the remaining course units", "error")
             break
+        for module in sorted(modules, key=lambda m: m["sort_order"]):
+            module_id = module["module_id"]
+            if (
+                module_id not in logged_template_unit_ids
+                and is_standard_template_unit(module["title"])
+            ):
+                _log(f"Skipped standard template unit: {module['title']}", "info")
+                logged_template_unit_ids.add(module_id)
         next_unit = select_next_unit(modules, combined_suffix)
 
         if next_unit is None:
