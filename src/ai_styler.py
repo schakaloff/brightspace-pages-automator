@@ -144,6 +144,16 @@ def _cost_cad(model: str, input_tokens: int, output_tokens: int) -> float:
     return usd * USD_TO_CAD
 
 
+def _claude_error_detail(error: Exception) -> str:
+    """Return useful, non-secret context even when an SDK exception is blank."""
+    message = str(error).strip()
+    status = getattr(error, "status_code", None)
+    prefix = type(error).__name__
+    if status is not None:
+        prefix += f" (HTTP {status})"
+    return f"{prefix}: {message or repr(error)}"
+
+
 def _load_prompt(theme_name: str) -> str:
     path = _PROMPTS_DIR / f"{theme_name}.txt"
     if path.exists():
@@ -223,7 +233,24 @@ async def apply_style(
                 )
                 return None, None
 
-            result = next(b.text for b in response.content if b.type == "text").strip()
+            text_blocks = [
+                str(block.text).strip()
+                for block in response.content
+                if getattr(block, "type", None) == "text" and getattr(block, "text", None)
+            ]
+            if not text_blocks:
+                block_types = ", ".join(
+                    str(getattr(block, "type", type(block).__name__))
+                    for block in response.content
+                ) or "none"
+                log(
+                    "❌ Claude returned no HTML text "
+                    f"(stop reason: {getattr(response, 'stop_reason', 'unknown')}; "
+                    f"blocks: {block_types}). Leaving existing content untouched.",
+                    "error",
+                )
+                return None, None
+            result = "\n".join(text_blocks)
 
             if result.startswith("```"):
                 lines = result.splitlines()
@@ -270,7 +297,11 @@ async def apply_style(
                 log(f"⚠ Server busy ({e.status_code}) — retrying in {_RETRY_DELAY}s...", "warning")
                 await asyncio.sleep(_RETRY_DELAY)
             else:
-                log(f"❌ Claude unavailable after {attempt} attempts: {e}", "error")
+                log(
+                    f"❌ Claude unavailable after {attempt} attempts: "
+                    f"{_claude_error_detail(e)}",
+                    "error",
+                )
                 return None, None
 
         # Network-level failure (DNS, TLS, dropped socket, timeout). No HTTP
@@ -282,11 +313,15 @@ async def apply_style(
                 log(f"⚠ Connection error — retrying in {_RETRY_DELAY}s...", "warning")
                 await asyncio.sleep(_RETRY_DELAY)
             else:
-                log(f"❌ Could not reach Claude after {attempt} attempts: {e}", "error")
+                log(
+                    f"❌ Could not reach Claude after {attempt} attempts: "
+                    f"{_claude_error_detail(e)}",
+                    "error",
+                )
                 return None, None
 
         except Exception as e:
-            log(f"❌ Claude error: {e}", "error")
+            log(f"❌ Claude error: {_claude_error_detail(e)}", "error")
             return None, None
 
     # Only reachable if every attempt retried without ever returning.

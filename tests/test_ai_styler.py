@@ -154,6 +154,68 @@ async def test_non_connection_error_still_fails_fast(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_empty_exception_message_still_identifies_the_error_type(monkeypatch):
+    class _BlankError(Exception):
+        pass
+
+    class _Boom:
+        def stream(self, **kwargs):
+            return _AsyncStreamContextManager(self._stream_impl(**kwargs))
+
+        def _stream_impl(self, **kwargs):
+            raise _BlankError()
+
+    logs = []
+    client = type("C", (), {"messages": _Boom()})()
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", lambda **kwargs: client)
+
+    result, usage = await ai_styler.apply_style(
+        source_html=SOURCE_HTML,
+        style_reference_html="",
+        theme_name="lake",
+        api_key="test-key",
+        log_callback=lambda message, level: logs.append(message),
+    )
+
+    assert result is None and usage is None
+    assert any("_BlankError" in message for message in logs)
+
+
+@pytest.mark.asyncio
+async def test_response_without_text_is_reported_without_saving(monkeypatch):
+    class _NonTextBlock:
+        type = "tool_use"
+
+    class _NoTextResponse:
+        stop_reason = "end_turn"
+        usage = _Usage()
+        content = [_NonTextBlock()]
+
+    class _NoTextStream:
+        async def get_final_message(self):
+            return _NoTextResponse()
+
+    class _MessagesWithoutText:
+        def stream(self, **kwargs):
+            return _AsyncStreamContextManager(_NoTextStream())
+
+    logs = []
+    client = type("C", (), {"messages": _MessagesWithoutText()})()
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", lambda **kwargs: client)
+
+    result, usage = await ai_styler.apply_style(
+        source_html=SOURCE_HTML,
+        style_reference_html="",
+        theme_name="lake",
+        api_key="test-key",
+        log_callback=lambda message, level: logs.append(message),
+    )
+
+    assert result is None and usage is None
+    assert any("returned no HTML text" in message for message in logs)
+
+
+@pytest.mark.asyncio
 async def test_ai_result_that_drops_placeholders_is_rejected(monkeypatch):
     class _UnsafeMessages:
         def stream(self, **kwargs):

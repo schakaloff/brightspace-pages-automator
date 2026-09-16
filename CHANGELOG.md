@@ -1,8 +1,16 @@
 # Changelog
 
-Add a new `## X.Y.Z` section here whenever you bump `VERSION` in `gui.py`.
+Add a new `## X.Y.Z` section here whenever you bump `APP_VERSION` in
+`src/app_version.py`.
 The matching section is pulled into the GitHub Release notes automatically,
 and shown to users in the in-app "Update available" dialog.
+
+## 0.8.6
+- Claude styling failures now identify the exception type even when the
+  underlying SDK supplies an empty message.
+- A response with no HTML text is reported explicitly and is never saved.
+- Includes the protected-restyling, unit Overview, YouTube embedding, and
+  automatic blueprint-unit skipping updates.
 
 ## 0.8.5
 - H5P cloud checks now read the whole library instead of only the first page,
