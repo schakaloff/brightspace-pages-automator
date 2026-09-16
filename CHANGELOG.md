@@ -5,6 +5,13 @@ Add a new `## X.Y.Z` section here whenever you bump `APP_VERSION` in
 The matching section is pulled into the GitHub Release notes automatically,
 and shown to users in the in-app "Update available" dialog.
 
+## 0.8.7
+- When a selected non-default Claude model refuses an otherwise valid styling
+  request, the app retries exactly once with Claude Sonnet. Existing content is
+  still only saved after the full content-integrity checks pass.
+- Refusal messages now identify an available safety category and make clear
+  that no existing content was changed.
+
 ## 0.8.6
 - Claude styling failures now identify the exception type even when the
   underlying SDK supplies an empty message.

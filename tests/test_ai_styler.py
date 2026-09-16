@@ -216,6 +216,92 @@ async def test_response_without_text_is_reported_without_saving(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_refusal_retries_once_with_default_model_and_preserves_content(monkeypatch):
+    class _RefusalResponse:
+        stop_reason = "refusal"
+        stop_details = {"category": "safety"}
+        usage = _Usage()
+        content = []
+
+    class _RefusalStream:
+        async def get_final_message(self):
+            return _RefusalResponse()
+
+    class _FallbackMessages:
+        def __init__(self):
+            self.models = []
+
+        def stream(self, **kwargs):
+            self.models.append(kwargs["model"])
+            if kwargs["model"] == "claude-opus-5":
+                return _AsyncStreamContextManager(_RefusalStream())
+            prompt = kwargs["messages"][0]["content"]
+            protected_source = prompt.split("SOURCE_START\n", 1)[1].split("\nSOURCE_END", 1)[0]
+            return _AsyncStreamContextManager(
+                _Stream(protected_source.replace("<p", "<p class='themed'", 1))
+            )
+
+    logs = []
+    messages = _FallbackMessages()
+    client = type("C", (), {"messages": messages})()
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", lambda **kwargs: client)
+
+    result, usage = await ai_styler.apply_style(
+        source_html=SOURCE_HTML,
+        style_reference_html="",
+        theme_name="lake",
+        api_key="test-key",
+        model="claude-opus-5",
+        log_callback=lambda message, level: logs.append(message),
+    )
+
+    assert messages.models == ["claude-opus-5", ai_styler.DEFAULT_MODEL]
+    assert "hello world" in result
+    assert "themed" in result
+    assert usage["cost_cad"] == ai_styler._cost_cad(
+        ai_styler.DEFAULT_MODEL, _Usage.input_tokens, _Usage.output_tokens
+    )
+    assert any("Retrying once with claude-sonnet-5" in message for message in logs)
+
+
+@pytest.mark.asyncio
+async def test_default_model_refusal_does_not_retry_or_save(monkeypatch):
+    class _RefusalResponse:
+        stop_reason = "refusal"
+        usage = _Usage()
+        content = []
+
+    class _RefusalStream:
+        async def get_final_message(self):
+            return _RefusalResponse()
+
+    class _RefusalMessages:
+        calls = 0
+
+        def stream(self, **kwargs):
+            self.calls += 1
+            return _AsyncStreamContextManager(_RefusalStream())
+
+    logs = []
+    messages = _RefusalMessages()
+    client = type("C", (), {"messages": messages})()
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", lambda **kwargs: client)
+
+    result, usage = await ai_styler.apply_style(
+        source_html=SOURCE_HTML,
+        style_reference_html="",
+        theme_name="lake",
+        api_key="test-key",
+        model=ai_styler.DEFAULT_MODEL,
+        log_callback=lambda message, level: logs.append(message),
+    )
+
+    assert messages.calls == 1
+    assert result is None and usage is None
+    assert any("refused this formatting request" in message for message in logs)
+
+
+@pytest.mark.asyncio
 async def test_ai_result_that_drops_placeholders_is_rejected(monkeypatch):
     class _UnsafeMessages:
         def stream(self, **kwargs):

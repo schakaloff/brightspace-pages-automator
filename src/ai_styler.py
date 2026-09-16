@@ -169,6 +169,7 @@ async def apply_style(
     api_key: str,
     model: str = DEFAULT_MODEL,
     log_callback=None,
+    _allow_refusal_fallback: bool = True,
 ) -> tuple[Optional[str], Optional[dict]]:
     """Returns (styled_html, usage) where usage is
     {"input_tokens", "output_tokens", "cost_cad"} — or (None, None) on failure.
@@ -229,6 +230,42 @@ async def apply_style(
                     f"❌ Response truncated at the {_MAX_TOKENS:,}-token output limit — "
                     "page is likely too large to restyle in one pass. Leaving existing "
                     "content untouched.",
+                    "error",
+                )
+                return None, None
+
+            if getattr(response, "stop_reason", None) == "refusal":
+                stop_details = getattr(response, "stop_details", None)
+                category = getattr(stop_details, "category", None)
+                if category is None and isinstance(stop_details, dict):
+                    category = stop_details.get("category")
+                detail = f" (category: {category})" if category else ""
+
+                # A refusal is a completed response, rather than a transient
+                # transport failure, so retrying the same model would only
+                # repeat it. Opus can be more conservative for ordinary
+                # formatting requests; give a non-default choice one safe
+                # retry with the app default. That result still must pass all
+                # content-protection checks before it can be saved.
+                if _allow_refusal_fallback and model != DEFAULT_MODEL:
+                    log(
+                        f"⚠ {model} refused this formatting request{detail}. "
+                        f"Retrying once with {DEFAULT_MODEL}; existing content remains protected.",
+                        "warning",
+                    )
+                    return await apply_style(
+                        source_html=source_html,
+                        style_reference_html=style_reference_html,
+                        theme_name=theme_name,
+                        api_key=api_key,
+                        model=DEFAULT_MODEL,
+                        log_callback=log_callback,
+                        _allow_refusal_fallback=False,
+                    )
+
+                log(
+                    f"❌ {model} refused this formatting request{detail}. "
+                    "Leaving existing content untouched.",
                     "error",
                 )
                 return None, None
