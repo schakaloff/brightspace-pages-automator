@@ -10,7 +10,7 @@ from urllib.parse import unquote, urljoin, urlparse
 from content_matcher import _norm
 
 
-INVALID_SECTION_NAMES = {"", "(unnamed)", "(unnamed section)"}
+INVALID_SECTION_NAMES = {"", "(unnamed)", "(unnamed section)", "new section", "new topic"}
 
 
 def valid_section_name(value: object) -> bool:
@@ -133,3 +133,25 @@ def plan_unit_order(moodle_items: list[dict], children: list[dict]) -> list:
     wanted = set(desired)
     current = [child["Id"] for child in children if child.get("Id") in wanted]
     return [] if current == desired or len(desired) < 2 else desired
+
+
+def link_filename(value: object) -> str:
+    """Normalized file name of a link or Moodle file, for exact matching."""
+    path = urlparse(str(value or "")).path
+    return unquote(Path(path).name).strip().lower()
+
+
+def plan_link_repairs(broken_links: list, moodle_files: dict) -> list:
+    """Pair each broken Brightspace file link with one Moodle file by name.
+
+    ``moodle_files`` maps a normalized file name to the Moodle items offering
+    it.  A name held by more than one Moodle item is ambiguous and is left for
+    a human, never repaired automatically.
+    """
+    plan = []
+    for link in broken_links:
+        name = link_filename(link.get("href"))
+        candidates = moodle_files.get(name) or []
+        if name and len(candidates) == 1:
+            plan.append({**link, "filename": name, "moodle": candidates[0]})
+    return plan

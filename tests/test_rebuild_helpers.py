@@ -129,3 +129,24 @@ def test_plan_unit_order_skips_duplicate_titles():
         {"Id": 3, "Type": 1, "Title": "B"},
     ]
     assert plan_unit_order(moodle, children) == []
+
+
+def test_generic_moodle_section_names_are_never_units():
+    from rebuild_helpers import valid_section_name
+    assert not valid_section_name("New section")
+    assert not valid_section_name("  NEW SECTION ")
+    assert valid_section_name("Session One")
+
+
+def test_link_repairs_pair_only_unambiguous_file_names():
+    from rebuild_helpers import link_filename, plan_link_repairs
+    assert link_filename("https://x/content/enforced/c/Use%20of%20AI.pdf?time=1") == "use of ai.pdf"
+    broken = [
+        {"topic_id": 1, "href": "https://x/content/enforced/c/A%20File.pdf?time=9"},
+        {"topic_id": 2, "href": "https://x/content/enforced/c/dupe.pdf"},
+        {"topic_id": 3, "href": "https://x/content/enforced/c/none.pdf"},
+    ]
+    moodle = {"a file.pdf": [{"name": "A File"}], "dupe.pdf": [{"name": "one"}, {"name": "two"}]}
+    plan = plan_link_repairs(broken, moodle)
+    assert [p["topic_id"] for p in plan] == [1]
+    assert plan[0]["moodle"]["name"] == "A File"

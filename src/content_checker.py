@@ -39,6 +39,8 @@ from rebuild_helpers import (
     extract_pluginfile_url,
     extract_url_workaround,
     is_moodle_url,
+    link_filename,
+    plan_link_repairs,
     plan_unit_order,
     valid_activity_url,
     with_moodle_redirect,
@@ -337,6 +339,93 @@ _JS_MOODLE_ITEMS = """() => {
 
 # ── ContentChecker ────────────────────────────────────────────────────────────
 
+# Read-only: walks every HTML topic and requests each course-file link it
+# contains, so a file the Moodle import never carried over shows up as broken
+# instead of looking fine in the page.
+_JS_BROKEN_FILE_LINKS = """async (courseId) => {
+    const broken = [], seen = new Set();
+    let pages = 0, checked = 0;
+    async function json(path) {
+        const r = await fetch(path, { credentials: 'include', headers: { Accept: 'application/json' } });
+        return r.ok ? await r.json() : [];
+    }
+    async function walk(entries) {
+        for (const entry of entries || []) {
+            if (entry.Type === 0) {
+                await walk(await json(`/d2l/api/le/1.75/${courseId}/content/modules/${entry.Id}/structure/`));
+                continue;
+            }
+            if (!/\.html?$/i.test(String(entry.Url || ''))) continue;
+            const r = await fetch(`/d2l/api/le/1.75/${courseId}/content/topics/${entry.Id}/file`,
+                { credentials: 'include' });
+            if (!r.ok) continue;
+            pages++;
+            const holder = document.createElement('div');
+            holder.innerHTML = await r.text();
+            for (const anchor of holder.querySelectorAll('a[href*="/content/enforced/"]')) {
+                const href = anchor.href;
+                const key = entry.Id + '|' + href;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                checked++;
+                const probe = await fetch(href, { credentials: 'include' });
+                if (probe.ok && !probe.url.includes('/d2l/error/')) continue;
+                broken.push({
+                    topic_id: entry.Id,
+                    topic_title: entry.Title || '',
+                    text: (anchor.textContent || '').trim().slice(0, 80),
+                    href,
+                });
+            }
+        }
+    }
+    await walk(await json(`/d2l/api/le/1.75/${courseId}/content/root/`));
+    return { broken, pages, checked };
+}"""
+
+
+# Replaces exactly one link target inside a page, then reads the page back to
+# confirm the new address is really stored.
+_JS_PATCH_TOPIC_LINK = """async ([courseId, topicId, oldHref, newHref]) => {
+    const api = `/d2l/api/le/1.75/${courseId}/content/topics/${topicId}/file`;
+    // Brightspace serves a page from cache for a moment after it is written,
+    // so every read here is cache-busted and the check is retried.
+    const read = async () => {
+        const r = await fetch(`${api}?_=${Date.now()}_${Math.random()}`,
+            { credentials: 'include', cache: 'no-store' });
+        return r.ok ? await r.text() : null;
+    };
+    const xsrf = localStorage.getItem('XSRF.Token');
+    if (!xsrf) return { ok: false, why: 'no XSRF token' };
+    const html = await read();
+    if (html === null) return { ok: false, why: 'page could not be read' };
+    const holder = document.createElement('div');
+    holder.innerHTML = html;
+    let target = null;
+    for (const anchor of holder.querySelectorAll('a[href]')) {
+        if (anchor.href === oldHref) { target = anchor.getAttribute('href'); break; }
+    }
+    if (target === null) {
+        return html.includes(newHref)
+            ? { ok: true, why: 'already pointed at the new file' }
+            : { ok: false, why: 'link no longer in page' };
+    }
+    const updated = html.split(target).join(newHref);
+    if (updated === html) return { ok: false, why: 'link text not found in source' };
+    const form = new FormData();
+    form.append('file', new Blob([updated], { type: 'text/html' }), 'index.html');
+    const put = await fetch(api,
+        { method: 'PUT', credentials: 'include', headers: { 'X-Csrf-Token': xsrf }, body: form });
+    if (!put.ok) return { ok: false, why: `PUT ${put.status}: ${(await put.text()).slice(0, 120)}` };
+    for (const wait of [0, 600, 1500]) {
+        if (wait) await new Promise(done => setTimeout(done, wait));
+        const back = await read();
+        if (back !== null && back.includes(newHref)) return { ok: true, why: '' };
+    }
+    return { ok: false, why: 'saved, but the new link was not visible on re-read' };
+}"""
+
+
 class ContentChecker:
     def __init__(
         self,
@@ -384,6 +473,9 @@ class ContentChecker:
         self.on_file_checklist      = on_file_checklist
         self.file_checklist_result  = []
         self.moodle_section_html: dict = {}
+        # Repair-only Full Run: fix broken file links and change nothing
+        # else. Meant for a live course that only needs its files back.
+        self.link_repair_only = os.environ.get("BPA_LINK_REPAIR_ONLY", "") == "1"
         self.confirm_fn             = confirm_fn
         self.notify_fn              = notify_fn
         self.do_h5p_embed           = False
@@ -2279,6 +2371,234 @@ class ContentChecker:
             source_html = source_html.replace(original, replacement)
         self.log(f"    → {len(replacements)} image(s) uploaded as course files", "dim")
         return source_html, created
+
+    async def _resolve_moodle_file_name(self, context: "BrowserContext", href: str) -> str:
+        """Return the real file name behind a Moodle file or URL activity."""
+        try:
+            response = await context.request.get(
+                with_moodle_redirect(href), timeout=20000,
+                max_redirects=0, fail_on_status_code=False,
+            )
+            location = response.headers.get("location", "")
+            if location:
+                return link_filename(urljoin(href, location))
+            content_type = str(response.headers.get("content-type", "")).lower()
+            if content_type.startswith(("text/html", "application/xhtml+xml")):
+                plugin = extract_pluginfile_url((await response.body()).decode("utf-8", errors="replace"),
+                                                response.url)
+                return link_filename(plugin) if plugin else ""
+            return link_filename(response.url)
+        except Exception:
+            return ""
+
+    async def _index_moodle_files(self, context: "BrowserContext", results: list) -> dict:
+        """Map each Moodle file name to the items that provide it."""
+        index: dict = {}
+        for item in results:
+            href = str(item.get("href") or "")
+            if not href or item.get("type") not in {"FILE", "URL"}:
+                continue
+            name = item.get("moodle_filename") or await self._resolve_moodle_file_name(context, href)
+            if not name or "." not in name:
+                continue
+            item["moodle_filename"] = name
+            index.setdefault(name, []).append(item)
+        return index
+
+    async def _scan_broken_file_links(self, bs_page: "Page", course_id: str) -> list:
+        """Report Brightspace page links whose own course file is missing.
+
+        A Moodle import often brings pages but not the files they link to,
+        leaving links that look right and lead to a 404.  Read-only.
+        """
+        self.log("", "dim")
+        self.log("-" * 52, "dim")
+        self.log("Checking Brightspace file links...", "step")
+        found = await bs_page.evaluate(_JS_BROKEN_FILE_LINKS, str(course_id))
+
+        items = found.get("broken", []) if isinstance(found, dict) else []
+        self.log(f"  Scanned {found.get('pages', 0)} page(s), {found.get('checked', 0)} file link(s)", "dim")
+        if not items:
+            self.log("  OK - every Brightspace file link resolves", "success")
+            return []
+        self.log(f"  {len(items)} broken file link(s) - the file is missing from this course", "error")
+        by_page: dict = {}
+        for item in items:
+            by_page.setdefault(item["topic_title"], []).append(item)
+        for title, links in list(by_page.items())[:20]:
+            self.log(f"   Page: {title[:60]}", "warning")
+            for link in links[:8]:
+                self.log(f"      - {link['text'][:50]} -> {link_filename(link['href'])}", "error")
+        return items
+
+    async def _host_course_file(
+        self, bs_page: "Page", course_id: str, module_id, filename: str,
+        blob: bytes, content_type: str,
+    ) -> tuple:
+        """Upload one file into the course; returns (url, helper topic id)."""
+        token = await bs_page.evaluate("() => localStorage.getItem('XSRF.Token') || ''")
+        if not token:
+            raise RuntimeError("no XSRF token for file upload")
+        base = f"{urlparse(self.bs_url).scheme}://{urlparse(self.bs_url).netloc}"
+        descriptor = _json_mod.dumps({
+            "Title": filename, "ShortTitle": "", "Type": 1, "TopicType": 1,
+            "Url": filename, "StartDate": None, "EndDate": None, "DueDate": None,
+            "IsHidden": True, "IsLocked": False, "OpenAsExternalResource": None,
+            "Description": None,
+        })
+        boundary = f"bpa_{uuid.uuid4().hex}"
+        crlf = chr(13) + chr(10)
+        body = b"".join([
+            (f'--{boundary}{crlf}Content-Disposition: form-data; name=""{crlf}'
+             f"Content-Type: application/json{crlf}{crlf}{descriptor}{crlf}").encode("utf-8"),
+            (f'--{boundary}{crlf}Content-Disposition: form-data; name=""; filename="{filename}"{crlf}'
+             f"Content-Type: {content_type}{crlf}{crlf}").encode("utf-8"),
+            blob,
+            f"{crlf}--{boundary}--{crlf}".encode("utf-8"),
+        ])
+        response = await bs_page.context.request.post(
+            f"{base}/d2l/api/le/1.0/{course_id}/content/modules/{module_id}/structure/",
+            headers={"Content-Type": f"multipart/mixed; boundary={boundary}", "X-Csrf-Token": token},
+            data=body, timeout=120000, fail_on_status_code=False,
+        )
+        if not response.ok:
+            raise RuntimeError(f"upload failed: HTTP {response.status}")
+        try:
+            topic = _json_mod.loads(await response.text())
+        except Exception:
+            topic = {}
+        if not topic.get("Url"):
+            listing = await bs_page.context.request.get(
+                f"{base}/d2l/api/le/1.75/{course_id}/content/modules/{module_id}/structure/",
+                headers={"Accept": "application/json"}, timeout=30000, fail_on_status_code=False,
+            )
+            matches = [
+                entry for entry in (await listing.json() if listing.ok else [])
+                if str(entry.get("Url") or "").endswith(filename)
+            ]
+            if len(matches) != 1:
+                raise RuntimeError(f"uploaded file could not be identified ({len(matches)} matches)")
+            topic = matches[0]
+        return str(topic.get("Url") or ""), topic.get("Id")
+
+    async def _fetch_moodle_binary(self, context: "BrowserContext", href: str) -> tuple:
+        """Download one Moodle file, rejecting login pages and HTML."""
+        if not href:
+            raise RuntimeError("Moodle item has no link")
+        response = await context.request.get(
+            with_moodle_redirect(href), timeout=60000, fail_on_status_code=False
+        )
+        body = await response.body()
+        headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
+        content_type = headers.get("content-type", "")
+        if content_type.lower().startswith(("text/html", "application/xhtml+xml")):
+            plugin_url = extract_pluginfile_url(body.decode("utf-8", errors="replace"), response.url)
+            if not plugin_url:
+                raise RuntimeError("Moodle returned a page, not a file")
+            response = await context.request.get(plugin_url, timeout=60000, fail_on_status_code=False)
+            body = await response.body()
+            headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
+            content_type = headers.get("content-type", "")
+        valid, reason = validate_download_response(response.status, content_type, response.url, body)
+        if not valid:
+            raise RuntimeError(reason)
+        clean_type = content_type.split(";")[0].strip() or "application/octet-stream"
+        return body, clean_type, download_filename(headers, response.url, "")
+
+    async def _patch_topic_link(
+        self, bs_page: "Page", course_id: str, topic_id, old_href: str, new_href: str
+    ) -> tuple:
+        """Replace one link inside a page and verify the saved result."""
+        result = await bs_page.evaluate(
+            _JS_PATCH_TOPIC_LINK, [str(course_id), str(topic_id), old_href, new_href]
+        ) or {}
+        return bool(result.get("ok")), str(result.get("why") or "unknown")
+
+    async def _repair_broken_file_links(
+        self, context: "BrowserContext", bs_page: "Page", course_id: str,
+        results: list, broken: list, bs_flat: list,
+    ) -> int:
+        """Re-host Moodle files the import left behind, then fix the links."""
+        if not broken:
+            return 0
+        self.log("  Matching broken links against Moodle files...", "dim")
+        moodle_files = await self._index_moodle_files(context, results)
+        plan = plan_link_repairs(broken, moodle_files)
+        unmatched = len(broken) - len(plan)
+        self.log("", "dim")
+        self.log(f"Repairing {len(plan)} broken link(s); {unmatched} have no single Moodle match", "step")
+        if not plan:
+            return 0
+        pages = len({entry["topic_id"] for entry in plan})
+        if not await self._confirm(
+            f"Re-host {len(plan)} missing file(s) from Moodle and update the links inside "
+            f"{pages} Brightspace page(s)?\n\nNo activity, quiz or grade item is touched."
+        ):
+            self.log("  Skipped by user.", "dim")
+            return 0
+
+        host_module = next(
+            (i["id"] for i in (bs_flat or []) if i.get("kind") == "MODULE" and i.get("id")), None
+        )
+        if host_module is None:
+            self.log("  No unit available to receive the uploads", "error")
+            return 0
+
+        # A retry must not pile up copies of the same file, so an upload is
+        # skipped when the course already serves that name.
+        prefix = ""
+        for item in (bs_flat or []):
+            match = re.match(r"^(/content/enforced/[^/]+/)", str(item.get("url") or ""))
+            if match:
+                prefix = match.group(1)
+                break
+        uploaded: dict = {}
+        repaired = 0
+        for entry in plan:
+            if self.stop_flag[0]:
+                break
+            name = entry["filename"]
+            try:
+                if name not in uploaded and prefix:
+                    base = f"{urlparse(self.bs_url).scheme}://{urlparse(self.bs_url).netloc}"
+                    candidates = [entry["moodle"].get("moodle_filename") or name]
+                    if name not in candidates:
+                        candidates.append(name)
+                    for candidate in candidates:
+                        probe = await bs_page.context.request.get(
+                            f"{base}{prefix}{candidate}", timeout=20000, fail_on_status_code=False
+                        )
+                        if probe.ok and "/d2l/error/" not in probe.url:
+                            uploaded[name] = f"{prefix}{candidate}"
+                            self.log(f"  Already in course: {candidate}", "dim")
+                            break
+                if name not in uploaded:
+                    blob, content_type, real_name = await self._fetch_moodle_binary(
+                        context, entry["moodle"].get("href", "")
+                    )
+                    hosted, helper_topic = await self._host_course_file(
+                        bs_page, course_id, host_module, real_name or name, blob, content_type
+                    )
+                    uploaded[name] = hosted
+                    try:
+                        from unit_overview import BrowserContentAPI
+                        await BrowserContentAPI(
+                            bs_page, str(course_id), str(host_module)
+                        ).delete_topic(helper_topic)
+                    except Exception:
+                        pass
+                    self.log(f"  Uploaded: {real_name or name}", "success")
+                patched, why = await self._patch_topic_link(
+                    bs_page, course_id, entry["topic_id"], entry["href"], uploaded[name]
+                )
+                if patched:
+                    repaired += 1
+                    self.log(f"    Fixed in '{entry['topic_title'][:40]}': {entry['text'][:40]}", "success")
+                else:
+                    self.log(f"    Could not update '{entry['topic_title'][:34]}': {why}", "error")
+            except Exception as exc:
+                self.log(f"  Failed {name}: {str(exc).splitlines()[0]}", "error")
+        return repaired
 
     async def _order_units_like_moodle(self, bs_page: "Page", course_id: str, results: list) -> None:
         """Reorder matched topics in each unit to follow Moodle's order."""
@@ -4300,7 +4620,7 @@ class ContentChecker:
                 if r.get("type") == "SECTION" and r["status"] == "missing"
                 and valid_section_name(r.get("name"))
             ]
-            if missing_secs and self.full_run:
+            if missing_secs and self.full_run and not self.link_repair_only:
                 self.log("─" * 52, "dim")
                 self.log(f"📦 {len(missing_secs)} Moodle section(s) have no Brightspace unit", "step")
                 for n in missing_secs:
@@ -4371,7 +4691,23 @@ class ContentChecker:
             self._log_report(results)
             self._log_link_report(moodle_links)
 
-            if self.full_run:
+            if self.link_repair_only and self.full_run:
+                self.log("Repair-only run: only broken file links will be fixed", "step")
+            try:
+                broken_links = await self._scan_broken_file_links(page, course_id)
+            except Exception as exc:
+                broken_links = []
+                self.log(f"  Could not check Brightspace file links: {str(exc).splitlines()[0]}", "warning")
+            # A broken file link is always worth fixing, so this is offered on an
+            # ordinary Checker run too. Nothing is written until the user agrees.
+            if broken_links:
+                repaired = await self._repair_broken_file_links(
+                    context, page, course_id, results, broken_links, bs_flat
+                )
+                self._summary["broken_links_repaired"] = repaired
+            self._summary["broken_links_found"] = len(broken_links)
+
+            if self.full_run and not self.link_repair_only:
                 created_urls = await self._create_missing_url_topics(page, course_id, results, bs_flat)
                 created_pages = await self._create_missing_page_topics(page, course_id, results, bs_flat)
                 created_overviews = await self._create_section_overview_topics(page, course_id, bs_flat)
@@ -4438,7 +4774,7 @@ class ContentChecker:
                 else:
                     self.log("↷ Existing activity links were not attached.", "dim")
 
-            if self.full_run and not self.stop_flag[0]:
+            if self.full_run and not self.stop_flag[0] and not self.link_repair_only:
                 await self._order_units_like_moodle(page, course_id, results)
 
             if moodle_links and getattr(self, "do_relink", False):
