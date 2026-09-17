@@ -472,7 +472,6 @@ class ContentChecker:
         self.file_checklist_event   = file_checklist_event
         self.on_file_checklist      = on_file_checklist
         self.file_checklist_result  = []
-        self.moodle_section_html: dict = {}
         # Repair-only Full Run: fix broken file links and change nothing
         # else. Meant for a live course that only needs its files back.
         self.link_repair_only = os.environ.get("BPA_LINK_REPAIR_ONLY", "") == "1"
@@ -2229,182 +2228,6 @@ class ContentChecker:
                 await _rollback_created(api, topic_id, self.log)
             return False
 
-    async def _create_section_overview_topics(
-        self, bs_page: "Page", course_id: str, bs_flat: list
-    ) -> int:
-        """Recreate Moodle section summaries and labels as one overview page per unit."""
-        from unit_overview import BrowserContentAPI, has_meaningful_unit_content, overview_title
-
-        modules = exact_module_map(bs_flat)
-        created = 0
-        for section, source_html in (self.moodle_section_html or {}).items():
-            destination = modules.get(_norm(section))
-            if not destination:
-                self.log(f"  ↷ Section text needs review (no unique exact unit): {section}", "warning")
-                continue
-            if not has_meaningful_unit_content(source_html):
-                continue
-            title = overview_title(destination["title"])
-            try:
-                existing = await BrowserContentAPI(
-                    bs_page, str(course_id), str(destination["id"])
-                ).list_structure()
-            except Exception as exc:
-                self.log(f"  ✗ Section text {section}: could not read unit ({str(exc).splitlines()[0]})", "error")
-                continue
-            if any(str(entry.get("Title", "")) == title for entry in existing or []):
-                self.log(f"  ↷ Overview already exists: {title}", "dim")
-                continue
-            if 'data-bpa-unresolved' in source_html:
-                self.log(f"  ⚠ {section}: some Moodle images could not be copied", "warning")
-            temp_topics: list = []
-            try:
-                source_html, temp_topics = await self._host_inline_images(
-                    bs_page, course_id, destination["id"], source_html
-                )
-            except Exception as exc:
-                self.log(f"  ✗ Section text {section}: {str(exc).splitlines()[0]}", "error")
-                continue
-            ok = await self._create_verified_html_topic(
-                bs_page, course_id, destination, title, source_html, first=True
-            )
-            # The uploaded files stay in Manage Files; only their helper topics go.
-            api = BrowserContentAPI(bs_page, str(course_id), str(destination["id"]))
-            for topic_id in temp_topics:
-                try:
-                    await api.delete_topic(topic_id)
-                except Exception as exc:
-                    self.log(f"    ⚠ leftover image topic {topic_id}: {str(exc).splitlines()[0]}", "warning")
-            if ok:
-                created += 1
-                self.log(f"  ✓ Created overview: {title}", "success")
-                for image_url in re.findall(r'src="(/content/enforced/[^"]+)"', source_html)[:3]:
-                    probe = await bs_page.context.request.get(
-                        f"{urlparse(self.bs_url).scheme}://{urlparse(self.bs_url).netloc}{image_url}",
-                        timeout=20000, fail_on_status_code=False,
-                    )
-                    if not probe.ok:
-                        self.log(f"    ⚠ image is not reachable after cleanup: {image_url} (HTTP {probe.status})", "warning")
-        return created
-
-    _DATA_URI_RE = re.compile(r'src="data:(image/[a-z.+-]+);base64,([^"]+)"', re.IGNORECASE)
-
-    async def _host_inline_images(
-        self, bs_page: "Page", course_id: str, module_id, source_html: str
-    ) -> tuple[str, list]:
-        """Upload embedded images as course files and link to them instead.
-
-        Keeping base64 images in the page makes it too large for Brightspace's
-        HTML editor to save, so each image becomes a real course file.  The
-        temporary file topics are returned for removal once the page is saved;
-        the uploaded file itself stays in Manage Files.
-        """
-        import base64 as _b64
-
-        matches = list(self._DATA_URI_RE.finditer(source_html))
-        if not matches:
-            return source_html, []
-
-        token = await bs_page.evaluate("() => localStorage.getItem('XSRF.Token') || ''")
-        if not token:
-            raise RuntimeError("no XSRF token for image upload")
-
-        base = f"{urlparse(self.bs_url).scheme}://{urlparse(self.bs_url).netloc}"
-        created, replacements = [], {}
-        for index, match in enumerate(matches, 1):
-            content_type, payload = match.group(1), match.group(2)
-            if match.group(0) in replacements:
-                continue
-            blob = _b64.b64decode(payload)
-            extension = {"image/jpeg": "jpg", "image/svg+xml": "svg"}.get(
-                content_type.lower(), content_type.split("/")[-1]
-            )
-            filename = f"bpa-image-{module_id}-{uuid.uuid4().hex[:8]}-{index}.{extension}"
-            descriptor = _json_mod.dumps({
-                "Title": filename, "ShortTitle": "", "Type": 1, "TopicType": 1,
-                "Url": filename, "StartDate": None, "EndDate": None, "DueDate": None,
-                "IsHidden": True, "IsLocked": False, "OpenAsExternalResource": None,
-                "Description": None,
-            })
-            boundary = f"bpa_{uuid.uuid4().hex}"
-            crlf = chr(13) + chr(10)
-            body = b"".join([
-                (f'--{boundary}{crlf}Content-Disposition: form-data; name=""{crlf}'
-                 f"Content-Type: application/json{crlf}{crlf}{descriptor}{crlf}").encode("utf-8"),
-                (f'--{boundary}{crlf}Content-Disposition: form-data; name=""; filename="{filename}"{crlf}'
-                 f"Content-Type: {content_type}{crlf}{crlf}").encode("utf-8"),
-                blob,
-                f"{crlf}--{boundary}--{crlf}".encode("utf-8"),
-            ])
-            response = await bs_page.context.request.post(
-                f"{base}/d2l/api/le/1.0/{course_id}/content/modules/{module_id}/structure/",
-                headers={"Content-Type": f"multipart/mixed; boundary={boundary}", "X-Csrf-Token": token},
-                data=body, timeout=60000, fail_on_status_code=False,
-            )
-            if not response.ok:
-                raise RuntimeError(f"image upload failed: HTTP {response.status}")
-            # Brightspace sometimes answers an upload with an empty body, so fall
-            # back to finding the new topic by the unique filename just sent.
-            try:
-                topic = _json_mod.loads(await response.text())
-            except Exception:
-                topic = {}
-            if not topic.get("Url"):
-                listing = await bs_page.context.request.get(
-                    f"{base}/d2l/api/le/1.75/{course_id}/content/modules/{module_id}/structure/",
-                    headers={"Accept": "application/json"}, timeout=30000, fail_on_status_code=False,
-                )
-                matches = [
-                    entry for entry in (await listing.json() if listing.ok else [])
-                    if str(entry.get("Url") or "").endswith(filename)
-                ]
-                if len(matches) != 1:
-                    raise RuntimeError(f"uploaded image could not be identified ({len(matches)} matches)")
-                topic = matches[0]
-            hosted = str(topic.get("Url") or "")
-            if not hosted:
-                raise RuntimeError("image upload returned no file URL")
-            created.append(topic.get("Id"))
-            replacements[match.group(0)] = f'src="{hosted}"'
-
-        for original, replacement in replacements.items():
-            source_html = source_html.replace(original, replacement)
-        self.log(f"    → {len(replacements)} image(s) uploaded as course files", "dim")
-        return source_html, created
-
-    async def _resolve_moodle_file_name(self, context: "BrowserContext", href: str) -> str:
-        """Return the real file name behind a Moodle file or URL activity."""
-        try:
-            response = await context.request.get(
-                with_moodle_redirect(href), timeout=20000,
-                max_redirects=0, fail_on_status_code=False,
-            )
-            location = response.headers.get("location", "")
-            if location:
-                return link_filename(urljoin(href, location))
-            content_type = str(response.headers.get("content-type", "")).lower()
-            if content_type.startswith(("text/html", "application/xhtml+xml")):
-                plugin = extract_pluginfile_url((await response.body()).decode("utf-8", errors="replace"),
-                                                response.url)
-                return link_filename(plugin) if plugin else ""
-            return link_filename(response.url)
-        except Exception:
-            return ""
-
-    async def _index_moodle_files(self, context: "BrowserContext", results: list) -> dict:
-        """Map each Moodle file name to the items that provide it."""
-        index: dict = {}
-        for item in results:
-            href = str(item.get("href") or "")
-            if not href or item.get("type") not in {"FILE", "URL"}:
-                continue
-            name = item.get("moodle_filename") or await self._resolve_moodle_file_name(context, href)
-            if not name or "." not in name:
-                continue
-            item["moodle_filename"] = name
-            index.setdefault(name, []).append(item)
-        return index
-
     async def _scan_broken_file_links(self, bs_page: "Page", course_id: str) -> list:
         """Report Brightspace page links whose own course file is missing.
 
@@ -2885,85 +2708,6 @@ class ContentChecker:
         self.log("  ✓ Moodle Edit mode enabled and verified", "success")
         return True
 
-    async def _scrape_moodle_section_html(self, tab: Page) -> dict:
-        """Return {section name: HTML} of each section's summary plus its labels.
-
-        Images are inlined as data URIs using the authenticated Moodle session,
-        so the resulting Brightspace page never depends on Moodle.
-        """
-        sections = await tab.evaluate("""async () => {
-            const STRIP = 'script,style,noscript,form,button,.actions,.action-menu,'
-                + '.activity-completion,.completion-info,.dropdown,.editing_move,'
-                + '.section-handle,.activity-dates,.availabilityinfo';
-            async function inlineImages(root) {
-                for (const img of root.querySelectorAll('img[src]')) {
-                    const src = new URL(img.getAttribute('src'), location.href);
-                    if (src.host !== location.host) continue;
-                    try {
-                        const r = await fetch(src.href, { credentials: 'include' });
-                        const blob = await r.blob();
-                        if (!r.ok || !blob.type.startsWith('image/') || blob.size > 3000000) {
-                            img.setAttribute('data-bpa-unresolved', src.href);
-                            continue;
-                        }
-                        img.setAttribute('src', await new Promise((ok, fail) => {
-                            const reader = new FileReader();
-                            reader.onload = () => ok(reader.result);
-                            reader.onerror = fail;
-                            reader.readAsDataURL(blob);
-                        }));
-                        img.removeAttribute('srcset');
-                    } catch (_) {
-                        img.setAttribute('data-bpa-unresolved', src.href);
-                    }
-                }
-            }
-            function clean(node) {
-                const clone = node.cloneNode(true);
-                clone.querySelectorAll(STRIP).forEach(el => el.remove());
-                clone.querySelectorAll('[href]').forEach(el => {
-                    try {
-                        const target = new URL(el.getAttribute('href'), location.href);
-                        if (target.host === location.host && el.tagName === 'A') {
-                            // Never link students back to Moodle; the linked
-                            // item is recreated as its own Brightspace topic.
-                            el.replaceWith(...el.childNodes);
-                        } else {
-                            el.setAttribute('href', target.href);
-                        }
-                    } catch (_) {}
-                });
-                return clone;
-            }
-            const out = [];
-            for (const section of document.querySelectorAll('li.section, li.section.main')) {
-                const heading = section.querySelector(
-                    'h3[data-for="section_title"], h4[data-for="section_title"], .sectionname, h3, h4');
-                const name = ((heading && heading.textContent) || section.getAttribute('data-sectionname') || '').trim();
-                const parts = [];
-                const summary = section.querySelector('.summarytext, .summary');
-                if (summary && summary.closest('li.section') === section) parts.push(clean(summary));
-                for (const label of section.querySelectorAll('li.activity.modtype_label')) {
-                    if (label.closest('li.section') !== section) continue;
-                    const body = label.querySelector('.activity-altcontent, .contentwithoutlink, .no-overflow');
-                    if (body) parts.push(clean(body));
-                }
-                const holder = document.createElement('div');
-                parts.forEach(p => holder.appendChild(p));
-                if (!holder.textContent.trim() && !holder.querySelector('img,iframe,video')) continue;
-                await inlineImages(holder);
-                out.push({ name, html: holder.innerHTML.trim() });
-            }
-            return out;
-        }""")
-        result = {}
-        for entry in sections or []:
-            if valid_section_name(entry.get("name")) and entry.get("html"):
-                result[entry["name"]] = entry["html"]
-        if result:
-            self.log(f"  ✓ Moodle section text captured for {len(result)} section(s)", "dim")
-        return result
-
     async def _moodle_dom_inventory(self, tab: Page) -> dict:
         return await tab.evaluate("""() => {
             const sections = [...document.querySelectorAll('li.section, li.section.main')];
@@ -3239,12 +2983,6 @@ class ContentChecker:
                 await self._abort_bad_scrape(tab, items, suspect)
                 await tab.close()
                 return None
-
-            try:
-                self.moodle_section_html = await self._scrape_moodle_section_html(tab)
-            except Exception as exc:
-                self.moodle_section_html = {}
-                self.log(f"  ⚠ Could not read Moodle section text: {str(exc).splitlines()[0]}", "warning")
 
             # Deep scan: (1) scan label bodies on the course page itself,
             # (2) navigate to each PAGE topic for its body HTML,
@@ -4710,11 +4448,9 @@ class ContentChecker:
             if self.full_run and not self.link_repair_only:
                 created_urls = await self._create_missing_url_topics(page, course_id, results, bs_flat)
                 created_pages = await self._create_missing_page_topics(page, course_id, results, bs_flat)
-                created_overviews = await self._create_section_overview_topics(page, course_id, bs_flat)
-                if created_urls or created_pages or created_overviews:
+                if created_urls or created_pages:
                     self.log(f"🔗 URL topics created: {created_urls}", "step")
                     self.log(f"📖 PAGE topics created: {created_pages}", "step")
-                    self.log(f"🏷 Section overview pages created: {created_overviews}", "step")
                     bs_flat = await self._fetch_bs_toc(page, course_id)
 
             # DEBUG: show file item counts
