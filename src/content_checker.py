@@ -30,6 +30,7 @@ from config import SESSION_FILE
 from js_helpers import DEEP_FIND_JS
 from h5p_handler import H5PHandler
 from content_matcher import _norm, _numbers_conflict, _digitize, _containment_match, _detect_external_tool, _compare_items, _EXTERNAL_TOOLS, _WORD_NUMS
+from activity_linker import ACTIVITY_TYPES, resolve_existing_activity_links
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -336,10 +337,14 @@ class ContentChecker:
         moodle_username:      str               = "",
         moodle_password:      str               = "",
         verbose:              bool              = False,
+        full_run:             bool              = False,
     ):
         self.bs_url                 = bs_url.strip()
         self.moodle_url             = moodle_url.strip()
         self._verbose               = verbose
+        # A normal Checker run is read-only.  Only the explicit Full Run may
+        # attach an already-existing activity to Content.
+        self.full_run               = full_run
         self.stop_flag              = [False]
         self.log                    = self._make_log_filter(log)
         self.on_complete            = on_complete
@@ -598,6 +603,10 @@ class ContentChecker:
                         const id    = c.Id ?? c.id ?? c.TopicId ?? null;
                         const typeId = c.TypeIdentifier ?? c.typeIdentifier ?? c.TypeId ?? c.Type ?? '';
                         const topicType = c.TopicType ?? c.topicType ?? '';
+                        const activityType = c.ActivityType ?? c.activityType ?? null;
+                        const toolItemId = c.ToolItemId ?? c.toolItemId ?? null;
+                        const activityId = c.ActivityId ?? c.activityId ?? null;
+                        const sortOrder = c.SortOrder ?? c.sortOrder ?? null;
                         if (title) items.push({
                             kind: 'TOPIC',
                             title,
@@ -605,7 +614,11 @@ class ContentChecker:
                             url,
                             id,
                             type_id: typeId,
-                            topic_type: topicType
+                            topic_type: topicType,
+                            activity_type: activityType,
+                            tool_item_id: toolItemId,
+                            activity_id: activityId,
+                            sort_order: sortOrder
                         });
                     }
                 }
@@ -624,6 +637,225 @@ class ContentChecker:
         except Exception as e:
             self.log(f"✗ Fetch error: {e}", "error")
             return None
+
+    async def _fetch_existing_activity_catalogues(self, page: Page, course_id: str) -> dict:
+        """Read the destination activity tools without changing either tool.
+
+        Brightspace names assignments ``dropbox folders`` in its LE API.  The
+        preferred v1.82 endpoints are tried first, with the application's
+        established v1.0 API version as a compatibility fallback.  A failed
+        read is intentionally treated as an empty, *unusable* catalogue by the
+        caller: it must never justify an automatic attachment.
+        """
+        self.log("Checking existing Brightspace assignments and quizzes…", "info")
+        try:
+            data = await page.evaluate("""async (courseId) => {
+                async function getFirst(paths) {
+                    for (const path of paths) {
+                        try {
+                            const response = await fetch(path, {
+                                credentials: 'include',
+                                headers: { 'Accept': 'application/json' },
+                            });
+                            if (!response.ok) continue;
+                            return { ok: true, data: await response.json(), path };
+                        } catch (_) {}
+                    }
+                    return { ok: false, data: [] };
+                }
+                const base = '/d2l/api/le/';
+                const [assignments, quizzes] = await Promise.all([
+                    getFirst([
+                        `${base}1.82/${courseId}/dropbox/folders/`,
+                        `${base}1.0/${courseId}/dropbox/folders/`,
+                    ]),
+                    getFirst([
+                        `${base}1.82/${courseId}/quizzes/`,
+                        `${base}1.0/${courseId}/quizzes/`,
+                    ]),
+                ]);
+                function entries(value) {
+                    if (Array.isArray(value)) return value;
+                    for (const key of ['Items', 'Objects', 'items', 'objects']) {
+                        if (Array.isArray(value?.[key])) return value[key];
+                    }
+                    return [];
+                }
+                return {
+                    assignments: { ok: assignments.ok, items: entries(assignments.data) },
+                    quizzes: { ok: quizzes.ok, items: entries(quizzes.data) },
+                };
+            }""", course_id)
+        except Exception as exc:
+            self.log(f"  ⚠ Could not query existing activities: {exc}", "warning")
+            return {"assignments": None, "quizzes": None}
+
+        catalogues = {
+            "assignments": data.get("assignments", {}).get("items", []) if data.get("assignments", {}).get("ok") else None,
+            "quizzes": data.get("quizzes", {}).get("items", []) if data.get("quizzes", {}).get("ok") else None,
+        }
+        for label, items in catalogues.items():
+            if items is None:
+                self.log(f"  ⚠ Could not read Brightspace {label}; no automatic links will be made for them", "warning")
+            else:
+                self.log(f"  ✓ Brightspace {label}: {len(items)}", "dim")
+        return catalogues
+
+    async def _activity_is_in_module(
+        self, page: Page, course_id: str, module_id, activity_type: int, activity_id
+    ) -> bool:
+        """Check by Brightspace activity ID immediately before an attachment."""
+        try:
+            present = await page.evaluate("""async ([courseId, moduleId, activityType, activityId]) => {
+                const response = await fetch(
+                    `/d2l/api/le/1.0/${courseId}/content/modules/${moduleId}/structure/`,
+                    { credentials: 'include', headers: { 'Accept': 'application/json' } },
+                );
+                if (!response.ok) return false;
+                const wantedId = String(activityId);
+                return (await response.json()).some(topic =>
+                    Number(topic.ActivityType ?? topic.activityType) === Number(activityType)
+                    && String(topic.ToolItemId ?? topic.toolItemId) === wantedId
+                );
+            }""", [str(course_id), str(module_id), activity_type, str(activity_id)])
+            return bool(present)
+        except Exception:
+            return False
+
+    async def _click_visible_exact_text(self, tab, text: str) -> bool:
+        """Click exactly one visible control with ``text`` across Lessons frames.
+
+        This intentionally refuses an ambiguous UI result rather than choosing
+        the first similarly named activity.
+        """
+        wanted = text.strip()
+        for frame in tab.frames:
+            try:
+                controls = frame.get_by_text(wanted, exact=True)
+                count = await controls.count()
+                visible = []
+                for index in range(count):
+                    candidate = controls.nth(index)
+                    if await candidate.is_visible():
+                        visible.append(candidate)
+                # Nested elements can expose the same visible text. Prefer the
+                # smallest set of actual clickable controls, but never pick from
+                # more than one independently clickable result.
+                clickable = []
+                for candidate in visible:
+                    tag = await candidate.evaluate("el => el.tagName.toLowerCase()")
+                    if tag in {"button", "a", "d2l-menu-item", "d2l-list-item", "li"}:
+                        clickable.append(candidate)
+                choices = clickable or visible
+                if len(choices) == 1:
+                    await choices[0].click(timeout=5000)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _attach_existing_activity(
+        self, context: BrowserContext, bs_base: str, course_id: str, item: dict
+    ) -> tuple[bool, Optional[str]]:
+        """Use Brightspace's visible Add Existing flow for exactly one activity.
+
+        This is the only write in this feature.  It never opens an activity
+        editor or the Grades tool, and verifies the Content reference by the
+        existing tool item ID after the UI finishes.
+        """
+        module_id = item["target_module_id"]
+        activity_id = item["activity_id"]
+        kind = item["activity_kind"]
+        activity_type = ACTIVITY_TYPES[kind]["content_activity_type"]
+        tab = await context.new_page()
+        try:
+            await tab.goto(
+                f"{bs_base}/d2l/le/lessons/{course_id}/units/{module_id}",
+                wait_until="domcontentloaded", timeout=30000,
+            )
+            await tab.wait_for_timeout(1500)
+            if await self._activity_is_in_module(page=tab, course_id=course_id, module_id=module_id,
+                                                 activity_type=activity_type, activity_id=activity_id):
+                return True, "already linked"
+            add_button = None
+            for frame in tab.frames:
+                locator = frame.locator('d2l-button[aria-label="Add Existing"], d2l-button.add-existing-btn')
+                try:
+                    if await locator.count() and await locator.first.is_visible():
+                        add_button = locator.first
+                        break
+                except Exception:
+                    pass
+            if not add_button:
+                return False, "Add Existing control was not available"
+            await add_button.click(timeout=5000)
+            await tab.wait_for_timeout(800)
+
+            tool_name = "Assignments" if kind == "ASSIGN" else "Quizzes"
+            if not await self._click_visible_exact_text(tab, tool_name):
+                return False, f"{tool_name} option was not available"
+            await tab.wait_for_timeout(1000)
+            if not await self._click_visible_exact_text(tab, item["name"]):
+                return False, "exact activity selection was unavailable or ambiguous"
+            await tab.wait_for_timeout(1500)
+            if not await self._activity_is_in_module(tab, course_id, module_id, activity_type, activity_id):
+                return False, "Content link could not be verified after Add Existing"
+            return True, None
+        except Exception as exc:
+            return False, str(exc).splitlines()[0]
+        finally:
+            try:
+                await tab.close()
+            except Exception:
+                pass
+
+    def _log_activity_link_report(self, results: list, preview: bool = False) -> None:
+        linked = [r for r in results if r.get("status") == "activity_linked"]
+        attach = [r for r in results if r.get("status") == "existing_activity_link_missing"]
+        ambiguous = [r for r in results if r.get("status") == "ambiguous_activity"]
+        if not (linked or attach or ambiguous):
+            return
+        heading = "ACTIVITY LINK PREVIEW" if preview else "EXISTING ACTIVITY CHECK"
+        self.log("─" * 52, "dim")
+        self.log(heading, "step")
+        for item in linked:
+            self.log(f"   ✓ Already linked: {item['type']} — {item['name']}", "success")
+        for item in attach:
+            target = item.get("target_module_title") or "no exact Brightspace unit"
+            action = "Will attach existing activity" if preview and item.get("target_module_id") else "Existing activity — Content link missing"
+            self.log(f"   → {action}: {item['type']} — {item['name']} → {target}", "warning")
+        for item in ambiguous:
+            self.log(f"   ⚠ Ambiguous existing {item['type'].lower()}: {item['name']} "
+                     f"({item.get('activity_match_count', 0)} exact matches; no action)", "warning")
+
+    def _classify_existing_activity_links(
+        self, results: list, bs_flat: list, catalogues: dict
+    ) -> list[dict]:
+        """Apply the typed exact-match policy and return safe Full Run actions."""
+        plan = []
+        for moodle_type, catalogue_name in (("ASSIGN", "assignments"), ("QUIZ", "quizzes")):
+            typed_results = [
+                result for result in results
+                if result.get("type") == moodle_type and not result.get("embedded")
+            ]
+            if not typed_results:
+                continue
+            catalogue = catalogues.get(catalogue_name)
+            if catalogue is None:
+                for result in typed_results:
+                    result.update({
+                        "status": "missing",
+                        "matched": None,
+                        "activity_link_state": "activity_tool_unavailable",
+                    })
+                continue
+            plan.extend(resolve_existing_activity_links(
+                typed_results,
+                bs_flat,
+                catalogue if moodle_type == "ASSIGN" else [],
+                catalogue if moodle_type == "QUIZ" else [],
+            ))
+        return plan
 
     async def _bs_content_scan(
         self, page: "Page", course_id: str, bs_flat: list, missing_results: list
@@ -2948,6 +3180,9 @@ class ContentChecker:
                 "found_in_search": "FOUND",
                 "found_in_content": "IN PAGE",
                 "missing": "MISSING",
+                "activity_linked": "LINKED",
+                "existing_activity_link_missing": "EXISTING ACTIVITY",
+                "ambiguous_activity": "AMBIGUOUS",
             }
             return labels.get(status, status.upper())
 
@@ -3107,7 +3342,9 @@ class ContentChecker:
             # Status icon mapping
             status_icons = {
                 "exact": "✅", "fuzzy": "⚠️ ", "missing": "❌",
-                "found_in_search": "🔍", "found_in_content": "📑"
+                "found_in_search": "🔍", "found_in_content": "📑",
+                "activity_linked": "✅", "existing_activity_link_missing": "🔗",
+                "ambiguous_activity": "⚠️ ",
             }
             status_icon = status_icons.get(status, "  ")
             status_label = _fmt_status_label(status)
@@ -3130,7 +3367,9 @@ class ContentChecker:
                     self.log(f"      │   {desc}: \"{matched_val}\"", "dim")
             else:
                 connector = "├─" if has_children else "└─"
-                tag = "success" if status == "exact" else ("warning" if status == "found_in_search" else "error")
+                tag = "success" if status in {"exact", "activity_linked"} else (
+                    "warning" if status in {"found_in_search", "existing_activity_link_missing", "ambiguous_activity"} else "error"
+                )
                 self.log(f"   {connector} {status_icon} {status_label:<10} {r['name']}", tag)
 
             # Show any embedded content found inside this activity
@@ -3212,6 +3451,17 @@ class ContentChecker:
                 self.log(f"   ❌ {len(missing)} still missing after all steps:", "error")
                 for r in missing:
                     self.log(f"      • [{r.get('section','?')}] {r['name']}", "dim")
+
+        # ── File uploads ──────────────────────────────────────────────────────
+        attached = s.get("existing_activity_links_attached", 0)
+        already_linked = s.get("existing_activity_links_already_linked", 0)
+        activity_failed = s.get("existing_activity_links_failed", 0)
+        if attached or already_linked or activity_failed:
+            self.log("", "dim")
+            self.log(
+                f"🔗 Existing activity Content links: {attached} attached, "
+                f"{already_linked} already linked, {activity_failed} failed", "info"
+            )
 
         # ── File uploads ──────────────────────────────────────────────────────
         if s["files_uploaded"] or s["files_failed"]:
@@ -3296,6 +3546,9 @@ class ContentChecker:
             "h5p_skipped":    [],
             "h5p_grade_failed": [],
             "h5p_already_present": [],
+            "existing_activity_links_attached": 0,
+            "existing_activity_links_already_linked": 0,
+            "existing_activity_links_failed": 0,
         }
         self._h5p._summary = self._summary
 
@@ -3382,12 +3635,29 @@ class ContentChecker:
             t0 = time.time()
             results = _compare_items(moodle_items, bs_flat)
 
+            # Moodle assignments and quizzes need a stricter second lookup than
+            # ordinary Content matching.  A deleted Content link can leave the
+            # underlying Brightspace activity intact, and fuzzy title matches
+            # must never be allowed to schedule a write.
+            activity_results = [
+                result for result in results
+                if result.get("type") in ACTIVITY_TYPES and not result.get("embedded")
+            ]
+            activity_catalogues = {"assignments": [], "quizzes": []}
+            if activity_results:
+                activity_catalogues = await self._fetch_existing_activity_catalogues(page, course_id)
+            activity_plan = self._classify_existing_activity_links(
+                results, bs_flat, activity_catalogues
+            )
+
+            self._log_activity_link_report(results)
+
             # ── Create missing units ──────────────────────────────────────────
             missing_secs = [
                 r["name"] for r in results
                 if r.get("type") == "SECTION" and r["status"] == "missing"
             ]
-            if missing_secs:
+            if missing_secs and self.full_run:
                 self.log("─" * 52, "dim")
                 self.log(f"📦 {len(missing_secs)} Moodle section(s) have no Brightspace unit", "step")
                 for n in missing_secs:
@@ -3417,8 +3687,18 @@ class ContentChecker:
                             elif item.get("parent_topic") and ("chapter 2" in item.get("parent_topic", "").lower() or "chapter 3" in item.get("parent_topic", "").lower()):
                                 print(f"[DEBUG] FROM CHAPTER FOLDER: {item}")
                         results = _compare_items(moodle_items, bs_flat)
+                        activity_plan = self._classify_existing_activity_links(
+                            results, bs_flat, activity_catalogues
+                        )
+                        self._log_activity_link_report(results)
 
-            missing = [r for r in results if r["status"] == "missing"]
+            # Assignment and quiz decisions above are final for this run.  Do
+            # not let Lessons search turn a missing or ambiguous activity into
+            # a fuzzy result that could later be mistaken for a safe write.
+            missing = [
+                r for r in results
+                if r["status"] == "missing" and r.get("type") not in ACTIVITY_TYPES
+            ]
             if missing:
                 self.log("─" * 52, "dim")
                 found_via_search = await self._bs_content_scan(
@@ -3431,7 +3711,10 @@ class ContentChecker:
                             r["matched"] = found_via_search[r["name"]]
 
             self.log("─" * 52, "dim")
-            still_missing = [r for r in results if r["status"] == "missing"]
+            still_missing = [
+                r for r in results
+                if r["status"] == "missing" and r.get("type") not in ACTIVITY_TYPES
+            ]
             found_in_content, moodle_links = await self._scan_page_content(
                 page, course_id, bs_flat, still_missing
             )
@@ -3450,7 +3733,7 @@ class ContentChecker:
             missing_files = [r for r in results if r.get("status") == "missing" and r.get("type") == "FILE"]
             self.log(f"DEBUG: {len(moodle_files)} FILE items in results, {len(missing_files)} marked missing", "dim")
 
-            if self.on_file_checklist:
+            if self.full_run and self.on_file_checklist:
                 t0 = time.time()
                 await self._offer_missing_file_download(context, page, course_id, results, bs_flat)
                 self._summary["timings"]["File download + upload"] = time.time() - t0
@@ -3462,6 +3745,45 @@ class ContentChecker:
                 if self.on_complete:
                     self.on_complete()
                 return
+
+            # The preview and confirmation live inside Full Run.  A standard
+            # Checker run has already reported the same classifications above,
+            # but cannot reach this write path.
+            if activity_plan and self.full_run:
+                self._log_activity_link_report(activity_plan, preview=True)
+                preview_lines = [
+                    f"• {item['activity_label']}: {item['name']} → {item['target_module_title']}"
+                    for item in activity_plan
+                ]
+                if await self._confirm(
+                    "Will attach existing activity (no activity or grade item will be created, edited, "
+                    "or deleted):\n\n" + "\n".join(preview_lines) + "\n\nAttach these Content links?"
+                ):
+                    from urllib.parse import urlparse
+                    parsed = urlparse(self.bs_url)
+                    bs_base = f"{parsed.scheme}://{parsed.netloc}"
+                    attached = skipped = failed = 0
+                    for item in activity_plan:
+                        if self.stop_flag[0]:
+                            break
+                        ok, detail = await self._attach_existing_activity(
+                            context, bs_base, course_id, item
+                        )
+                        if ok and detail == "already linked":
+                            skipped += 1
+                            self.log(f"  ↷ Already linked: {item['type']} — {item['name']}", "dim")
+                        elif ok:
+                            attached += 1
+                            self.log(f"  ✓ Attached existing {item['type'].lower()}: {item['name']} → "
+                                     f"{item['target_module_title']}", "success")
+                        else:
+                            failed += 1
+                            self.log(f"  ✗ Could not attach {item['type'].lower()} {item['name']}: {detail}", "error")
+                    self._summary["existing_activity_links_attached"] = attached
+                    self._summary["existing_activity_links_already_linked"] = skipped
+                    self._summary["existing_activity_links_failed"] = failed
+                else:
+                    self.log("↷ Existing activity links were not attached.", "dim")
 
             if moodle_links and getattr(self, "do_relink", False):
                 t0 = time.time()

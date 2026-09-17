@@ -82,7 +82,7 @@ class CheckerPanel(QWidget):
         run_menu = QMenu(self._run_btn)
 
         full_run_act = run_menu.addAction("Full Run")
-        full_run_act.triggered.connect(self._start_run)
+        full_run_act.triggered.connect(self._start_full_run)
 
         h5p_act = run_menu.addAction("H5P — Insert Only (already uploaded)")
         h5p_act.triggered.connect(self._start_phase_b)
@@ -185,7 +185,7 @@ class CheckerPanel(QWidget):
             "chk_moodle_url": self._moodle_entry.text().strip(),
         })
 
-    def _run_worker(self, phase_b: bool = False):
+    def _run_worker(self, phase_b: bool = False, full_run: bool = False):
         bs_url     = self._bs_entry.text().strip()
         moodle_url = self._moodle_entry.text().strip()
         if not bs_url and not moodle_url:
@@ -281,10 +281,13 @@ class CheckerPanel(QWidget):
                     sso_password=self._mw.sso_password,
                     moodle_username=self._mw.moodle_username,
                     moodle_password=self._mw.moodle_password,
+                    full_run=full_run,
                 )
-                checker.do_relink     = self._relink_act.isChecked()
-                checker.do_pdf_upload = self._pdf_act.isChecked()
-                checker.do_h5p_embed  = self._h5p_act.isChecked()
+                # "Run Check" is deliberately read-only.  Existing write
+                # options retain their prior behavior under explicit Full Run.
+                checker.do_relink     = full_run and self._relink_act.isChecked()
+                checker.do_pdf_upload = full_run and self._pdf_act.isChecked()
+                checker.do_h5p_embed  = full_run and self._h5p_act.isChecked()
                 checker.file_checklist_result = file_result
                 checker.h5p_skip_flag = skip_flag
                 checker.stop_flag = self._stop_flag
@@ -308,13 +311,17 @@ class CheckerPanel(QWidget):
         if not self._mw.chromium_ready:
             self._log.append_log("Browser engine still installing — please wait.", "warning")
             return
-        self._run_worker(phase_b=False)
+        self._run_worker(phase_b=False, full_run=False)
+
+    def _start_full_run(self):
+        """Run the existing write-enabled migration phases after their prompts."""
+        self._run_worker(phase_b=False, full_run=True)
 
     def _start_phase_b(self):
         if not self._mw.chromium_ready:
             self._log.append_log("Browser engine still installing — please wait.", "warning")
             return
-        self._run_worker(phase_b=True)
+        self._run_worker(phase_b=True, full_run=False)
 
     def _stop_run(self):
         """User clicked Stop — set flag to exit early."""
