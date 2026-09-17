@@ -378,7 +378,12 @@ class ContentChecker:
             auto_dismiss=self._auto_dismiss,
             confirm=self._confirm,
             diagnose=self._diagnose,
-            verify_topic_in_module=self._verify_topic_in_module,
+            # H5P must not share the ordinary file/topic duplicate check.  A
+            # PDF and an H5P activity can legitimately have the same title.
+            verify_topic_in_module=lambda page, course_id, module_id, name:
+                self._verify_topic_in_module(
+                    page, course_id, module_id, name, require_h5p=True
+                ),
             summary=self._summary,
             notify=self._notify,
             should_stop=lambda: self.stop_flag[0],
@@ -1640,12 +1645,14 @@ class ContentChecker:
         return created
 
     async def _verify_topic_in_module(
-        self, bs_page, course_id: str, module_id, expected_name: str
+        self, bs_page, course_id: str, module_id, expected_name: str,
+        require_h5p: bool = False,
     ) -> bool:
         """Check via the in-browser D2L API whether a topic with this exact
-        (normalized) title exists in the module. Substring matching is not used —
-        it false-positives on short unrelated titles, which made H5P Phase B
-        skip every insert as "already in Brightspace"."""
+        (normalized) title exists in the module. When *require_h5p* is true,
+        the matching topic must also be an H5P/LTI topic; a same-named PDF,
+        assignment, or ordinary content page must not suppress an H5P insert.
+        Substring matching is not used because it causes false positives."""
         try:
             topics = await bs_page.evaluate(
                 """async ([courseId, moduleId]) => {
@@ -1664,10 +1671,29 @@ class ContentChecker:
             for topic in topics:
                 title_norm = re.sub(r'[^\w]', '', topic.get('Title', '')).lower()
                 if title_norm == name_norm:
-                    return True
+                    if not require_h5p or self._is_h5p_topic(topic):
+                        return True
             return False
         except Exception:
             return False
+
+    @staticmethod
+    def _is_h5p_topic(topic: dict) -> bool:
+        """Return true only for a module topic that points to H5P content.
+
+        The module-structure API exposes the H5P launch URL and, depending on
+        the Brightspace version, a textual type identifier.  Do not infer H5P
+        from its title: course PDFs frequently use the activity's title.
+        """
+        values = (
+            topic.get("Url", ""), topic.get("url", ""),
+            topic.get("TypeIdentifier", ""), topic.get("typeIdentifier", ""),
+            topic.get("TopicType", ""), topic.get("topicType", ""),
+        )
+        return any(
+            "h5p" in str(value).lower()
+            for value in values if value is not None
+        )
 
     # NOTE: Replaced by two-step API approach (_upload_file_to_brightspace +
     # _create_bs_file_topic). Kept as reference. Do not delete.

@@ -19,11 +19,8 @@ from content_checker import ContentChecker, _extract_course_id
 async def _verify_topic_in_module_strict(bs_page, course_id, module_id, expected_name) -> bool:
     """Stricter replacement for ContentChecker._verify_topic_in_module.
 
-    That method treats a match as "either normalized name is a substring of the
-    other", which false-positives when the module already has an unrelated topic
-    whose short title happens to be a substring of expected_name (e.g. a topic
-    titled "Quiz" reads as already-matching "Inclusion Quiz") — causing a real
-    insert to be silently skipped. Require an exact normalized match instead.
+    H5P has its own duplicate rule: exact normalized title *and* an H5P
+    topic.  A same-named PDF must not make Phase B skip the H5P insertion.
     """
     try:
         topics = await bs_page.evaluate(
@@ -42,7 +39,7 @@ async def _verify_topic_in_module_strict(bs_page, course_id, module_id, expected
         name_norm = re.sub(r'[^\w]', '', expected_name).lower()
         for topic in topics:
             title_norm = re.sub(r'[^\w]', '', topic.get('Title', '')).lower()
-            if title_norm == name_norm:
+            if title_norm == name_norm and ContentChecker._is_h5p_topic(topic):
                 return True
         return False
     except Exception:
