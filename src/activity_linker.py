@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Iterable
 
 from content_matcher import _norm
+from rebuild_helpers import exact_module_map
 
 
 ACTIVITY_TYPES = {
@@ -34,19 +35,6 @@ def activity_id(item: dict):
     return _value(item, "Id", "ID", "FolderId", "QuizId", "id")
 
 
-def _exact_module_by_title(bs_flat: Iterable[dict]) -> dict[str, dict]:
-    """Return only unique exact-normalized module names.
-
-    A duplicate Brightspace unit title is not a safe automatic destination.
-    """
-    grouped: dict[str, list[dict]] = {}
-    for item in bs_flat:
-        if item.get("kind") != "MODULE" or item.get("id") is None:
-            continue
-        grouped.setdefault(_norm(str(item.get("title", ""))), []).append(item)
-    return {name: values[0] for name, values in grouped.items() if len(values) == 1}
-
-
 def _is_linked_content_topic(topic: dict, expected_type: int, title_norm: str) -> bool:
     if topic.get("kind") != "TOPIC" or _norm(str(topic.get("title", ""))) != title_norm:
         return False
@@ -69,7 +57,7 @@ def resolve_existing_activity_links(
     cause a write to Brightspace.
     """
     catalogues = {"ASSIGN": list(assignments), "QUIZ": list(quizzes)}
-    modules = _exact_module_by_title(bs_flat)
+    modules = exact_module_map(bs_flat)
     plan: list[dict] = []
 
     for result in results:

@@ -21,6 +21,8 @@ import re
 from collections import Counter
 from functools import lru_cache
 import threading
+import uuid
+from urllib.parse import urljoin, urlparse
 import time
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -31,6 +33,18 @@ from js_helpers import DEEP_FIND_JS
 from h5p_handler import H5PHandler
 from content_matcher import _norm, _numbers_conflict, _digitize, _containment_match, _detect_external_tool, _compare_items, _EXTERNAL_TOOLS, _WORD_NUMS
 from activity_linker import ACTIVITY_TYPES, resolve_existing_activity_links
+from rebuild_helpers import (
+    download_filename,
+    exact_module_map,
+    extract_pluginfile_url,
+    extract_url_workaround,
+    is_moodle_url,
+    plan_unit_order,
+    valid_activity_url,
+    with_moodle_redirect,
+    valid_section_name,
+    validate_download_response,
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -284,18 +298,29 @@ _JS_MOODLE_ITEMS = """() => {
 
     const result = [];
     document.querySelectorAll('li.section, li.section.main').forEach(section => {
-        const heading = section.querySelector('.sectionname, h3, h4');
+        // A subsection can be nested inside another section. Only scrape the
+        // activities owned by this exact section so every Moodle row appears once.
+        const heading = section.querySelector(
+            'h3[data-for="section_title"], h4[data-for="section_title"], .sectionname, h3, h4'
+        );
+        const sectionName = ((heading && visibleText(heading))
+            || section.getAttribute('data-sectionname') || '').trim();
         result.push({
             type: 'SECTION',
-            name: (heading && heading.textContent.trim()) || '(unnamed section)',
+            name: sectionName,
             href: '',
         });
         section.querySelectorAll('li.activity').forEach(activity => {
+            if (activity.closest('li.section') !== section) return;
             const cls = Array.from(activity.classList);
-            const matched = cls.find(c => TYPES[c]);
+            const matched = cls.find(c => TYPES[c]) || cls.find(c => c.startsWith('modtype_'));
             if (!matched) return;
-            let type = TYPES[matched];
-            const anchor = ownQuery(activity, 'a');
+            let type = TYPES[matched] || 'EXTERNAL';
+            // In Edit mode the first anchor can be a move/edit control whose
+            // target is the course page plus '#'.  Only the visible activity
+            // name anchor identifies the Moodle resource.
+            const anchor = ownQuery(activity, '.activityname a[href]')
+                        || ownQuery(activity, 'a.aalink[href], a.stretched-link[href]');
             let name, href = anchor ? anchor.href : '';
             if (matched === 'modtype_label') {
                 const info = labelInfo(activity);
@@ -338,6 +363,7 @@ class ContentChecker:
         moodle_password:      str               = "",
         verbose:              bool              = False,
         full_run:             bool              = False,
+        keep_browser_open:    bool              = True,
     ):
         self.bs_url                 = bs_url.strip()
         self.moodle_url             = moodle_url.strip()
@@ -345,6 +371,7 @@ class ContentChecker:
         # A normal Checker run is read-only.  Only the explicit Full Run may
         # attach an already-existing activity to Content.
         self.full_run               = full_run
+        self.keep_browser_open      = keep_browser_open
         self.stop_flag              = [False]
         self.log                    = self._make_log_filter(log)
         self.on_complete            = on_complete
@@ -356,6 +383,7 @@ class ContentChecker:
         self.file_checklist_event   = file_checklist_event
         self.on_file_checklist      = on_file_checklist
         self.file_checklist_result  = []
+        self.moodle_section_html: dict = {}
         self.confirm_fn             = confirm_fn
         self.notify_fn              = notify_fn
         self.do_h5p_embed           = False
@@ -1027,7 +1055,7 @@ class ContentChecker:
                 return await Promise.all(pairs.map(async ([title, topicId]) => {
                     try {
                         const r = await fetch(
-                            `/d2l/api/le/1.0/${courseId}/content/topics/${topicId}/file`,
+                            `/d2l/api/le/1.75/${courseId}/content/topics/${topicId}/file`,
                             { credentials: 'include' }
                         );
                         if (!r.ok) return { title, topicId, skip: true };
@@ -1100,7 +1128,7 @@ class ContentChecker:
             bs_by_norm.setdefault(_norm(i.get("title", "")), []).append(i)
         section_to_bs: dict = {}
         for r in results:
-            if r.get("type") == "SECTION" and r.get("matched"):
+            if r.get("type") == "SECTION" and r.get("status") == "exact" and r.get("matched"):
                 matched  = r["matched"]
                 bs_title = matched[0] if isinstance(matched, tuple) else matched
                 bs_mod   = bs_module_by_title.get(bs_title, {})
@@ -1110,9 +1138,7 @@ class ContentChecker:
         # (created by the .mbz import). Files scraped out of a folder carry the
         # folder name in `parent_topic`, so route them into that module instead
         # of the folder's parent section.
-        bs_module_by_norm = {
-            _norm(i["title"]): i for i in (bs_flat or []) if i["kind"] == "MODULE"
-        }
+        bs_module_by_norm = exact_module_map(bs_flat or [])
 
         def _bs_target(r):
             parent = (r.get("parent_topic") or "").strip()
@@ -1390,50 +1416,61 @@ class ContentChecker:
                     self.log(f"    ✗ Cached path missing: {local}", "error")
                 continue
 
-            tab = await context.new_page()
             try:
-                self.log("      opening Moodle file tab", "detail")
-                try:
-                    await tab.goto(href, wait_until="domcontentloaded", timeout=20000)
-                    self.log(f"      initial page loaded: {tab.url}", "detail")
-                except Exception as e:
-                    self.log(f"      initial navigation did not load a page: {str(e).splitlines()[0]}", "detail")
-                await tab.wait_for_timeout(300)
+                if not valid_activity_url(href, self.moodle_url):
+                    raise RuntimeError("Moodle activity URL is missing or points back to the course page")
+                request_url = with_moodle_redirect(href)
+                response = await context.request.get(
+                    request_url, timeout=30000, fail_on_status_code=False
+                )
+                body = await response.body()
+                headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
+                content_type = headers.get("content-type", "")
+                final_url = response.url
 
-                dl_href = href
-                wk = tab.locator('.resourceworkaround a[href*="pluginfile.php"]')
-                if await wk.count() > 0:
-                    dl_href = await wk.first.get_attribute("href")
-                    self.log(f"    → Intermediate page — following download link", "dim")
-                elif "pluginfile.php" in tab.url:
-                    dl_href = tab.url
-                else:
-                    any_pf = tab.locator('a[href*="pluginfile.php"]')
-                    if await any_pf.count() > 0:
-                        dl_href = await any_pf.first.get_attribute("href")
-                        self.log(f"    → Found pluginfile link on page", "dim")
+                if content_type.lower().startswith(("text/html", "application/xhtml+xml")):
+                    markup = body.decode("utf-8", errors="replace")
+                    lower_markup = markup.lower()
+                    if (
+                        "/login/index.php" in final_url.lower()
+                        or 'name="username"' in lower_markup
+                        or "sign in to your account" in lower_markup
+                    ):
+                        raise RuntimeError("download redirected to a Moodle login page")
+                    plugin_url = extract_pluginfile_url(markup, final_url)
+                    if not plugin_url:
+                        raise RuntimeError("Moodle returned HTML without a downloadable file link")
+                    self.log("    → Intermediate page — fetching authenticated file URL", "dim")
+                    response = await context.request.get(
+                        plugin_url, timeout=30000, fail_on_status_code=False
+                    )
+                    body = await response.body()
+                    headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
+                    content_type = headers.get("content-type", "")
+                    final_url = response.url
 
-                if "pluginfile.php" in dl_href and "forcedownload" not in dl_href:
-                    dl_href += ("&" if "?" in dl_href else "?") + "forcedownload=1"
+                valid, reason = validate_download_response(
+                    response.status, content_type, final_url, body
+                )
+                if not valid:
+                    raise RuntimeError(reason)
 
-                self.log(f"      waiting for browser download: {dl_href}", "detail")
-                async with tab.expect_download(timeout=30000) as dl_info:
-                    try:
-                        await tab.goto(dl_href, wait_until="domcontentloaded", timeout=20000)
-                    except Exception as _nav_err:
-                        if "Download is starting" not in str(_nav_err):
-                            raise
-                        self.log("      browser reported download is starting", "detail")
-
-                dl       = await dl_info.value
-                filename = dl.suggested_filename or re.sub(r'[^\w\s\-.]', '', name).strip()[:80] or "downloaded-file"
+                filename = download_filename(headers, final_url, name)
                 local    = save_dir / filename
                 self.log(f"      suggested filename: {filename}", "detail")
 
                 if local.exists():
-                    self.log(f"    ℹ Already cached: {filename} — reusing", "dim")
+                    if local.read_bytes() == body:
+                        self.log(f"    ℹ Already cached: {filename} — reusing", "dim")
+                    else:
+                        stem, suffix, counter = local.stem, local.suffix, 1
+                        while (save_dir / f"{stem}_{counter}{suffix}").exists():
+                            counter += 1
+                        local = save_dir / f"{stem}_{counter}{suffix}"
+                        local.write_bytes(body)
+                        self.log(f"    ✓ Downloaded: {local.name}", "success")
                 else:
-                    await dl.save_as(str(local))
+                    local.write_bytes(body)
                     self.log(f"    ✓ Downloaded: {filename}", "success")
 
                 # Rename to Moodle item name so Brightspace topic title is correct
@@ -1454,11 +1491,6 @@ class ContentChecker:
                 downloaded.append((local, f))
             except Exception as e:
                 self.log(f"    ✗ {e}", "error")
-            finally:
-                try:
-                    await tab.close()
-                except Exception:
-                    pass
 
         if not downloaded:
             self.log("  ↷ Nothing downloaded.", "dim")
@@ -1946,6 +1978,375 @@ class ContentChecker:
         )
         return False
 
+    async def _create_bs_link_topic(
+        self, bs_page: "Page", course_id: str, module_id, title: str, target_url: str
+    ) -> bool:
+        """Create one ordinary Content link topic; never edits the linked resource."""
+        result = await bs_page.evaluate(
+            """async ([courseId, moduleId, title, targetUrl]) => {
+                try {
+                    const xsrf = localStorage.getItem('XSRF.Token');
+                    const headers = { 'Content-Type': 'application/json' };
+                    if (xsrf) headers['X-Csrf-Token'] = xsrf;
+                    const resp = await fetch(
+                        `/d2l/api/le/1.0/${courseId}/content/modules/${moduleId}/structure/`,
+                        {
+                            method: 'POST', credentials: 'include', headers,
+                            body: JSON.stringify({
+                                Title: title, ShortTitle: '', Type: 1,
+                                TopicType: 3, Url: targetUrl,
+                                StartDate: null, EndDate: null, DueDate: null,
+                                IsHidden: false, IsLocked: false,
+                                OpenAsExternalResource: true,
+                                Description: null
+                            })
+                        }
+                    );
+                    const body = await resp.text().catch(() => '');
+                    return { ok: resp.ok, status: resp.status, body: body.slice(0, 500) };
+                } catch (e) {
+                    return { ok: false, status: 0, body: String(e) };
+                }
+            }""",
+            [str(course_id), str(module_id), title, target_url],
+        )
+        if result and result.get("ok"):
+            return True
+        self.log(f"    ✗ Link topic API ({(result or {}).get('status', '?')}): "
+                 f"{(result or {}).get('body', '')}", "error")
+        return False
+
+    async def _resolve_moodle_url_target(self, context: "BrowserContext", href: str) -> Optional[str]:
+        """Return the external destination of a Moodle URL activity.
+
+        Brightspace topics must never send students back to Moodle, so any
+        result that is still a Moodle address is rejected.
+        """
+        try:
+            response = await context.request.get(
+                with_moodle_redirect(href), timeout=20000,
+                max_redirects=0, fail_on_status_code=False,
+            )
+            location = response.headers.get("location", "")
+            if location:
+                target = urljoin(href, location)
+            else:
+                markup = (await response.body()).decode("utf-8", errors="replace")
+                target = extract_url_workaround(markup, response.url) or ""
+        except Exception as exc:
+            self.log(f"    ✗ resolving {href}: {str(exc).splitlines()[0]}", "detail")
+            return None
+        if not target.startswith(("http://", "https://")):
+            return None
+        return target
+
+    async def _create_missing_url_topics(
+        self, bs_page: "Page", course_id: str, results: list, bs_flat: list
+    ) -> int:
+        modules = exact_module_map(bs_flat)
+        created = 0
+        for item in results:
+            if item.get("type") != "URL" or item.get("status") != "missing" or item.get("embedded"):
+                continue
+            title = str(item.get("name", "")).strip()
+            target_url = str(item.get("href", "")).strip()
+            destination = modules.get(_norm(str(item.get("section", ""))))
+            if not title or not target_url or not destination:
+                self.log(f"  ↷ URL needs review (no unique exact unit): {title or '(untitled)'}", "warning")
+                continue
+            if is_moodle_url(target_url):
+                resolved = await self._resolve_moodle_url_target(bs_page.context, target_url)
+                if resolved and is_moodle_url(resolved) and "pluginfile.php" in resolved:
+                    # The URL activity points at a Moodle-hosted file: download
+                    # and upload it like any other missing FILE.
+                    item["type"] = "FILE"
+                    item["href"] = resolved
+                    self.log(f"  → URL {title} is a Moodle file — queued for download/upload", "info")
+                    continue
+                if resolved and is_moodle_url(resolved):
+                    self.log(f"  ✗ URL {title}: target {resolved} is still on Moodle — not created", "error")
+                    continue
+                if not resolved:
+                    self.log(f"  ✗ URL {title}: could not resolve the external link behind Moodle — not created", "error")
+                    continue
+                self.log(f"    → resolved {target_url} → {resolved}", "detail")
+                target_url = resolved
+            try:
+                ok = await self._create_bs_link_topic(
+                    bs_page, course_id, destination["id"], title, target_url
+                )
+            except Exception as exc:
+                ok = False
+                self.log(f"  ✗ URL {title}: {str(exc).splitlines()[0]}", "error")
+            if ok:
+                created += 1
+                item["status"] = "exact"
+                item["matched"] = title
+                self.log(f"  ✓ Created URL: {title} → {destination['title']}", "success")
+        return created
+
+    async def _create_verified_html_topic(
+        self, bs_page: "Page", course_id: str, destination: dict, title: str,
+        source_html: str, first: bool = False,
+    ) -> bool:
+        """Create one HTML topic, verify its read-back, and roll back on failure."""
+        from content_preservation import content_is_preserved
+        from unit_overview import BrowserContentAPI, _rollback_created
+
+        api = BrowserContentAPI(bs_page, str(course_id), str(destination["id"]))
+        topic_id = None
+        try:
+            # Brightspace rejects PUT .../topics/{id}/file here (404), so the
+            # page body is sent with the create request instead.
+            topic = await api.create_html_topic(title, initial_html=source_html)
+            topic_id = topic.get("Id")
+            if topic_id is None:
+                raise RuntimeError("create returned no topic ID")
+            readback = await api.get_topic_html(topic_id)
+            preserved, detail = content_is_preserved(source_html, readback)
+            if not preserved:
+                raise RuntimeError(f"page read-back failed preservation check: {detail}")
+            if first:
+                await api.move_topic_first(topic_id)
+            # Match the unit's visibility (as the Collector does): a page in a
+            # hidden unit stays hidden until the unit is published.
+            unit_hidden = bool((await api.get_module()).get("IsHidden", False))
+            await api.set_topic_hidden(topic_id, unit_hidden)
+            verified = await api.get_topic(topic_id)
+            structure = await api.list_structure()
+            child_ids = [str(entry.get("Id")) for entry in structure or []]
+            problems = []
+            if str(verified.get("Id")) != str(topic_id):
+                problems.append("different topic ID")
+            if verified.get("Title") != title:
+                problems.append(f"title is {verified.get('Title')!r}")
+            if str(topic_id) not in child_ids:
+                problems.append("page is not in the target unit")
+            elif first and child_ids[0] != str(topic_id):
+                problems.append("page is not first in the unit")
+            if bool(verified.get("IsHidden", False)) != unit_hidden:
+                problems.append(f"IsHidden={verified.get('IsHidden')} but unit IsHidden={unit_hidden}")
+            if problems:
+                raise RuntimeError("created page could not be verified: " + "; ".join(problems))
+            if unit_hidden:
+                self.log(f"    ℹ {destination['title']} unit is hidden — page will show when the unit is made visible", "dim")
+            return True
+        except Exception as exc:
+            self.log(f"  ✗ PAGE {title}: {str(exc).splitlines()[0]}", "error")
+            if topic_id is not None:
+                await _rollback_created(api, topic_id, self.log)
+            return False
+
+    async def _create_section_overview_topics(
+        self, bs_page: "Page", course_id: str, bs_flat: list
+    ) -> int:
+        """Recreate Moodle section summaries and labels as one overview page per unit."""
+        from unit_overview import BrowserContentAPI, has_meaningful_unit_content, overview_title
+
+        modules = exact_module_map(bs_flat)
+        created = 0
+        for section, source_html in (self.moodle_section_html or {}).items():
+            destination = modules.get(_norm(section))
+            if not destination:
+                self.log(f"  ↷ Section text needs review (no unique exact unit): {section}", "warning")
+                continue
+            if not has_meaningful_unit_content(source_html):
+                continue
+            title = overview_title(destination["title"])
+            try:
+                existing = await BrowserContentAPI(
+                    bs_page, str(course_id), str(destination["id"])
+                ).list_structure()
+            except Exception as exc:
+                self.log(f"  ✗ Section text {section}: could not read unit ({str(exc).splitlines()[0]})", "error")
+                continue
+            if any(str(entry.get("Title", "")) == title for entry in existing or []):
+                self.log(f"  ↷ Overview already exists: {title}", "dim")
+                continue
+            if 'data-bpa-unresolved' in source_html:
+                self.log(f"  ⚠ {section}: some Moodle images could not be copied", "warning")
+            temp_topics: list = []
+            try:
+                source_html, temp_topics = await self._host_inline_images(
+                    bs_page, course_id, destination["id"], source_html
+                )
+            except Exception as exc:
+                self.log(f"  ✗ Section text {section}: {str(exc).splitlines()[0]}", "error")
+                continue
+            ok = await self._create_verified_html_topic(
+                bs_page, course_id, destination, title, source_html, first=True
+            )
+            # The uploaded files stay in Manage Files; only their helper topics go.
+            api = BrowserContentAPI(bs_page, str(course_id), str(destination["id"]))
+            for topic_id in temp_topics:
+                try:
+                    await api.delete_topic(topic_id)
+                except Exception as exc:
+                    self.log(f"    ⚠ leftover image topic {topic_id}: {str(exc).splitlines()[0]}", "warning")
+            if ok:
+                created += 1
+                self.log(f"  ✓ Created overview: {title}", "success")
+                for image_url in re.findall(r'src="(/content/enforced/[^"]+)"', source_html)[:3]:
+                    probe = await bs_page.context.request.get(
+                        f"{urlparse(self.bs_url).scheme}://{urlparse(self.bs_url).netloc}{image_url}",
+                        timeout=20000, fail_on_status_code=False,
+                    )
+                    if not probe.ok:
+                        self.log(f"    ⚠ image is not reachable after cleanup: {image_url} (HTTP {probe.status})", "warning")
+        return created
+
+    _DATA_URI_RE = re.compile(r'src="data:(image/[a-z.+-]+);base64,([^"]+)"', re.IGNORECASE)
+
+    async def _host_inline_images(
+        self, bs_page: "Page", course_id: str, module_id, source_html: str
+    ) -> tuple[str, list]:
+        """Upload embedded images as course files and link to them instead.
+
+        Keeping base64 images in the page makes it too large for Brightspace's
+        HTML editor to save, so each image becomes a real course file.  The
+        temporary file topics are returned for removal once the page is saved;
+        the uploaded file itself stays in Manage Files.
+        """
+        import base64 as _b64
+
+        matches = list(self._DATA_URI_RE.finditer(source_html))
+        if not matches:
+            return source_html, []
+
+        token = await bs_page.evaluate("() => localStorage.getItem('XSRF.Token') || ''")
+        if not token:
+            raise RuntimeError("no XSRF token for image upload")
+
+        base = f"{urlparse(self.bs_url).scheme}://{urlparse(self.bs_url).netloc}"
+        created, replacements = [], {}
+        for index, match in enumerate(matches, 1):
+            content_type, payload = match.group(1), match.group(2)
+            if match.group(0) in replacements:
+                continue
+            blob = _b64.b64decode(payload)
+            extension = {"image/jpeg": "jpg", "image/svg+xml": "svg"}.get(
+                content_type.lower(), content_type.split("/")[-1]
+            )
+            filename = f"bpa-image-{module_id}-{uuid.uuid4().hex[:8]}-{index}.{extension}"
+            descriptor = _json_mod.dumps({
+                "Title": filename, "ShortTitle": "", "Type": 1, "TopicType": 1,
+                "Url": filename, "StartDate": None, "EndDate": None, "DueDate": None,
+                "IsHidden": True, "IsLocked": False, "OpenAsExternalResource": None,
+                "Description": None,
+            })
+            boundary = f"bpa_{uuid.uuid4().hex}"
+            crlf = chr(13) + chr(10)
+            body = b"".join([
+                (f'--{boundary}{crlf}Content-Disposition: form-data; name=""{crlf}'
+                 f"Content-Type: application/json{crlf}{crlf}{descriptor}{crlf}").encode("utf-8"),
+                (f'--{boundary}{crlf}Content-Disposition: form-data; name=""; filename="{filename}"{crlf}'
+                 f"Content-Type: {content_type}{crlf}{crlf}").encode("utf-8"),
+                blob,
+                f"{crlf}--{boundary}--{crlf}".encode("utf-8"),
+            ])
+            response = await bs_page.context.request.post(
+                f"{base}/d2l/api/le/1.0/{course_id}/content/modules/{module_id}/structure/",
+                headers={"Content-Type": f"multipart/mixed; boundary={boundary}", "X-Csrf-Token": token},
+                data=body, timeout=60000, fail_on_status_code=False,
+            )
+            if not response.ok:
+                raise RuntimeError(f"image upload failed: HTTP {response.status}")
+            # Brightspace sometimes answers an upload with an empty body, so fall
+            # back to finding the new topic by the unique filename just sent.
+            try:
+                topic = _json_mod.loads(await response.text())
+            except Exception:
+                topic = {}
+            if not topic.get("Url"):
+                listing = await bs_page.context.request.get(
+                    f"{base}/d2l/api/le/1.75/{course_id}/content/modules/{module_id}/structure/",
+                    headers={"Accept": "application/json"}, timeout=30000, fail_on_status_code=False,
+                )
+                matches = [
+                    entry for entry in (await listing.json() if listing.ok else [])
+                    if str(entry.get("Url") or "").endswith(filename)
+                ]
+                if len(matches) != 1:
+                    raise RuntimeError(f"uploaded image could not be identified ({len(matches)} matches)")
+                topic = matches[0]
+            hosted = str(topic.get("Url") or "")
+            if not hosted:
+                raise RuntimeError("image upload returned no file URL")
+            created.append(topic.get("Id"))
+            replacements[match.group(0)] = f'src="{hosted}"'
+
+        for original, replacement in replacements.items():
+            source_html = source_html.replace(original, replacement)
+        self.log(f"    → {len(replacements)} image(s) uploaded as course files", "dim")
+        return source_html, created
+
+    async def _order_units_like_moodle(self, bs_page: "Page", course_id: str, results: list) -> None:
+        """Reorder matched topics in each unit to follow Moodle's order."""
+        from unit_overview import BrowserContentAPI
+
+        bs_flat = await self._fetch_bs_toc(bs_page, course_id)
+        modules = exact_module_map(bs_flat or [])
+        sections: dict[str, list] = {}
+        for item in results:
+            if item.get("type") != "SECTION" and valid_section_name(item.get("section")):
+                sections.setdefault(item["section"], []).append(item)
+
+        self.log("─" * 52, "dim")
+        self.log("↕ Ordering units to match Moodle…", "step")
+        for section, items in sections.items():
+            destination = modules.get(_norm(section))
+            if not destination:
+                continue
+            api = BrowserContentAPI(bs_page, str(course_id), str(destination["id"]))
+            try:
+                moves = plan_unit_order(items, await api.list_structure() or [])
+                if not moves:
+                    self.log(f"  ✓ {destination['title']}: already in Moodle order", "dim")
+                    continue
+                for topic_id in moves:
+                    await bs_page.evaluate(
+                        """async ([courseId, topicId]) => {
+                            const xsrf = localStorage.getItem('XSRF.Token');
+                            if (!xsrf) throw new Error('move topic: no XSRF token');
+                            const r = await fetch(
+                                `/d2l/api/le/1.82/${courseId}/content/order/objectId/${topicId}?position=last`,
+                                { method: 'POST', credentials: 'include', headers: { 'X-Csrf-Token': xsrf } });
+                            if (!r.ok) throw new Error(`move topic last ${r.status}: ${(await r.text()).slice(0,200)}`);
+                        }""",
+                        [str(course_id), str(topic_id)],
+                    )
+                self.log(f"  ✓ {destination['title']}: {len(moves)} item(s) put in Moodle order", "success")
+            except Exception as exc:
+                self.log(f"  ✗ {destination['title']}: could not reorder ({str(exc).splitlines()[0]})", "error")
+
+    async def _create_missing_page_topics(
+        self, bs_page: "Page", course_id: str, results: list, bs_flat: list
+    ) -> int:
+        """Create verified HTML topics using the existing preservation adapter."""
+        from unit_overview import has_meaningful_unit_content
+
+        modules = exact_module_map(bs_flat)
+        created = 0
+        for item in results:
+            if item.get("type") != "PAGE" or item.get("status") != "missing" or item.get("embedded"):
+                continue
+            title = str(item.get("name", "")).strip()
+            source_html = str(item.get("page_html", "") or "")
+            destination = modules.get(_norm(str(item.get("section", ""))))
+            if not title or not destination:
+                self.log(f"  ↷ PAGE needs review (no unique exact unit): {title or '(untitled)'}", "warning")
+                continue
+            if not source_html or not has_meaningful_unit_content(source_html):
+                self.log(f"  ↷ PAGE needs manual copy (no safe body extracted): {title}", "warning")
+                continue
+
+            if await self._create_verified_html_topic(bs_page, course_id, destination, title, source_html):
+                created += 1
+                item["status"] = "exact"
+                item["matched"] = title
+                self.log(f"  ✓ Created PAGE: {title} → {destination['title']}", "success")
+        return created
+
     async def _relink_moodle_files(
         self, context: "BrowserContext", bs_page: "Page",
         course_id: str, moodle_links: list
@@ -2029,7 +2430,7 @@ class ContentChecker:
                     """async ([courseId, topicId, replacements]) => {
                     // GET current HTML
                     const getR = await fetch(
-                        `/d2l/api/le/1.0/${courseId}/content/topics/${topicId}/file`,
+                        `/d2l/api/le/1.75/${courseId}/content/topics/${topicId}/file`,
                         { credentials: 'include' }
                     );
                     if (!getR.ok) return { error: `GET ${getR.status}` };
@@ -2049,7 +2450,7 @@ class ContentChecker:
                     const form = new FormData();
                     form.append('file', blob, 'index.html');
                     const putR = await fetch(
-                        `/d2l/api/le/1.0/${courseId}/content/topics/${topicId}/file`,
+                        `/d2l/api/le/1.75/${courseId}/content/topics/${topicId}/file`,
                         { method: 'PUT', body: form, credentials: 'include' }
                     );
                     const putBody = await putR.text().catch(() => '');
@@ -2116,6 +2517,140 @@ class ContentChecker:
         self.log(f"✓ {n_mod} modules, {n_topic} topics", "success")
 
     # ── Moodle scraper ────────────────────────────────────────────────────────
+
+    async def _enable_moodle_edit_mode(self, tab: Page) -> bool:
+        """Enable Moodle editing and prove the post-navigation page is editable."""
+        async def state() -> dict:
+            return await tab.evaluate("""() => {
+                const toggle = document.querySelector(
+                    '#user-editing-switch, input[name="setmode"][type="checkbox"], '
+                    + '.editmode-switch-form input[type="checkbox"]'
+                );
+                const enabled = document.body.classList.contains('editing')
+                    || !!(toggle && toggle.checked)
+                    || !!document.querySelector('.editing_move, [data-action="editcmodule"]');
+                return { enabled, hasToggle: !!toggle };
+            }""")
+
+        current = await state()
+        if current.get("enabled"):
+            self.log("  ✓ Moodle Edit mode is enabled", "success")
+            return True
+        if not current.get("hasToggle"):
+            self.log("✗ Moodle Edit mode toggle was not found", "error")
+            return False
+
+        self.log("  Enabling Moodle Edit mode…", "info")
+        try:
+            await tab.evaluate("""() => {
+                const toggle = document.querySelector(
+                    '#user-editing-switch, input[name="setmode"][type="checkbox"], '
+                    + '.editmode-switch-form input[type="checkbox"]'
+                );
+                if (!toggle) throw new Error('edit toggle missing');
+                toggle.click();
+            }""")
+            try:
+                await tab.wait_for_load_state("domcontentloaded", timeout=15000)
+            except Exception:
+                pass
+            await tab.wait_for_timeout(1200)
+            verified = await state()
+        except Exception as exc:
+            self.log(f"✗ Could not enable Moodle Edit mode: {str(exc).splitlines()[0]}", "error")
+            return False
+        if not verified.get("enabled"):
+            self.log("✗ Moodle Edit mode did not become enabled; aborting before Brightspace writes", "error")
+            return False
+        self.log("  ✓ Moodle Edit mode enabled and verified", "success")
+        return True
+
+    async def _scrape_moodle_section_html(self, tab: Page) -> dict:
+        """Return {section name: HTML} of each section's summary plus its labels.
+
+        Images are inlined as data URIs using the authenticated Moodle session,
+        so the resulting Brightspace page never depends on Moodle.
+        """
+        sections = await tab.evaluate("""async () => {
+            const STRIP = 'script,style,noscript,form,button,.actions,.action-menu,'
+                + '.activity-completion,.completion-info,.dropdown,.editing_move,'
+                + '.section-handle,.activity-dates,.availabilityinfo';
+            async function inlineImages(root) {
+                for (const img of root.querySelectorAll('img[src]')) {
+                    const src = new URL(img.getAttribute('src'), location.href);
+                    if (src.host !== location.host) continue;
+                    try {
+                        const r = await fetch(src.href, { credentials: 'include' });
+                        const blob = await r.blob();
+                        if (!r.ok || !blob.type.startsWith('image/') || blob.size > 3000000) {
+                            img.setAttribute('data-bpa-unresolved', src.href);
+                            continue;
+                        }
+                        img.setAttribute('src', await new Promise((ok, fail) => {
+                            const reader = new FileReader();
+                            reader.onload = () => ok(reader.result);
+                            reader.onerror = fail;
+                            reader.readAsDataURL(blob);
+                        }));
+                        img.removeAttribute('srcset');
+                    } catch (_) {
+                        img.setAttribute('data-bpa-unresolved', src.href);
+                    }
+                }
+            }
+            function clean(node) {
+                const clone = node.cloneNode(true);
+                clone.querySelectorAll(STRIP).forEach(el => el.remove());
+                clone.querySelectorAll('[href]').forEach(el => {
+                    try {
+                        const target = new URL(el.getAttribute('href'), location.href);
+                        if (target.host === location.host && el.tagName === 'A') {
+                            // Never link students back to Moodle; the linked
+                            // item is recreated as its own Brightspace topic.
+                            el.replaceWith(...el.childNodes);
+                        } else {
+                            el.setAttribute('href', target.href);
+                        }
+                    } catch (_) {}
+                });
+                return clone;
+            }
+            const out = [];
+            for (const section of document.querySelectorAll('li.section, li.section.main')) {
+                const heading = section.querySelector(
+                    'h3[data-for="section_title"], h4[data-for="section_title"], .sectionname, h3, h4');
+                const name = ((heading && heading.textContent) || section.getAttribute('data-sectionname') || '').trim();
+                const parts = [];
+                const summary = section.querySelector('.summarytext, .summary');
+                if (summary && summary.closest('li.section') === section) parts.push(clean(summary));
+                for (const label of section.querySelectorAll('li.activity.modtype_label')) {
+                    if (label.closest('li.section') !== section) continue;
+                    const body = label.querySelector('.activity-altcontent, .contentwithoutlink, .no-overflow');
+                    if (body) parts.push(clean(body));
+                }
+                const holder = document.createElement('div');
+                parts.forEach(p => holder.appendChild(p));
+                if (!holder.textContent.trim() && !holder.querySelector('img,iframe,video')) continue;
+                await inlineImages(holder);
+                out.push({ name, html: holder.innerHTML.trim() });
+            }
+            return out;
+        }""")
+        result = {}
+        for entry in sections or []:
+            if valid_section_name(entry.get("name")) and entry.get("html"):
+                result[entry["name"]] = entry["html"]
+        if result:
+            self.log(f"  ✓ Moodle section text captured for {len(result)} section(s)", "dim")
+        return result
+
+    async def _moodle_dom_inventory(self, tab: Page) -> dict:
+        return await tab.evaluate("""() => {
+            const sections = [...document.querySelectorAll('li.section, li.section.main')];
+            const activities = [...document.querySelectorAll('li.activity')]
+                .filter(node => node.closest('li.section'));
+            return { sections: sections.length, activities: activities.length };
+        }""")
 
     async def _scrape_moodle(self, context: BrowserContext) -> Optional[list]:
         self.log("Opening Moodle in new tab…", "info")
@@ -2318,10 +2853,61 @@ class ContentChecker:
             if "course/view.php" not in tab.url:
                 self.log("⚠ Still not on a course/view.php page", "warning")
 
+            if not await self._enable_moodle_edit_mode(tab):
+                await tab.close()
+                return None
+
+            inventory = await self._moodle_dom_inventory(tab)
+
             try:
                 items = await tab.evaluate(_JS_MOODLE_ITEMS)
             except Exception as e:
                 self.log(f"✗ Scrape failed: {e}", "error")
+                await tab.close()
+                return None
+
+            scraped_sections = sum(1 for item in items if item.get("type") == "SECTION")
+            scraped_activities = sum(1 for item in items if item.get("type") != "SECTION")
+            expected_sections = int(inventory.get("sections") or 0)
+            expected_activities = int(inventory.get("activities") or 0)
+            if (
+                expected_sections == 0
+                or expected_activities == 0
+                or scraped_sections != expected_sections
+                or scraped_activities != expected_activities
+            ):
+                self.log("", "error")
+                self.log("✗ ABORTED — Moodle scrape is incomplete", "error")
+                self.log(
+                    f"   DOM showed {expected_sections} section(s) and {expected_activities} activity row(s); "
+                    f"scraper returned {scraped_sections} section(s) and {scraped_activities} activity item(s).",
+                    "error",
+                )
+                self.log("   No Brightspace writes were attempted.", "error")
+                await tab.close()
+                return None
+
+            blank_sections = [item for item in items if item.get("type") == "SECTION" and not valid_section_name(item.get("name"))]
+            if blank_sections:
+                self.log(
+                    f"  ⚠ {len(blank_sections)} blank Moodle section(s) will never be created as Brightspace units",
+                    "warning",
+                )
+
+            bad_links = [
+                item for item in items
+                if item.get("type") in {"FILE", "URL", "PAGE", "FOLDER", "ASSIGN", "QUIZ"}
+                and not valid_activity_url(item.get("href"), _course_url)
+            ]
+            if bad_links:
+                self.log("", "error")
+                self.log("✗ ABORTED — Moodle activity links are incomplete", "error")
+                for item in bad_links[:10]:
+                    self.log(
+                        f"   {item.get('type')}: {item.get('name')} → {item.get('href') or '(no link)'}",
+                        "error",
+                    )
+                self.log("   No Brightspace writes were attempted.", "error")
                 await tab.close()
                 return None
 
@@ -2333,6 +2919,12 @@ class ContentChecker:
                 await self._abort_bad_scrape(tab, items, suspect)
                 await tab.close()
                 return None
+
+            try:
+                self.moodle_section_html = await self._scrape_moodle_section_html(tab)
+            except Exception as exc:
+                self.moodle_section_html = {}
+                self.log(f"  ⚠ Could not read Moodle section text: {str(exc).splitlines()[0]}", "warning")
 
             # Deep scan: (1) scan label bodies on the course page itself,
             # (2) navigate to each PAGE topic for its body HTML,
@@ -2879,7 +3471,7 @@ class ContentChecker:
                 await tab.goto(url, wait_until="domcontentloaded", timeout=20000)
                 await tab.wait_for_timeout(800)
 
-                results = await tab.evaluate("""() => {
+                page_data = await tab.evaluate("""() => {
                     const found = [];
 
                     // pluginfile.php links
@@ -2935,8 +3527,32 @@ class ContentChecker:
                         found.push({ type: 'VIDEO', name, href: videoId ? 'https://www.youtube.com/watch?v=' + videoId : src, embedded: true });
                     });
 
-                    return found;
+                    const root = document.querySelector(
+                        '#region-main .box.generalbox, #region-main [role="main"], '
+                        + '#region-main .activity-description, #region-main .content, '
+                        + '#region-main .no-overflow, [role="main"] .box.generalbox'
+                    );
+                    let pageHtml = '';
+                    if (root) {
+                        const clone = root.cloneNode(true);
+                        clone.querySelectorAll(
+                            'script,style,noscript,form,nav,.activity-navigation,.secondary-navigation,'
+                            + '.completion-info,.activity-header,.tertiary-navigation'
+                        ).forEach(node => node.remove());
+                        clone.querySelectorAll('[href]').forEach(node => {
+                            try { node.setAttribute('href', new URL(node.getAttribute('href'), location.href).href); } catch (_) {}
+                        });
+                        clone.querySelectorAll('[src]').forEach(node => {
+                            try { node.setAttribute('src', new URL(node.getAttribute('src'), location.href).href); } catch (_) {}
+                        });
+                        pageHtml = clone.innerHTML.trim();
+                    }
+                    return { found, pageHtml };
                 }""")
+
+                from style_migrator import _clean_moodle_html
+                item["page_html"] = _clean_moodle_html(page_data.get("pageHtml", ""))
+                results = page_data.get("found", [])
 
                 for r in results:
                     r["section"]      = section
@@ -3682,6 +4298,7 @@ class ContentChecker:
             missing_secs = [
                 r["name"] for r in results
                 if r.get("type") == "SECTION" and r["status"] == "missing"
+                and valid_section_name(r.get("name"))
             ]
             if missing_secs and self.full_run:
                 self.log("─" * 52, "dim")
@@ -3754,6 +4371,16 @@ class ContentChecker:
             self._log_report(results)
             self._log_link_report(moodle_links)
 
+            if self.full_run:
+                created_urls = await self._create_missing_url_topics(page, course_id, results, bs_flat)
+                created_pages = await self._create_missing_page_topics(page, course_id, results, bs_flat)
+                created_overviews = await self._create_section_overview_topics(page, course_id, bs_flat)
+                if created_urls or created_pages or created_overviews:
+                    self.log(f"🔗 URL topics created: {created_urls}", "step")
+                    self.log(f"📖 PAGE topics created: {created_pages}", "step")
+                    self.log(f"🏷 Section overview pages created: {created_overviews}", "step")
+                    bs_flat = await self._fetch_bs_toc(page, course_id)
+
             # DEBUG: show file item counts
             moodle_files = [r for r in results if r.get("type") == "FILE"]
             missing_files = [r for r in results if r.get("status") == "missing" and r.get("type") == "FILE"]
@@ -3811,6 +4438,9 @@ class ContentChecker:
                 else:
                     self.log("↷ Existing activity links were not attached.", "dim")
 
+            if self.full_run and not self.stop_flag[0]:
+                await self._order_units_like_moodle(page, course_id, results)
+
             if moodle_links and getattr(self, "do_relink", False):
                 t0 = time.time()
                 await self._relink_moodle_files(context, page, course_id, moodle_links)
@@ -3846,8 +4476,11 @@ class ContentChecker:
 
             if self.on_complete:
                 self.on_complete()
-            while browser.is_connected():
-                await asyncio.sleep(0.5)
+            if self.keep_browser_open:
+                while browser.is_connected():
+                    await asyncio.sleep(0.5)
+            elif browser.is_connected():
+                await browser.close()
 
         except Exception as e:
             self.log(f"✗ Unexpected error: {e}", "error")

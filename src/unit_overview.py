@@ -145,11 +145,11 @@ class BrowserContentAPI:
             [self.course_id, self.module_id],
         )
 
-    async def create_html_topic(self, title: str) -> dict:
+    async def create_html_topic(self, title: str, initial_html: str | None = None) -> dict:
         token = uuid.uuid4().hex
         filename = f"bpa-overview-{self.module_id}-{token}.html"
         result = await self.page.evaluate(
-            r"""async ([courseId, moduleId, title, filename, marker]) => {
+            r"""async ([courseId, moduleId, title, filename, marker, initialHtml]) => {
                 const xsrf = localStorage.getItem('XSRF.Token');
                 if (!xsrf) throw new Error('create topic: no XSRF token');
                 const descriptor = {
@@ -158,7 +158,7 @@ class BrowserContentAPI:
                     IsHidden: true, IsLocked: false, OpenAsExternalResource: null,
                     Description: null
                 };
-                const stub = `<p data-bpa-overview-run="${marker}"></p>`;
+                const stub = initialHtml ?? `<p data-bpa-overview-run="${marker}"></p>`;
                 const boundary = `bpa_${marker}`;
                 const body =
                     `--${boundary}\r\nContent-Disposition: form-data; name=""\r\n` +
@@ -185,7 +185,7 @@ class BrowserContentAPI:
                     throw new Error(`created topic could not be identified uniquely (${matches.length} matches)`);
                 return matches[0];
             }""",
-            [self.course_id, self.module_id, title, filename, token],
+            [self.course_id, self.module_id, title, filename, token, initial_html],
         )
         return result
 
@@ -203,7 +203,7 @@ class BrowserContentAPI:
     async def get_topic_html(self, topic_id: int | str) -> str:
         return await self.page.evaluate(
             """async ([courseId, topicId]) => {
-                const r = await fetch(`/d2l/api/le/1.0/${courseId}/content/topics/${topicId}/file`,
+                const r = await fetch(`/d2l/api/le/1.75/${courseId}/content/topics/${topicId}/file`,
                     { credentials: 'include' });
                 if (!r.ok) throw new Error(`GET topic file ${r.status}: ${(await r.text()).slice(0,200)}`);
                 const type = (r.headers.get('content-type') || '').toLowerCase();
@@ -222,7 +222,7 @@ class BrowserContentAPI:
                 const form = new FormData();
                 form.append('file', blob, 'index.html');
                 const headers = { 'X-Csrf-Token': xsrf };
-                const r = await fetch(`/d2l/api/le/1.0/${courseId}/content/topics/${topicId}/file`,
+                const r = await fetch(`/d2l/api/le/1.75/${courseId}/content/topics/${topicId}/file`,
                     { method: 'PUT', credentials: 'include', headers, body: form });
                 if (!r.ok) throw new Error(`PUT topic file ${r.status}: ${(await r.text()).slice(0,200)}`);
             }""",
