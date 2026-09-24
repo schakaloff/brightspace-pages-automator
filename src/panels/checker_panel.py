@@ -27,6 +27,12 @@ class CheckerPanel(QWidget):
         self._h5p_skip_flag      = [False]
         self._stop_flag          = [False]
         self._worker_thread      = None
+        self._worker_loop        = None
+        self._worker_task        = None
+        self._active_dialogs     = []
+        self._moodle_ready_bound = False
+        self._h5p_ready_bound    = False
+        self._h5p_skip_bound     = False
         self._build()
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_log)
@@ -52,12 +58,15 @@ class CheckerPanel(QWidget):
         layout.addWidget(self._bs_entry)
         layout.addSpacing(12)
 
-        layout.addWidget(_form_label("MOODLE COURSE URL"))
+        layout.addWidget(_form_label("MOODLE COURSE OR SECTION URL"))
         layout.addSpacing(4)
         self._moodle_entry = QLineEdit()
         self._moodle_entry.setPlaceholderText("https://mymoodle.okanagan.bc.ca/course/view.php?id=…")
         self._moodle_entry.setFixedHeight(40)
-        self._moodle_entry.setToolTip("Paste the Moodle course home URL.\nRequires Teacher-level access to download files and H5P.")
+        self._moodle_entry.setToolTip(
+            "Paste a Moodle course home or section URL. A section URL checks only that section.\n"
+            "Requires Teacher-level access to download files and H5P."
+        )
         layout.addWidget(self._moodle_entry)
         layout.addSpacing(12)
 
@@ -86,6 +95,9 @@ class CheckerPanel(QWidget):
 
         h5p_act = run_menu.addAction("H5P — Insert Only (already uploaded)")
         h5p_act.triggered.connect(self._start_phase_b)
+
+        order_act = run_menu.addAction("Order Existing Pages Like Moodle")
+        order_act.triggered.connect(self._start_order_only)
 
         run_menu.addSeparator()
 
@@ -185,7 +197,10 @@ class CheckerPanel(QWidget):
             "chk_moodle_url": self._moodle_entry.text().strip(),
         })
 
-    def _run_worker(self, phase_b: bool = False, full_run: bool = False):
+    def _run_worker(self, phase_b: bool = False, full_run: bool = False,
+                    order_only: bool = False):
+        if self._run_btn.text() == "⏹ Stop":
+            return
         bs_url     = self._bs_entry.text().strip()
         moodle_url = self._moodle_entry.text().strip()
         if not bs_url and not moodle_url:
@@ -193,6 +208,9 @@ class CheckerPanel(QWidget):
             return
         if phase_b and not bs_url:
             self._log.append_log("Paste a Brightspace URL first.", "warning")
+            return
+        if order_only and (not bs_url or not moodle_url):
+            self._log.append_log("Paste both course URLs to match their page order.", "warning")
             return
 
         self.save_state()
@@ -230,7 +248,9 @@ class CheckerPanel(QWidget):
             # file-checklist dialog and let _poll_log show it on the GUI thread.
             result = [False]; ev = _t.Event()
             q.put(("__CHK_CONFIRM__", (msg, result, ev)))
-            ev.wait()
+            while not ev.wait(0.1):
+                if self._stop_flag[0]:
+                    return False
             return result[0]
 
         def notify(title: str, text: str) -> None:
@@ -241,18 +261,23 @@ class CheckerPanel(QWidget):
             result = ["skip"]
             event = _t.Event()
             q.put(("__CHK_H5P_GRADE_RECOVERY__", (item_name, result, event)))
-            event.wait()
+            while not event.wait(0.1):
+                if self._stop_flag[0]:
+                    return "stop"
             return result[0]
 
         def h5p_recovery(failures: list[dict]) -> list[dict]:
             result = []
             event = _t.Event()
             q.put(("__CHK_H5P_FILE_RECOVERY__", (failures, result, event)))
-            event.wait()
+            while not event.wait(0.1):
+                if self._stop_flag[0]:
+                    return []
             return result
 
         def worker():
             done_sent = [False]
+            owned_task = [None]
             def on_done():
                 if not done_sent[0]:
                     done_sent[0] = True
@@ -291,17 +316,32 @@ class CheckerPanel(QWidget):
                 checker.file_checklist_result = file_result
                 checker.h5p_skip_flag = skip_flag
                 checker.stop_flag = self._stop_flag
+                checker.order_only = order_only
+                checker.keep_browser_open = not order_only
                 if phase_b:
                     checker.do_relink = False
                     checker.do_h5p_embed = True
                     checker.h5p_phase_b_only = True
-                asyncio.run(checker.run())
+                async def run_checker():
+                    self._worker_loop = asyncio.get_running_loop()
+                    self._worker_task = asyncio.current_task()
+                    owned_task[0] = self._worker_task
+                    if self._stop_flag[0]:
+                        raise asyncio.CancelledError()
+                    await checker.run()
+
+                asyncio.run(run_checker())
+            except asyncio.CancelledError:
+                q.put(("⏹ Checker stopped by user.", "warning"))
             except Exception as e:
                 msg, detail = friendly_error(e)
                 q.put((f"Error: {msg}", "error"))
                 if detail != msg:
                     q.put((detail, "detail"))
             finally:
+                if self._worker_task is owned_task[0]:
+                    self._worker_task = None
+                    self._worker_loop = None
                 on_done()
 
         self._worker_thread = threading.Thread(target=worker, daemon=True)
@@ -323,16 +363,68 @@ class CheckerPanel(QWidget):
             return
         self._run_worker(phase_b=True, full_run=False)
 
+    def _start_order_only(self):
+        if not self._mw.chromium_ready:
+            self._log.append_log("Browser engine still installing — please wait.", "warning")
+            return
+        self._run_worker(order_only=True)
+
     def _stop_run(self):
-        """User clicked Stop — set flag to exit early."""
+        """Cancel the active browser task and release any user prompt waits."""
+        if self._stop_flag[0]:
+            return
         self._stop_flag[0] = True
-        self._log.append_log("Stopping… (finishing current task)", "warning")
+        self._run_btn.setEnabled(False)
+        self._log.append_log("Stopping Checker…", "warning")
+        for event in (self._moodle_ready_event, self._h5p_ready_event,
+                      self._file_checklist_event):
+            if event:
+                event.set()
+        for dialog in list(self._active_dialogs):
+            dialog.close()
+        loop, task = self._worker_loop, self._worker_task
+        if loop and task and loop.is_running():
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                pass  # The worker finished while Stop was being clicked.
+
+    def _show_prompt(self, dialog, on_finished=None):
+        """Keep Checker controls responsive while a user prompt is open."""
+        self._active_dialogs.append(dialog)
+
+        def finished(_result):
+            if dialog in self._active_dialogs:
+                self._active_dialogs.remove(dialog)
+            try:
+                if on_finished:
+                    on_finished()
+            finally:
+                dialog.deleteLater()
+
+        dialog.finished.connect(finished)
+        dialog.setModal(False)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _close_prompt(self, title):
+        for dialog in list(self._active_dialogs):
+            if dialog.windowTitle() == title:
+                dialog.close()
 
     def _poll_log(self):
         try:
             while True:
                 msg, tag = self._log_queue.get_nowait()
+                if self._stop_flag[0] and msg.startswith("__CHK_"):
+                    if msg in ("__CHK_CONFIRM__", "__CHK_H5P_GRADE_RECOVERY__",
+                               "__CHK_FILE_CHECKLIST__", "__CHK_H5P_FILE_RECOVERY__"):
+                        tag[-1].set()
+                    continue
                 if msg == "__DONE__":
+                    for dialog in list(self._active_dialogs):
+                        dialog.close()
                     self._stop_flag[0] = False
                     self._run_btn.setText("Run Check"); self._run_btn.setEnabled(True)
                     try:
@@ -352,11 +444,10 @@ class CheckerPanel(QWidget):
                     self.step_success.emit()
                 elif msg == "__CHK_MOODLE_WAITING__":
                     self._ready_btn.setText("Ready — Scrape Now")
-                    try:
-                        self._ready_btn.clicked.disconnect()
-                    except RuntimeError:
-                        pass
+                    if self._moodle_ready_bound:
+                        self._ready_btn.clicked.disconnect(self._moodle_ready)
                     self._ready_btn.clicked.connect(self._moodle_ready)
+                    self._moodle_ready_bound = True
                     self._moodle_hint.show()
                     self._ready_btn.show()
                     # Front-most popup too — in-app buttons are easy to miss
@@ -371,23 +462,19 @@ class CheckerPanel(QWidget):
                     ready = dlg.addButton("Ready — Scrape Now", QMessageBox.ButtonRole.AcceptRole)
                     dlg.addButton("I'll use the app buttons", QMessageBox.ButtonRole.RejectRole)
                     dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-                    dlg.raise_(); dlg.activateWindow()
-                    dlg.exec()
-                    if dlg.clickedButton() is ready:
-                        self._moodle_ready()
+                    self._show_prompt(dlg, lambda: self._moodle_ready()
+                                      if not self._stop_flag[0] and dlg.clickedButton() is ready else None)
                 elif msg == "__CHK_H5P_WAITING__":
                     self._h5p_hint.show()
                     self._h5p_ready_btn.show(); self._h5p_skip_btn.show()
-                    try:
-                        self._h5p_ready_btn.clicked.disconnect()
-                    except RuntimeError:
-                        pass
-                    try:
-                        self._h5p_skip_btn.clicked.disconnect()
-                    except RuntimeError:
-                        pass
+                    if self._h5p_ready_bound:
+                        self._h5p_ready_btn.clicked.disconnect(self._h5p_ready)
+                    if self._h5p_skip_bound:
+                        self._h5p_skip_btn.clicked.disconnect(self._h5p_skip)
                     self._h5p_ready_btn.clicked.connect(self._h5p_ready)
                     self._h5p_skip_btn.clicked.connect(self._h5p_skip)
+                    self._h5p_ready_bound = True
+                    self._h5p_skip_bound = True
                     from PySide6.QtWidgets import QMessageBox
                     dlg = QMessageBox(self)
                     dlg.setWindowTitle("Action needed — H5P download")
@@ -400,12 +487,13 @@ class CheckerPanel(QWidget):
                     skip  = dlg.addButton("Skip H5P", QMessageBox.ButtonRole.DestructiveRole)
                     dlg.addButton("I'll use the app buttons", QMessageBox.ButtonRole.RejectRole)
                     dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-                    dlg.raise_(); dlg.activateWindow()
-                    dlg.exec()
-                    if dlg.clickedButton() is ready:
-                        self._h5p_ready()
-                    elif dlg.clickedButton() is skip:
-                        self._h5p_skip()
+                    def h5p_choice():
+                        if not self._stop_flag[0]:
+                            if dlg.clickedButton() is ready:
+                                self._h5p_ready()
+                            elif dlg.clickedButton() is skip:
+                                self._h5p_skip()
+                    self._show_prompt(dlg, h5p_choice)
                 elif msg == "__CHK_NOTIFY__":
                     title, text = tag
                     from PySide6.QtWidgets import QMessageBox
@@ -414,8 +502,7 @@ class CheckerPanel(QWidget):
                     dlg.setText(text)
                     dlg.setStandardButtons(QMessageBox.StandardButton.Ok)
                     dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-                    dlg.raise_(); dlg.activateWindow()
-                    dlg.exec()
+                    self._show_prompt(dlg)
                 elif msg == "__CHK_CONFIRM__":
                     conf_msg, result_ref, event = tag
                     from PySide6.QtWidgets import QMessageBox
@@ -427,15 +514,18 @@ class CheckerPanel(QWidget):
                     )
                     dlg.setDefaultButton(QMessageBox.StandardButton.No)
                     dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-                    dlg.raise_()
-                    dlg.activateWindow()
-                    result_ref[0] = dlg.exec() == QMessageBox.StandardButton.Yes
-                    event.set()
+                    def confirm_choice():
+                        result_ref[0] = (
+                            not self._stop_flag[0]
+                            and dlg.clickedButton() is dlg.button(QMessageBox.StandardButton.Yes)
+                        )
+                        event.set()
+                    self._show_prompt(dlg, confirm_choice)
                 elif msg == "__CHK_FILE_CHECKLIST__":
                     data_json, result_list, event = tag
                     from gui_dialogs import FileChecklistDialog
                     dlg = FileChecklistDialog(data_json, result_list, event, self)
-                    dlg.exec()
+                    self._show_prompt(dlg)
                 elif msg == "__CHK_H5P_GRADE_RECOVERY__":
                     item_name, result_ref, event = tag
                     from PySide6.QtWidgets import QMessageBox
@@ -449,33 +539,40 @@ class CheckerPanel(QWidget):
                     retry = dlg.addButton("Retry Automatically", QMessageBox.ButtonRole.ActionRole)
                     skip = dlg.addButton("Skip This Item", QMessageBox.ButtonRole.DestructiveRole)
                     stop = dlg.addButton("Stop Run", QMessageBox.ButtonRole.RejectRole)
-                    dlg.exec()
-                    clicked = dlg.clickedButton()
-                    result_ref[0] = ("continue" if clicked is fixed else "retry" if clicked is retry
-                                     else "stop" if clicked is stop else "skip")
-                    event.set()
+                    def grade_choice():
+                        clicked = dlg.clickedButton()
+                        result_ref[0] = ("stop" if self._stop_flag[0] or clicked is stop
+                                         else "continue" if clicked is fixed else "retry" if clicked is retry
+                                         else "skip")
+                        event.set()
+                        if result_ref[0] == "stop":
+                            self._stop_run()
+                    self._show_prompt(dlg, grade_choice)
                 elif msg == "__CHK_H5P_FILE_RECOVERY__":
                     failures, result_ref, event = tag
                     from gui_dialogs import H5PRecoveryDialog
-                    H5PRecoveryDialog(failures, result_ref, event, self).exec()
+                    self._show_prompt(H5PRecoveryDialog(failures, result_ref, event, self))
                 else:
                     self._log.append_log(msg, tag)
         except queue.Empty:
             pass
 
     def _moodle_ready(self):
+        self._close_prompt("Action needed — Moodle")
         self._moodle_hint.hide()
         self._ready_btn.hide()
         if self._moodle_ready_event:
             self._moodle_ready_event.set()
 
     def _h5p_ready(self):
+        self._close_prompt("Action needed — H5P download")
         self._h5p_hint.hide()
         self._h5p_ready_btn.hide(); self._h5p_skip_btn.hide()
         if self._h5p_ready_event:
             self._h5p_ready_event.set()
 
     def _h5p_skip(self):
+        self._close_prompt("Action needed — H5P download")
         self._h5p_hint.hide()
         self._h5p_ready_btn.hide(); self._h5p_skip_btn.hide()
         self._h5p_skip_flag[0] = True

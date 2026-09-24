@@ -17,6 +17,8 @@ def _strip_color_from_style(style: str) -> str:
 
 def _clean_html(html: str) -> str:
     from bs4 import BeautifulSoup
+    from icon_shortcodes import replace_fontawesome_shortcodes
+    html = replace_fontawesome_shortcodes(html)
     soup = BeautifulSoup(html, "lxml")
 
     # strip tags that add no content value, but preserve Kaltura player scripts
@@ -31,9 +33,14 @@ def _clean_html(html: str) -> str:
     # remove all data-* and aria-* attributes, plus common Brightspace noise
     noise_attrs = {"data-d2l-uid", "data-when-user-interacts", "data-placeholder"}
     for tag in soup.find_all(True):
+        is_bpa_icon = tag.name == "span" and bool(tag.get("data-bpa-icon"))
         attrs_to_remove = [
             a for a in list(tag.attrs)
-            if a.startswith("data-") or a.startswith("aria-") or a in noise_attrs
+            if (
+                (a.startswith("data-") and not (is_bpa_icon and a == "data-bpa-icon"))
+                or (a.startswith("aria-") and not (is_bpa_icon and a == "aria-label"))
+                or a in noise_attrs
+            )
         ]
         for a in attrs_to_remove:
             del tag.attrs[a]
@@ -192,6 +199,72 @@ async def apply_style(
         source_html=cleaned_html,
         style_reference_html=style_reference_html or "",
     )
+    prompt += (
+        "\n\nICON CUES: Preserve every <span data-bpa-icon=\"...\"> element, its "
+        "symbol, and its aria-label. Style each as a restrained, compact cue using "
+        "the theme accent colour; keep it immediately beside the text it introduces. "
+        "Do not replace these authored cues with a different library or print any "
+        "[fa-*] shortcode. Do not add new decorative icons to resource rows."
+    )
+    if "BPA: CLASSIC" in (style_reference_html or ""):
+        prompt += (
+            "\n\nCLASSIC PRESET OVERRIDE: Follow the supplied classic card-and-gradient "
+            "reference instead of the calm-resource direction above. Do not add info-list "
+            "panels or action-link buttons unless they already exist in the source. Preserve "
+            "the classic card spacing, heading treatment, and ordinary underlined links."
+        )
+    else:
+        prompt += (
+            "\n\nCALM PRESET READABILITY OVERRIDE: Follow the supplied reference's quieter "
+            "academic proportions. Do not add icons to labelled information rows and do not use "
+            "vertical accent bars on the hero, information groups, or schedule groups. Do not use "
+            "the theme colour for borders or outlines. Use spacing, pale backgrounds, and neutral "
+            "gray rules for separation. Keep labels in normal case, at a readable size, with no "
+            "wide letter spacing. "
+            "Use comfortable body text rather than microcopy. An .action-link is a restrained "
+            "soft-background action, never a filled promotional call-to-action. On a page that is "
+            "mostly files and links, keep the first section close to the page title: no large empty "
+            "gap, decorative short line under section headings, nested card, or oversized section "
+            "padding. Use readable link titles and compact rows with subtle neutral separators. "
+            "Give the outer .main-container a resource-directory class only when the page is mainly "
+            "a files-and-links directory; normal reading or course-information pages keep their "
+            "regular spacing.\n\n"
+            "RESOURCE DIRECTORY OVERRIDE: For an unlabeled, mixed resource list, separate ordinary "
+            "web/course links from downloadable files. Put ordinary links in one Links section using "
+            ".resource-section, .link-list, and .link-row. Put downloadable files in one Files section "
+            "using .resource-row and .resource-link. Preserve source order within each group, and do "
+            "not duplicate a resource. When the source already has meaningful headings such as "
+            "Lecture Slides, Lecture Recordings, or Course Materials, keep each resource directly "
+            "under its heading in the original order; never leave that heading empty while moving "
+            "its links to a generic Links or Files section. Treat a link as a file when its URL "
+            "or label identifies PDF, XLS/XLSX, DOC/DOCX, PPT/PPTX, ZIP, or another downloadable "
+            "course file, including /content/enforced/ URLs. In an unlabeled directory, keep "
+            "internal /d2l/ topic links in Links. "
+            "Do not invent either section when that resource type is absent.\n\n"
+            "ACCESSIBLE STRUCTURE: Use exactly one <main class=\"content-body\"> for the page "
+            "content. Keep heading levels in order: h1 for the page title, h2 for major sections, "
+            "and h3 for subsections such as book titles. Do not jump from h2 to h4. Do not leave "
+            "an empty Lecture Slides section when slide topic links are present.\n\n"
+            "PLAIN RESOURCE ROWS: Each resource is one simple paragraph with a readable underlined "
+            "text link. Do not add PDF/LINK/PAGE badges, icon fonts, SVGs, emoji, pseudo-element "
+            "icons, second Open/Download actions, or a repeated file type when the title already "
+            "makes it clear. Add metadata only when it gives the learner useful context.\n\n"
+            "BRIGHTSPACE AUTHORING: Generated resources must remain easy to edit and mouse-copy in "
+            "Brightspace's visual editor. A .link-row and .resource-row is a simple p container, "
+            "never an anchor. Do not use CSS Grid, Flexbox, tables, fixed columns, or nested layout "
+            "wrappers for resource rows; copied inner content must remain readable even if the editor "
+            "does not include the outer p element. Give each resource exactly one shallow text-only anchor: "
+            "a.link-title for a web/course link or a.resource-link for a file. That anchor may contain "
+            "only its visible human-readable title, with no nested spans, icons, metadata, or action "
+            "text. Put optional .link-meta or .resource-meta in a sibling span after the anchor. Do "
+            "not create a second Open or Download link, trailing action column, button, arrow, or "
+            "duplicate href. Avoid generated text in CSS pseudo-elements. If a raw source URL is "
+            "replaced visually by a readable title, preserve its complete original text in a separate "
+            ".sr-only sibling outside the anchor. Every visible icon and text node must exist in the "
+            "HTML rather than a CSS pseudo-element. Keep the markup shallow so a non-technical "
+            "instructor can select the title, use Edit Link, or mouse-copy and paste the row without "
+            "collapsing its width or corrupting it."
+        )
 
     client = anthropic.AsyncAnthropic(api_key=api_key)
 
@@ -275,6 +348,11 @@ async def apply_style(
                 result = "\n".join(lines[start:end]).strip()
 
             result = _restore_kaltura_sizing(cleaned_html, result, log=log)
+            # The API can vary its link target from page to page. Keep the
+            # authoring behavior deterministic, including Brightspace's
+            # "New window" setting in the visual Edit Link dialog.
+            from link_behavior import open_page_links_in_new_window
+            result = open_page_links_in_new_window(result)
 
             if len(result) < len(cleaned_html) * 0.5:
                 log(

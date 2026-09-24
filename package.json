@@ -1,0 +1,12 @@
+{
+  "name": "brightspace-pages-automator-assets",
+  "private": true,
+  "scripts": {
+    "visual:test": "playwright test --config=playwright.visual.config.mjs",
+    "visual:update": "playwright test --config=playwright.visual.config.mjs --update-snapshots"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.0",
+    "axe-core": "4.13.0"
+  }
+}

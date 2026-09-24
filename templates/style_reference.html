@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en"><head>
     <meta charset="UTF-8">
-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;800&family=Noto+Serif:wght@400;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
             --primary:    #005F63;
@@ -10,6 +10,8 @@
             --charcoal:   #50534C;
             --white:      #ffffff;
             --light-stone:#F8F9FA;
+            --primary-soft: rgba(0,95,99,0.09);
+            --action:     #A64800;
         }
         * { box-sizing: border-box; }
         body {
@@ -23,66 +25,168 @@
             max-width: 1000px; width: 95%;
             margin: 4rem 0;
             background: var(--white);
-            box-shadow: 0 40px 100px -20px rgba(0,0,0,0.12);
-            border-radius: 32px; overflow: hidden;
+            box-shadow: 0 12px 32px rgba(0,0,0,0.08);
+            border-radius: 10px; overflow: hidden;
         }
         .hero {
-            background: linear-gradient(135deg, var(--primary) 0%, var(--mid) 100%);
-            padding: 6rem 4rem;
-            color: var(--white); position: relative;
+            background: var(--white);
+            margin: 3rem 4rem 0;
+            padding: 0 0 1.25rem;
+            color: var(--charcoal);
         }
         .hero h1 {
-            font-size: 3.8rem; font-weight: 800;
-            margin: 0; line-height: 1.1;
-            letter-spacing: -0.05em; text-transform: uppercase;
+            font-family: 'Poppins', sans-serif;
+            font-size: 2.35rem; font-weight: 600;
+            margin: 0; line-height: 1.2;
+            letter-spacing: 0;
         }
-        .hero-decoration {
-            position: absolute; bottom: -30px; right: 40px;
-            font-size: 12rem; font-weight: 900;
-            opacity: 0.2; user-select: none; color: var(--white);
+        .hero h2 {
+            color: var(--primary);
+            font-family: 'Poppins', sans-serif;
+            font-size: 1rem; font-weight: 600;
+            letter-spacing: 0; margin: 0 0 0.7rem;
+            text-transform: none;
         }
-        .content-body { padding: 4rem; }
+        .hero-decoration { display: none; }
+        .content-body { padding: 2rem 4rem 4rem; }
         .action-card {
+            background: transparent;
+            padding: 2.5rem 0;
+            border-radius: 0;
+            border: 0;
+            border-bottom: 1px solid rgba(80,83,76,0.18);
+            margin: 0;
+        }
+        .action-card:last-child { border-bottom: 0; padding-bottom: 0; }
+        .action-card h2, .action-card h4 {
+            color: var(--charcoal);
+            font-family: 'Poppins', sans-serif;
+            font-size: 1.45rem;
+            font-weight: 600;
+            margin: 0 0 1rem;
+        }
+        /* Tighten resource directories without changing reading or course-info pages. */
+        .main-container.resource-directory { margin: 2rem 0; }
+        .resource-directory .hero { margin: 2.25rem 3rem 0; padding-bottom: 0.4rem; }
+        .resource-directory .hero h1 { font-size: 2rem; }
+        .resource-directory .content-body { padding: 0.75rem 3rem 3rem; }
+        .resource-directory .content-body > .action-card:first-child { padding-top: 0; }
+        .resource-directory .action-card h2 { font-size: 1.3rem; margin-bottom: 0.65rem; }
+        .info-list {
+            background: var(--primary-soft);
+            border: 1px solid rgba(80,83,76,0.14);
+            border-radius: 6px;
+            margin: 1.25rem 0;
+            padding: 0.25rem 1.5rem;
+        }
+        .info-row {
+            align-items: flex-start;
+            border-bottom: 1px solid rgba(80,83,76,0.16);
+            display: block;
+            padding: 1rem 0;
+        }
+        .info-row:last-child { border-bottom: 0; }
+        .info-label {
+            color: var(--charcoal);
+            display: block;
+            font-size: 0.95rem;
+            font-weight: 700;
+            letter-spacing: 0;
+            margin-bottom: 0.35rem;
+            text-transform: none;
+        }
+        .info-value { color: var(--charcoal); font-size: 1rem; line-height: 1.55; }
+        .schedule-panel { background: rgba(80,83,76,0.04); border: 1px solid rgba(80,83,76,0.12); border-radius: 6px; padding: 1rem 1.5rem; }
+        .resource-section { margin: 1.5rem 0 2.5rem; }
+        .resource-section:last-child { margin-bottom: 0; }
+        .resource-directory .resource-section { margin: 0.5rem 0 1.75rem; }
+        .resource-directory .action-card.resource-section { margin: 0; padding: 0 0 1.15rem; }
+        .resource-directory .action-card.resource-section + .action-card.resource-section { padding-top: 1.15rem; }
+        .link-list { margin: 0.5rem 0 0; }
+        .resource-directory .link-list { margin: 0; }
+        .link-row, .resource-row {
+            border-bottom: 1px solid rgba(80,83,76,0.16);
+            color: var(--charcoal);
+            display: block;
+            margin: 0;
+            padding: 1rem 0;
+        }
+        .resource-directory .link-row, .resource-directory .resource-row { padding: 0.7rem 0; }
+        .link-row:last-child { border-bottom: 0; }
+        .link-title { color: var(--charcoal); font-size: 1rem; font-weight: 700; text-decoration: underline; text-decoration-thickness: 0.08em; text-underline-offset: 0.15em; }
+        .resource-directory .link-title { color: var(--action); font-size: 1.05rem; font-weight: 600; }
+        .link-meta { color: var(--charcoal); display: block; font-size: 0.9rem; font-weight: 400; margin: 0.25rem 0 0 2rem; opacity: 0.82; }
+        .resource-directory .link-meta { margin: 0.15rem 0 0; }
+        .resource-row {
             background: var(--white);
-            padding: 3rem;
-            border-radius: 24px;
-            box-shadow: 0 10px 20px rgba(0,0,0,0.05);
-            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-            border: 1px solid rgba(0,0,0,0.05);
-            margin-bottom: 3rem;
         }
-        .action-card:last-child { margin-bottom: 0; }
-        .action-card:hover {
-            transform: translateY(-15px);
-            box-shadow: 0 30px 60px rgba(0,0,0,0.15);
-        }
-        .action-card h4 { font-family: 'Noto Serif', serif; color: var(--primary); margin-top: 0; }
+        .resource-link { color: var(--charcoal); font-size: 1rem; font-weight: 700; text-decoration: underline; text-decoration-thickness: 0.08em; text-underline-offset: 0.15em; }
+        .resource-directory .resource-link { color: var(--action); font-size: 1.05rem; font-weight: 600; }
+        .resource-meta { color: var(--charcoal); display: block; font-size: 0.9rem; font-weight: 400; margin: 0.25rem 0 0 2rem; }
+        .resource-directory .resource-meta { margin: 0.15rem 0 0; opacity: 0.82; }
+        /* Keeps authored images inside their content card at every viewport. */
+        img { display: block; max-width: 100%; height: auto; }
         .video-wrapper { position: relative; padding-bottom: 56.25%; height: 0; overflow: hidden; margin: 1.5rem 0; border-radius: 12px; }
         .video-wrapper iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: none; }
-        a { color: var(--primary); text-decoration: underline; font-weight: 600; display: block; margin-bottom: 0.5rem; transition: color 0.3s; }
-        a:hover { color: var(--accent); }
-        @media (max-width: 768px) { .hero { padding: 4rem 2rem; } .hero h1 { font-size: 2.5rem; } .content-body { padding: 2rem; } }
+        a { color: var(--primary); text-decoration: underline; text-decoration-thickness: 0.1em; text-underline-offset: 0.16em; font-weight: 600; }
+        a:hover { color: var(--action); }
+        .action-link {
+            align-items: center;
+            background: var(--primary-soft);
+            border: 0;
+            border-radius: 6px;
+            color: var(--primary) !important;
+            display: flex;
+            justify-content: space-between;
+            margin-top: 1rem;
+            padding: 0.8rem 1rem;
+            text-decoration: none;
+        }
+        .action-link:hover { background: rgba(80,83,76,0.08); color: var(--primary) !important; }
+        .sr-only { height: 1px; margin: -1px; overflow: hidden; padding: 0; position: absolute; width: 1px; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+        @media (max-width: 768px) {
+            .hero { margin: 2rem 2rem 0; }
+            .hero h1 { font-size: 2.2rem; }
+            .content-body { padding: 1rem 2rem 2rem; }
+            .resource-directory .hero { margin: 1.5rem 1.5rem 0; }
+            .resource-directory .hero h1 { font-size: 1.8rem; }
+            .resource-directory .content-body { padding: 0.5rem 1.5rem 2rem; }
+            .info-list { padding: 0.5rem 1.25rem; }
+        }
     </style>
 </head><body>
 <div class="main-container">
     <header class="hero">
         <h1>Page Title</h1>
-        <div class="hero-decoration">LABEL</div>
     </header>
-    <div class="content-body">
+    <main class="content-body">
         <div class="action-card">
-            <h4>Section Title</h4>
+            <h2>Section Title</h2>
             <p>Description text goes here.</p>
-            <a href="#">Link One</a>
-            <a href="#">Link Two</a>
+            <div class="info-list">
+                <div class="info-row"><span class="info-label">Label</span><span class="info-value">Value</span></div>
+                <div class="info-row"><span class="info-label">Email</span><span class="info-value">name@example.com</span></div>
+            </div>
+            <div class="schedule-panel"><p>Schedule or other grouped details.</p></div>
+            <section class="resource-section">
+                <h2>Links</h2>
+                <div class="link-list">
+                    <p class="link-row"><a class="link-title" href="#">External resource</a><span class="link-meta">example.org</span></p>
+                    <p class="link-row"><a class="link-title" href="#">Course resource</a><span class="link-meta">Brightspace topic</span></p>
+                </div>
+            </section>
+            <section class="resource-section">
+                <h2>Files</h2>
+                <p class="resource-row"><a class="resource-link" href="#">Course outline</a><span class="resource-meta">PDF document</span></p>
+            </section>
             <div class="video-wrapper"><iframe src="about:blank"></iframe></div>
-            <a href="#">Video Link</a>
+            <a class="action-link" href="#">Open video <span aria-hidden="true">→</span></a>
         </div>
         <div class="action-card">
-            <h4>Assessment</h4>
+            <h2>Assessment</h2>
             <a href="#">Assignment Link</a>
             <a href="#">Quiz Link</a>
         </div>
-    </div>
+    </main>
 </div>
 </body></html>

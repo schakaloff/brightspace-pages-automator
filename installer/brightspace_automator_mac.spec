@@ -25,6 +25,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(ROOT / "templates" / "style_reference.html"), "templates"),
+        (str(ROOT / "templates" / "style_reference_classic.html"), "templates"),
         (str(ROOT / "prompts"), "prompts"),
         *extra_datas,
     ],

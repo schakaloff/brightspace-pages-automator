@@ -130,6 +130,13 @@ async def run_h5p_only(
 
         parsed = urlparse(bs_url)
         bs_base = f"{parsed.scheme}://{parsed.netloc}"
+        bs_flat = await checker._ensure_h5p_destination_units(
+            context, page, bs_base, course_id, moodle_items, bs_flat
+        )
+        if bs_flat is None:
+            if on_complete:
+                on_complete()
+            return
         await checker._h5p.embed_in_brightspace(
             context, page, moodle_items, bs_flat, bs_base, course_id
         )

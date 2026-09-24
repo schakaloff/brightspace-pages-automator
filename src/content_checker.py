@@ -22,7 +22,7 @@ from collections import Counter
 from functools import lru_cache
 import threading
 import uuid
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 import time
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -63,6 +63,31 @@ def _extract_course_id(url: str) -> Optional[str]:
         if m:
             return m.group(1)
     return None
+
+
+def _moodle_scrape_target_url(url: str) -> str:
+    """Keep section IDs on section.php; only other Moodle IDs are course IDs."""
+    path = urlparse(url).path
+    if path.endswith(("/course/view.php", "/course/section.php")):
+        return url
+    match = re.search(r"[?&]id=(\d+)", url)
+    if not match:
+        return url
+    base = url.split("/enrol")[0].split("/course")[0]
+    return f"{base}/course/view.php?id={match.group(1)}"
+
+
+def _is_moodle_scrape_page(url: str) -> bool:
+    return urlparse(url).path.endswith(("/course/view.php", "/course/section.php"))
+
+
+def _is_moodle_scrape_target(url: str, target: str) -> bool:
+    current, requested = urlparse(url), urlparse(target)
+    return (
+        _is_moodle_scrape_page(url)
+        and current.path == requested.path
+        and parse_qs(current.query).get("id") == parse_qs(requested.query).get("id")
+    )
 
 
 def _flatten_toc(modules: list, parent: str = "") -> list:
@@ -305,8 +330,23 @@ _JS_MOODLE_ITEMS = """() => {
         const heading = section.querySelector(
             'h3[data-for="section_title"], h4[data-for="section_title"], .sectionname, h3, h4'
         );
+        // Moodle's OneTopic format renders the selected section without a
+        // heading inside li.section. Its active tab is the section title.
+        // Match by section number so another tab cannot label this section.
+        const sectionNumber = (section.id || '').match(/^section-([0-9]+)$/)?.[1];
+        let tabName = '';
+        if (sectionNumber) {
+            for (const link of document.querySelectorAll('a.nav-link.active[href*="section="]')) {
+                const url = new URL(link.href, location.href);
+                if (url.pathname.endsWith('/course/view.php')
+                    && url.searchParams.get('section') === sectionNumber) {
+                    tabName = (link.getAttribute('title') || visibleText(link)).trim();
+                    break;
+                }
+            }
+        }
         const sectionName = ((heading && visibleText(heading))
-            || section.getAttribute('data-sectionname') || '').trim();
+            || section.getAttribute('data-sectionname') || tabName || '').trim();
         result.push({
             type: 'SECTION',
             name: sectionName,
@@ -460,6 +500,7 @@ class ContentChecker:
         # A normal Checker run is read-only.  Only the explicit Full Run may
         # attach an already-existing activity to Content.
         self.full_run               = full_run
+        self.order_only             = False
         self.keep_browser_open      = keep_browser_open
         self.stop_flag              = [False]
         self.log                    = self._make_log_filter(log)
@@ -1767,6 +1808,61 @@ class ContentChecker:
                     pass
         return created
 
+    async def _ensure_h5p_destination_units(
+        self, context, page, bs_base: str, course_id: str,
+        moodle_items: list, bs_flat: list,
+    ) -> Optional[list]:
+        """Resolve H5P destinations before opening the cloud or inserting pages."""
+        section_map, title_map = self._h5p._moodle_h5p_maps(moodle_items)
+        if not title_map:
+            return bs_flat
+        sections = list(dict.fromkeys(section_map.values()))
+        invalid = [name for name in sections if not valid_section_name(name)]
+        if invalid:
+            self.log(
+                "✗ H5P activities have an unnamed Moodle section. "
+                "Open a named course tab before running H5P.",
+                "error",
+            )
+            return None
+
+        missing = [name for name in sections
+                   if not self._h5p._module_for_section(name, bs_flat)]
+        if not missing:
+            return bs_flat
+        duplicate = [name for name in missing if sum(
+            item.get("kind") == "MODULE"
+            and _norm(item.get("title", "")) == _norm(name)
+            for item in bs_flat
+        ) > 1]
+        if duplicate:
+            self.log(
+                "✗ Multiple Brightspace units share the H5P destination name: "
+                + ", ".join(duplicate),
+                "error",
+            )
+            return None
+
+        self.log(
+            "📦 H5P destination unit(s) missing in Brightspace: "
+            + ", ".join(missing),
+            "warning",
+        )
+        if not await self._confirm(
+            "Create Brightspace unit(s) for these Moodle H5P sections?\n\n"
+            + "\n".join(f"• {name}" for name in missing)
+        ):
+            self.log("↷ H5P insertion skipped because its destination unit was not created.", "warning")
+            return None
+        await self._create_missing_units(context, bs_base, course_id, missing)
+        refreshed = await self._fetch_bs_toc(page, course_id)
+        if not refreshed or any(
+            not self._h5p._module_for_section(name, refreshed) for name in sections
+        ):
+            self.log("✗ H5P destination units could not be verified after creation.", "error")
+            return None
+        return refreshed
+
     async def _verify_topic_in_module(
         self, bs_page, course_id: str, module_id, expected_name: str,
         require_h5p: bool = False,
@@ -1796,6 +1892,20 @@ class ContentChecker:
                 if title_norm == name_norm:
                     if not require_h5p or self._is_h5p_topic(topic):
                         return True
+                    # Insert Stuff stores H5P inside an ordinary HTML page.
+                    # Its module URL is the page file, not the H5P launch URL.
+                    # Read that file before deciding an existing page is absent.
+                    topic_id = topic.get("Id")
+                    if topic_id is not None:
+                        try:
+                            from unit_overview import BrowserContentAPI
+                            html = await BrowserContentAPI(
+                                bs_page, str(course_id), str(module_id)
+                            ).get_topic_html(topic_id)
+                            if self._html_contains_h5p_embed(html):
+                                return True
+                        except Exception:
+                            pass
             return False
         except Exception:
             return False
@@ -1817,6 +1927,25 @@ class ContentChecker:
             "h5p" in str(value).lower()
             for value in values if value is not None
         )
+
+    @staticmethod
+    def _html_contains_h5p_embed(html: str) -> bool:
+        """Recognize the H5P or LTI iframe format saved by Insert Stuff."""
+        if re.search(
+            r'<(?:iframe|embed|object)\b[^>]*(?:h5p\.com|h5p\.org)',
+            html or "", re.IGNORECASE,
+        ):
+            return True
+        # Brightspace rewrites H5P embeds to an internal QuickLink iframe.
+        # The exact page title is checked before this method is called.
+        for source in re.findall(
+            r'<iframe\b[^>]*\bsrc=["\']([^"\']+)["\']', html or "", re.IGNORECASE
+        ):
+            parsed = urlparse(html_module.unescape(source))
+            if (parsed.path.lower().endswith("/quicklink.d2l")
+                    and "lti" in [v.lower() for v in parse_qs(parsed.query).get("type", [])]):
+                return True
+        return False
 
     # NOTE: Replaced by two-step API approach (_upload_file_to_brightspace +
     # _create_bs_file_topic). Kept as reference. Do not delete.
@@ -2228,6 +2357,43 @@ class ContentChecker:
                 await _rollback_created(api, topic_id, self.log)
             return False
 
+    async def _resolve_moodle_file_name(self, context: "BrowserContext", href: str) -> str:
+        """Return the real file name behind a Moodle file or URL activity."""
+        try:
+            response = await context.request.get(
+                with_moodle_redirect(href), timeout=20000,
+                max_redirects=0, fail_on_status_code=False,
+            )
+            location = response.headers.get("location", "")
+            if location:
+                return link_filename(urljoin(href, location))
+            content_type = str(response.headers.get("content-type", "")).lower()
+            if content_type.startswith(("text/html", "application/xhtml+xml")):
+                plugin = extract_pluginfile_url(
+                    (await response.body()).decode("utf-8", errors="replace"),
+                    response.url,
+                )
+                return link_filename(plugin) if plugin else ""
+            return link_filename(response.url)
+        except Exception:
+            return ""
+
+    async def _index_moodle_files(self, context: "BrowserContext", results: list) -> dict:
+        """Map each Moodle file name to the items that provide it."""
+        index: dict = {}
+        for item in results:
+            href = str(item.get("href") or "")
+            if not href or item.get("type") not in {"FILE", "URL"}:
+                continue
+            name = item.get("moodle_filename") or await self._resolve_moodle_file_name(
+                context, href
+            )
+            if not name or "." not in name:
+                continue
+            item["moodle_filename"] = name
+            index.setdefault(name, []).append(item)
+        return index
+
     async def _scan_broken_file_links(self, bs_page: "Page", course_id: str) -> list:
         """Report Brightspace page links whose own course file is missing.
 
@@ -2437,6 +2603,9 @@ class ContentChecker:
         self.log("─" * 52, "dim")
         self.log("↕ Ordering units to match Moodle…", "step")
         for section, items in sections.items():
+            if self.stop_flag[0]:
+                self.log("⏹ Page ordering stopped by user.", "warning")
+                return
             destination = modules.get(_norm(section))
             if not destination:
                 continue
@@ -2447,6 +2616,9 @@ class ContentChecker:
                     self.log(f"  ✓ {destination['title']}: already in Moodle order", "dim")
                     continue
                 for topic_id in moves:
+                    if self.stop_flag[0]:
+                        self.log("⏹ Page ordering stopped by user.", "warning")
+                        return
                     await bs_page.evaluate(
                         """async ([courseId, topicId]) => {
                             const xsrf = localStorage.getItem('XSRF.Token');
@@ -2458,7 +2630,17 @@ class ContentChecker:
                         }""",
                         [str(course_id), str(topic_id)],
                     )
-                self.log(f"  ✓ {destination['title']}: {len(moves)} item(s) put in Moodle order", "success")
+                remaining = plan_unit_order(items, await api.list_structure() or [])
+                if remaining:
+                    self.log(
+                        f"  ✗ {destination['title']}: order could not be verified after moving pages",
+                        "error",
+                    )
+                else:
+                    self.log(
+                        f"  ✓ {destination['title']}: {len(moves)} item(s) put in Moodle order",
+                        "success",
+                    )
             except Exception as exc:
                 self.log(f"  ✗ {destination['title']}: could not reorder ({str(exc).splitlines()[0]})", "error")
 
@@ -2873,20 +3055,19 @@ class ContentChecker:
             except Exception:
                 pass
 
-            # Normalise common Moodle URL variants to course/view.php
-            import re as _re
+            # A section.php id is a section ID, not a course ID. Keep that
+            # page so a single-section link can be scraped directly.
             _course_url = self.moodle_url or tab.url
-            _id_match = _re.search(r"[?&]id=(\d+)", _course_url)
-            if _id_match and "course/view.php" not in _course_url:
-                _base = _course_url.split("/enrol")[0].split("/course")[0]
-                _course_url = f"{_base}/course/view.php?id={_id_match.group(1)}"
+            _target_url = _moodle_scrape_target_url(_course_url)
+            if _target_url != _course_url:
+                _course_url = _target_url
                 self.log(f"  Normalised Moodle URL → {_course_url}", "dim")
 
             # Auto-navigate to the course page before pausing. A freshly
             # established post-login session often bounces the FIRST hit to
             # enrol/index.php; re-navigating to the same URL then opens the course.
             for _attempt in range(4):
-                if "course/view.php" in tab.url and "enrol" not in tab.url:
+                if _is_moodle_scrape_target(tab.url, _course_url):
                     break
                 self.log(f"  Navigating to Moodle course page… (try {_attempt + 1})", "dim")
                 try:
@@ -2914,8 +3095,8 @@ class ContentChecker:
             await tab.wait_for_timeout(1000)
 
             self.log(f"  Scraping: {tab.url}", "dim")
-            if "course/view.php" not in tab.url:
-                self.log("⚠ Still not on a course/view.php page", "warning")
+            if not _is_moodle_scrape_page(tab.url):
+                self.log("⚠ Still not on a Moodle course or section page", "warning")
 
             if not await self._enable_moodle_edit_mode(tab):
                 await tab.close()
@@ -3065,6 +3246,10 @@ class ContentChecker:
                 and i.get("href")
             ]
             h5p_cached, h5p_missing = self._h5p.local_download_status(items)
+            if self.order_only:
+                await tab.close()
+                self.log("↕ Order-only run: Moodle H5P downloads skipped.", "dim")
+                return items
             if h5p_activities:
                 self.log("", "dim")
                 self.log("─" * 52, "dim")
@@ -4312,6 +4497,19 @@ class ContentChecker:
                         await asyncio.sleep(0.5)
                     return
 
+            if self.order_only:
+                self.log("↕ Reordering existing Brightspace pages to match Moodle…", "step")
+                await self._order_units_like_moodle(
+                    page, course_id, _compare_items(moodle_items, bs_flat)
+                )
+                self.log("✓ Ordering pass finished.", "success")
+                if self.on_complete:
+                    self.on_complete()
+                if self.keep_browser_open:
+                    while browser.is_connected():
+                        await asyncio.sleep(0.5)
+                return
+
             # ── Compare + scans ───────────────────────────────────────────────
             self.log("─" * 52, "dim")
             self.log("Comparing Moodle items against Brightspace…", "info")
@@ -4510,7 +4708,8 @@ class ContentChecker:
                 else:
                     self.log("↷ Existing activity links were not attached.", "dim")
 
-            if self.full_run and not self.stop_flag[0] and not self.link_repair_only:
+            if (self.full_run and not self.stop_flag[0] and not self.link_repair_only
+                    and not getattr(self, "do_h5p_embed", False)):
                 await self._order_units_like_moodle(page, course_id, results)
 
             if moodle_links and getattr(self, "do_relink", False):
@@ -4530,12 +4729,20 @@ class ContentChecker:
                 bs_base = f"{parsed.scheme}://{parsed.netloc}"
                 t0 = time.time()
                 try:
-                    await self._h5p.embed_in_brightspace(context, page, moodle_items, bs_flat, bs_base, course_id)
+                    h5p_bs_flat = await self._ensure_h5p_destination_units(
+                        context, page, bs_base, course_id, moodle_items, bs_flat
+                    )
+                    if h5p_bs_flat is not None:
+                        await self._h5p.embed_in_brightspace(
+                            context, page, moodle_items, h5p_bs_flat, bs_base, course_id
+                        )
                 except Exception as e:
                     self.log(f"✗ H5P embed error: {e}", "error")
                     import traceback
                     self.log(f"  Traceback: {traceback.format_exc()}", "dim")
                 self._summary["timings"]["H5P embed (Phase B)"] = time.time() - t0
+                if not self.stop_flag[0]:
+                    await self._order_units_like_moodle(page, course_id, results)
 
             # ── Final summary + cleanup prompt ────────────────────────────────
             self._log_final_summary(results)

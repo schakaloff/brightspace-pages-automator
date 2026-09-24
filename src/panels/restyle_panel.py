@@ -1,7 +1,6 @@
 import asyncio
 import queue
 import threading
-from pathlib import Path
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -12,7 +11,9 @@ from PySide6.QtCore import Signal, QTimer
 from gui_log import LogWidget
 from panels._shared import (
     _divider, _form_label, _section_header, PAGE_THEMES, _build_theme_swatches, friendly_error,
+    NoScrollComboBox,
 )
+from style_presets import STYLE_PRESETS, load_style_reference
 
 
 class RestylePanel(QWidget):
@@ -44,6 +45,18 @@ class RestylePanel(QWidget):
         layout.addWidget(_form_label("PAGE THEME"))
         layout.addSpacing(6)
         self._swatch_frames, self._selected_theme = _build_theme_swatches(layout)
+        layout.addSpacing(14)
+
+        layout.addWidget(_form_label("PAGE DESIGN"))
+        layout.addSpacing(6)
+        self._style_preset = NoScrollComboBox()
+        for key, label in STYLE_PRESETS.items():
+            self._style_preset.addItem(label, key)
+        self._style_preset.setToolTip(
+            "Calm resources uses clear file rows and prominent actions. "
+            "Classic cards restores the previous card-and-gradient design."
+        )
+        layout.addWidget(self._style_preset)
         layout.addSpacing(14)
 
         layout.addWidget(_form_label("BRIGHTSPACE PAGE URL"))
@@ -95,6 +108,9 @@ class RestylePanel(QWidget):
         if cfg.get("automator_url"):
             self._url_entry.setText(cfg["automator_url"])
         self._move_unit_content_chk.setChecked(cfg.get("restyle_move_unit_content", True))
+        preset = cfg.get("restyle_style_preset", "calm")
+        index = self._style_preset.findData(preset)
+        self._style_preset.setCurrentIndex(max(index, 0))
 
     def save_state(self):
         if not hasattr(self._mw, "save_config"):
@@ -102,6 +118,7 @@ class RestylePanel(QWidget):
         self._mw.save_config({
             "automator_url": self._url_entry.text().strip(),
             "restyle_move_unit_content": self._move_unit_content_chk.isChecked(),
+            "restyle_style_preset": self._style_preset.currentData(),
         })
 
     def _start_run(self):
@@ -111,11 +128,7 @@ class RestylePanel(QWidget):
         if not url:
             self._log.append_log("Paste a Brightspace URL first.", "warning"); return
 
-        style_ref_path = Path(__file__).parent.parent.parent / "templates" / "style_reference.html"
-        try:
-            style_reference_html = style_ref_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            style_reference_html = ""
+        style_reference_html = load_style_reference(self._style_preset.currentData())
 
         self._run_btn.setText("Running…"); self._run_btn.setEnabled(False)
         self._log.clear_log()

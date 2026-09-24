@@ -42,6 +42,11 @@ Thumbs.db
 
 # Browser/Playwright
 *.chromium/
+node_modules/
+test-results/
+playwright-report/
+pnpm-debug.log*
+tmp_update_tests/
 
 # Portable Python (auto-downloaded by run.bat on machines without Python)
 python-embed/

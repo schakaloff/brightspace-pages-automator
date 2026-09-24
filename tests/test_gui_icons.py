@@ -19,8 +19,9 @@ def test_all_icons_return_qicon(qapp):
 def test_make_pixmap_returns_correct_size(qapp):
     from gui_icons import make_pixmap
     px = make_pixmap("run", "#ff0000", size=24)
-    assert px.width() == 24
-    assert px.height() == 24
+    # The pixmap keeps extra physical pixels for sharp high-DPI rendering.
+    assert px.width() / px.devicePixelRatio() == 24
+    assert px.height() / px.devicePixelRatio() == 24
 
 def test_unknown_icon_raises(qapp):
     from gui_icons import make_icon

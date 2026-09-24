@@ -108,7 +108,8 @@ _JS_MODULE_TITLE = r"""async ([courseId, moduleId]) => {
 
 
 async def create_target_page(
-    page: Page, unit_url: str, log: Optional[Callable] = None
+    page: Page, unit_url: str, log: Optional[Callable] = None,
+    title_suffix: str = "— Combined",
 ) -> Optional[str]:
     """Create a blank HTML topic at the end of the unit and return its View URL.
 
@@ -129,7 +130,7 @@ async def create_target_page(
         unit_title = await page.evaluate(_JS_MODULE_TITLE, [course_id, module_id])
     except Exception:
         unit_title = None
-    title = f"{unit_title} — Combined" if unit_title else "Combined Page"
+    title = f"{unit_title} {title_suffix}" if unit_title else f"Page {title_suffix}"
 
     _log(f"Auto-creating target page “{title}” in unit {module_id}…", "info")
     try:

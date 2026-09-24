@@ -150,24 +150,22 @@ class _TransformContext:
 
 
 @pytest.mark.asyncio
-async def test_collector_does_not_save_when_youtube_readback_verification_fails():
+async def test_collector_does_not_save_when_youtube_readback_verification_fails(monkeypatch):
+    import editor_save
+
     collector = UnitCollector.__new__(UnitCollector)
     collector.log = lambda *_args: None
-    source = '<p><a href="https://youtu.be/dQw4w9WgXcQ">https://youtu.be/dQw4w9WgXcQ</a></p>'
+    collector._active_target = "https://learn.test/d2l/le/lessons/42/topics/7"
     saved = []
 
-    async def readback(_page, _expected):
-        return source
+    async def failed_readback(_page, _url):
+        raise RuntimeError("not readable")
 
-    async def rejected_paste(_page, _html):
-        return False
-
-    async def save(_page):
+    async def save(*_args):
         saved.append(True)
         return True
 
-    collector._read_back_for_styling = readback
-    collector._paste_html = rejected_paste
-    collector._save_and_close = save
+    monkeypatch.setattr(editor_save, "read_topic_html", failed_readback)
+    monkeypatch.setattr(editor_save, "replace_topic_html", save)
     assert not await collector._apply_youtube_transforms(_TransformContext())
     assert saved == []

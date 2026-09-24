@@ -4,6 +4,8 @@ from typing import Callable, List, Optional
 
 from playwright.async_api import Page
 
+from run_summary import RestyleRunSummary
+
 
 async def _find_locator_any_frame(page: Page, selector: str, retries: int = 6, delay_ms: int = 700):
     for _ in range(max(retries, 1)):
@@ -51,6 +53,7 @@ class PageAutomator:
         self.move_unit_content = move_unit_content
         self._clipboard_lock = asyncio.Lock()  # one tab touches clipboard at a time
         self._token_usage = {"input_tokens": 0, "output_tokens": 0, "cost_cad": 0.0}
+        self._run_summary = RestyleRunSummary()
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -155,18 +158,17 @@ class PageAutomator:
 
         await page.wait_for_timeout(1500)
 
-        # Save and Close the editor page
+        # Save and Close the editor page. This is the Collector's save path,
+        # shared verbatim via editor_save so the two cannot drift apart again:
+        # it refuses to click while a dialog is open, matches only the editor's
+        # own "Save and Close", and reads the page back to prove it saved.
         self.log("Saving page...", "info")
-        for selector in ['d2l-button:has-text("Save and Close")', 'button:has-text("Save and Close")', 'd2l-button:has-text("Save")', 'button:has-text("Save")']:
-            _, btn = await _find_locator_any_frame(page, selector, retries=6, delay_ms=600)
-            if btn:
-                await btn.first.click()
-                await page.wait_for_timeout(1500)
-                self.log("✓ Page saved", "success")
-                return True
+        from editor_save import save_and_close, verify_topic_saved
 
-        self.log("⚠ Save button not found — save manually", "warning")
-        return False
+        topic_url = page.url  # captured before the save navigates away
+        if not await save_and_close(page, self.log):
+            return False
+        return await verify_topic_saved(page, topic_url, expected_len, self.log)
 
     async def scrape_section_pages(self, page: Page) -> List[dict]:
         """Scrape all topic links from the section sidebar."""
@@ -287,7 +289,29 @@ class PageAutomator:
             self.log("⚠ No HTML pages found — check: are you logged in? Is the unit expanded in the sidebar?", "warning")
         return unique
 
+    async def _check_accessibility(self, page: Page, styled_html: str, label: str) -> None:
+        """Run an advisory axe audit without changing the existing save flow."""
+        try:
+            from accessibility_checker import log_report, scan_html
+
+            report = await scan_html(page.context, styled_html)
+            self._run_summary.record_accessibility(report)
+            log_report(report, self.log, label=label or "Page")
+        except Exception as exc:
+            self._run_summary.accessibility_checks_unavailable += 1
+            self.log(f"♿ Accessibility check unavailable: {exc}", "warning")
+
     async def _process_topic(self, page: Page, url: str, label: str = "") -> bool:
+        """Track one topic while the implementation performs the existing flow."""
+        try:
+            success = await self._process_topic_impl(page, url, label)
+        except Exception:
+            self._run_summary.record_page(False)
+            raise
+        self._run_summary.record_page(success)
+        return success
+
+    async def _process_topic_impl(self, page: Page, url: str, label: str = "") -> bool:
         """Navigate to a topic and run the full options → edit → AI → save pipeline."""
         self.log("─" * 52, "dim")
         if label:
@@ -398,6 +422,12 @@ class PageAutomator:
             self.log("✗ Could not extract HTML — skipping", "error")
             return False
 
+        from resource_restyle import remove_generated_resource_markers
+
+        source_html, old_markers = remove_generated_resource_markers(source_html)
+        if old_markers:
+            self.log(f"Removed {old_markers} old generated resource marker(s) before restyling", "info")
+
         from youtube_embed import transform_standalone_youtube_urls
 
         youtube = transform_standalone_youtube_urls(source_html)
@@ -440,10 +470,22 @@ class PageAutomator:
             self.log("✗ AI returned nothing — skipping", "error")
             return False
 
+        if "BPA: CLASSIC" not in self.style_reference_html:
+            styled_html, new_markers = remove_generated_resource_markers(styled_html)
+            if new_markers:
+                self.log(f"Removed {new_markers} generated resource marker(s) from result", "info")
+            from resource_restyle import mark_resource_directory
+
+            styled_html, is_directory = mark_resource_directory(styled_html)
+            if is_directory:
+                self.log("Applied compact spacing for a resource directory", "info")
+
         if usage:
             self._token_usage["input_tokens"] += usage["input_tokens"]
             self._token_usage["output_tokens"] += usage["output_tokens"]
             self._token_usage["cost_cad"] += usage["cost_cad"]
+
+        await self._check_accessibility(page, styled_html, label)
 
         if not await self.replace_html_in_editor(page, styled_html):
             return False
@@ -529,6 +571,7 @@ class PageAutomator:
                     start_idx, count = await asyncio.to_thread(self.on_pages_found, pages)
 
                 selected = pages[start_idx: start_idx + count]
+                self._run_summary.pages_selected = len(selected)
                 self.log(f"Processing {len(selected)} page(s) — up to 5 at a time", "info")
 
                 sem = asyncio.Semaphore(5)
@@ -542,16 +585,11 @@ class PageAutomator:
                 await asyncio.gather(*[process_one(t, i) for i, t in enumerate(selected)])
             else:
                 # Single topic URL
+                self._run_summary.pages_selected = 1
                 await self._process_topic(page, self.url)
 
             self.log("─" * 52, "dim")
-            if self._token_usage["input_tokens"] or self._token_usage["output_tokens"]:
-                u = self._token_usage
-                self.log(
-                    f"🔢 Total tokens: {u['input_tokens']:,} in / {u['output_tokens']:,} out"
-                    f"  —  ${u['cost_cad']:.4f} CAD",
-                    "info",
-                )
+            self._run_summary.log(self.log, self._token_usage)
             self.log("✓  All done! Close the browser when finished.", "success")
             if self.on_complete:
                 self.on_complete()

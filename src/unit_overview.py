@@ -203,8 +203,9 @@ class BrowserContentAPI:
     async def get_topic_html(self, topic_id: int | str) -> str:
         return await self.page.evaluate(
             """async ([courseId, topicId]) => {
-                const r = await fetch(`/d2l/api/le/1.75/${courseId}/content/topics/${topicId}/file`,
-                    { credentials: 'include' });
+                const r = await fetch(
+                    `/d2l/api/le/1.75/${courseId}/content/topics/${topicId}/file?_=${Date.now()}_${Math.random()}`,
+                    { credentials: 'include', cache: 'no-store' });
                 if (!r.ok) throw new Error(`GET topic file ${r.status}: ${(await r.text()).slice(0,200)}`);
                 const type = (r.headers.get('content-type') || '').toLowerCase();
                 if (!type.includes('text/html')) throw new Error(`topic file is not HTML (${type || 'unknown'})`);

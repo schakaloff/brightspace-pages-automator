@@ -3,7 +3,6 @@ import queue
 import re
 import threading
 from enum import Enum, auto
-from pathlib import Path
 
 
 def _normalize_url(u: str) -> str:
@@ -25,7 +24,9 @@ from PySide6.QtCore import Qt, Signal, QTimer
 from gui_log import LogWidget
 from panels._shared import (
     _divider, _form_label, _section_header, PAGE_THEMES, _build_theme_swatches, friendly_error,
+    NoScrollComboBox,
 )
+from style_presets import STYLE_PRESETS, load_style_reference
 
 
 class CollectState(Enum):
@@ -117,7 +118,7 @@ class CollectorPanel(QWidget):
         self._target_entry.setToolTip(
             "Where the combined output is written.\n"
             "Leave blank (with auto-create on) to have one made for you, or paste the URL\n"
-            "of an existing blank HTML topic to reuse it."
+            "of an existing HTML topic. Its content will be replaced by this run."
         )
         top.addWidget(self._target_entry)
         self._target_hint = QLabel("A blank page will be created for you. Paste a URL here only to reuse an existing page.")
@@ -128,6 +129,15 @@ class CollectorPanel(QWidget):
         # ── Style ────────────────────────────────────────────────────────────
         top.addWidget(_form_label("STYLE / THEME"))
         self._swatch_frames, self._selected_theme = _build_theme_swatches(top)
+        top.addWidget(_form_label("PAGE DESIGN"))
+        self._style_preset = NoScrollComboBox()
+        for key, label in STYLE_PRESETS.items():
+            self._style_preset.addItem(label, key)
+        self._style_preset.setToolTip(
+            "Calm resources uses clear file rows and prominent actions. "
+            "Classic cards restores the previous card-and-gradient design."
+        )
+        top.addWidget(self._style_preset)
 
         # ── Advanced (collapsed by default) ───────────────────────────────────
         self._adv_btn = QToolButton()
@@ -308,6 +318,9 @@ class CollectorPanel(QWidget):
             self._bs_course_hint.show()
         if "col_auto_create" in cfg:
             self._auto_create_chk.setChecked(bool(cfg["col_auto_create"]))
+        preset = cfg.get("collector_style_preset", "calm")
+        index = self._style_preset.findData(preset)
+        self._style_preset.setCurrentIndex(max(index, 0))
         self._on_auto_toggle(self._auto_create_chk.isChecked())
 
     # ── Collapse toggles ──────────────────────────────────────────────────────
@@ -361,6 +374,7 @@ class CollectorPanel(QWidget):
         self._adv_container.setEnabled(enabled)
         self._parallel_spin.setEnabled(enabled)
         self._moodle_entry.setEnabled(enabled)
+        self._style_preset.setEnabled(enabled)
         self._multi_unit_chk.setEnabled(enabled)
         # dependent checkbox keeps its parent-gated rule when re-enabling
         self._auto_continue_chk.setEnabled(enabled and self._multi_unit_chk.isChecked())
@@ -410,7 +424,10 @@ class CollectorPanel(QWidget):
             self._target_hint.setText("A blank page will be created for you. Paste a URL here only to reuse an existing page.")
         else:
             self._target_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/le/lessons/…/topics/…")
-            self._target_hint.setText("Auto-create is off — paste the URL of a blank Brightspace page to write into.")
+            self._target_hint.setText(
+                "Paste the existing combined page URL to rebuild it, or a blank page URL "
+                "for a new result. The target page's content will be replaced."
+            )
 
     def _on_multi_unit_toggle(self, checked: bool):
         self._auto_continue_chk.setEnabled(checked)
@@ -435,6 +452,7 @@ class CollectorPanel(QWidget):
             "col_target_url": self._target_entry.text().strip(),
             "col_moodle_url": self._moodle_entry.text().strip(),
             "col_auto_create": self._auto_create_chk.isChecked(),
+            "collector_style_preset": self._style_preset.currentData(),
         })
 
     def _start_run(self):
@@ -470,11 +488,7 @@ class CollectorPanel(QWidget):
         theme_colors = PAGE_THEMES[theme_name]
         parallel     = self._parallel_spin.value()
 
-        style_ref_path = Path(__file__).parent.parent.parent / "templates" / "style_reference.html"
-        try:
-            style_reference_html = style_ref_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            style_reference_html = ""
+        style_reference_html = load_style_reference(self._style_preset.currentData())
 
         self._succeeded = False
         self._last_page_count = None

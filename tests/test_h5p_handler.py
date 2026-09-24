@@ -1,6 +1,8 @@
 import asyncio
 import zipfile
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, "src")
 
@@ -129,7 +131,8 @@ def test_slow_moodle_navigation_retries():
 
 def test_collect_cloud_titles_spans_pages():
     frame = FakeFrame()
-    titles = asyncio.run(_handler()._collect_cloud_titles(FakeTab(), frame))
+    handler = _handler()
+    titles = asyncio.run(handler._collect_cloud_titles(FakeTab(), frame))
 
     # The whole point: a title that only exists on page 2 must be found.
     assert "Organizational Structure Quiz" in titles
@@ -144,6 +147,7 @@ def test_collect_cloud_titles_spans_pages():
     # so later upload steps still act on a live content list.
     assert PAGE2_URL in frame.goto_calls
     assert frame.url == BASE
+    assert handler._last_cloud_scan_complete is True
 
 
 def test_collect_cloud_titles_single_page_does_not_navigate():
@@ -478,10 +482,27 @@ def test_collect_cloud_titles_stops_at_max_pages():
             return {"titles": [f"Item {self.evaluates}"], "pageHrefs": [nxt], "rowCount": 1}
 
     frame = EndlessPager()
-    titles = asyncio.run(_handler()._collect_cloud_titles(FakeTab(), frame, max_pages=5))
+    handler = _handler()
+    titles = asyncio.run(handler._collect_cloud_titles(FakeTab(), frame, max_pages=5))
 
     assert len(titles) == 5
     assert frame.evaluates == 5
+    assert handler._last_cloud_scan_complete is False
+
+
+def test_upload_one_uses_complete_snapshot_for_duplicate_check():
+    handler = _handler()
+    async def unexpected_scan(*_args):
+        raise AssertionError("the cloud should not be rescanned")
+    handler._collect_cloud_titles = unexpected_scan
+    frame = SimpleNamespace(url=BASE, is_detached=lambda: False)
+
+    result = asyncio.run(handler.upload_one(
+        object(), frame, Path("Existing.h5p"), "Existing",
+        known_cloud_titles=["Existing"],
+    ))
+
+    assert result is True
 
 
 # ── Original Moodle titles vs sanitised filenames ────────────────────────────
@@ -524,6 +545,81 @@ def test_leftover_file_stem_is_absent_from_maps():
     section_map, title_map = H5PHandler._moodle_h5p_maps(MOODLE_ITEMS)
     assert "MEDR Anatomy Leftover" not in section_map
     assert "MEDR Anatomy Leftover" not in title_map
+
+
+def test_blank_section_keeps_current_course_file_distinct_from_leftover():
+    items = [
+        {"type": "SECTION", "name": ""},
+        {"type": "EXTERNAL", "name": "Current H5P", "hint": "h5p", "href": "x"},
+    ]
+    files = [Path("Current H5P.h5p"), Path("Other Course.h5p")]
+    assignments = H5PHandler._build_assignments(files, items, [], False)
+    by_name = {item["name"]: item for item in assignments}
+
+    assert by_name["Current H5P"]["belongs_to_course"] is True
+    assert by_name["Current H5P"]["bs_module_id"] is None
+    assert by_name["Other Course"]["belongs_to_course"] is False
+
+
+def test_h5p_module_match_rejects_different_course_number():
+    modules = [
+        {"kind": "MODULE", "id": 23, "title": "VIT 23"},
+        {"kind": "MODULE", "id": 24, "title": "VIT22 Course Documents"},
+    ]
+    assert H5PHandler._module_for_section("Vit 22", modules) is None
+    modules.append({"kind": "MODULE", "id": 22, "title": "Vit 22"})
+    assert H5PHandler._module_for_section("Vit 22", modules)["id"] == 22
+
+
+def test_h5p_destination_creates_named_tab_unit_before_inserting():
+    items = [
+        {"type": "SECTION", "name": "Vit 22"},
+        {"type": "EXTERNAL", "name": "Current H5P", "hint": "h5p", "href": "x"},
+    ]
+    before = [{"kind": "MODULE", "id": 23, "title": "VIT 23"}]
+    after = before + [{"kind": "MODULE", "id": 22, "title": "Vit 22"}]
+    created = []
+    async def confirm(_message):
+        return True
+    async def create(_context, _base, _course_id, names):
+        created.extend(names)
+        return len(names)
+    async def fetch(_page, _course_id):
+        return after
+    checker = SimpleNamespace(
+        _h5p=H5PHandler, log=lambda *_: None, _confirm=confirm,
+        _create_missing_units=create, _fetch_bs_toc=fetch,
+    )
+
+    resolved = asyncio.run(ContentChecker._ensure_h5p_destination_units(
+        checker, None, None, "https://example.test", "1", items, before
+    ))
+
+    assert created == ["Vit 22"]
+    assert resolved == after
+    rerun = asyncio.run(ContentChecker._ensure_h5p_destination_units(
+        checker, None, None, "https://example.test", "1", items, after
+    ))
+    assert rerun == after
+    assert created == ["Vit 22"]
+
+
+def test_h5p_destination_stops_if_section_is_still_blank():
+    items = [
+        {"type": "SECTION", "name": ""},
+        {"type": "EXTERNAL", "name": "Current H5P", "hint": "h5p", "href": "x"},
+    ]
+    messages = []
+    checker = SimpleNamespace(
+        _h5p=H5PHandler, log=lambda message, _tag: messages.append(message)
+    )
+
+    resolved = asyncio.run(ContentChecker._ensure_h5p_destination_units(
+        checker, None, None, "https://example.test", "1", items, []
+    ))
+
+    assert resolved is None
+    assert any("unnamed Moodle section" in message for message in messages)
 
 
 # ── Phase B insert: exact full-title match across pager pages ────────────────
@@ -623,6 +719,57 @@ class _PhaseBSpy:
         return True
 
 
+def test_phase_a_reuses_one_cloud_scan_and_tracks_new_uploads(tmp_path, monkeypatch):
+    import h5p_handler as mod
+
+    h5p_dir = tmp_path / "downloads" / "h5p"
+    h5p_dir.mkdir(parents=True)
+    for name in ("New A", "New B"):
+        (h5p_dir / f"{name}.h5p").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(mod, "__file__", str(tmp_path / "src" / "h5p_handler.py"))
+
+    handler = _handler()
+    scans = []
+    upload_snapshots = []
+
+    async def scan(*_args):
+        scans.append(True)
+        handler._last_cloud_scan_complete = True
+        return ["Older H5P"]
+
+    async def upload(*_args, known_cloud_titles=None):
+        upload_snapshots.append(list(known_cloud_titles))
+        return True
+
+    async def confirm(message):
+        return "Phase B" not in message
+
+    class Context:
+        async def new_page(self):
+            return SimpleNamespace(close=lambda: asyncio.sleep(0))
+
+    async def open_editor(*_args):
+        return object()
+
+    handler._collect_cloud_titles = scan
+    handler.upload_one = upload
+    handler._confirm = confirm
+    handler.open_editor_and_get_frame = open_editor
+    items = [
+        {"type": "SECTION", "name": "Week 1"},
+        {"type": "EXTERNAL", "name": "New A", "hint": "h5p", "href": "a"},
+        {"type": "EXTERNAL", "name": "New B", "hint": "h5p", "href": "b"},
+    ]
+    modules = [{"kind": "MODULE", "id": 1, "title": "Week 1"}]
+
+    asyncio.run(handler.embed_in_brightspace(
+        Context(), object(), items, modules, "https://bs.example", "1"
+    ))
+
+    assert len(scans) == 1
+    assert upload_snapshots == [["Older H5P"], ["Older H5P", "New A"]]
+
+
 def _run_embed(tmp_path, monkeypatch, decline_upload=True):
     """Drive embed_in_brightspace with fakes; return (spy, handler, items)."""
     import h5p_handler as mod
@@ -704,7 +851,9 @@ def test_declined_item_is_reported_as_not_inserted(tmp_path, monkeypatch):
     failed = [n for n, _ in handler._summary["h5p_failed"]]
     assert "Needs Upload" in failed
     inserted = [n for n, _ in handler._summary["h5p_inserted"]]
-    assert sorted(inserted) == ["In Cloud A", "In Cloud B"]
+    assert inserted == []
+    already_present = [n for n, _ in handler._summary["h5p_already_present"]]
+    assert sorted(already_present) == ["In Cloud A", "In Cloud B"]
 
 
 def test_insert_cast_vs_case_stays_distinct():
@@ -734,6 +883,20 @@ def test_duplicate_titles_get_distinct_stable_cache_stems():
 def test_single_title_keeps_legacy_cache_filename():
     item = {"type": "EXTERNAL", "name": "Drag & Drop", "hint": "h5p", "href": "https://m/x?id=1"}
     assert H5PHandler._download_stems([item])[id(item)] == "Drag  Drop"
+
+
+def test_assignments_follow_moodle_order_within_a_unit(tmp_path):
+    moodle_items = [
+        {"type": "SECTION", "name": "Vit 22"},
+        {"type": "EXTERNAL", "name": "Z first", "hint": "hvp", "href": "https://m/1"},
+        {"type": "EXTERNAL", "name": "A second", "hint": "hvp", "href": "https://m/2"},
+    ]
+    files = [tmp_path / "A second.h5p", tmp_path / "Z first.h5p"]
+    modules = [{"kind": "MODULE", "id": 7, "title": "Vit 22"}]
+
+    assignments = H5PHandler._build_assignments(files, moodle_items, modules, False)
+
+    assert [item["name"] for item in assignments] == ["Z first", "A second"]
 
 
 class GradeChoiceTab:
@@ -784,6 +947,138 @@ def test_missing_graded_choice_skips_instead_of_falling_back_ungraded():
     status = asyncio.run(handler._handle_grade_prompt(GradeChoiceTab(), "Practice", True))
     assert status == "skip"
     assert not any("proceed without" in text for texts in requested for text in texts)
+
+
+def test_insert_does_not_claim_success_without_footer_button():
+    handler = _handler()
+
+    async def matched(*args, **kwargs):
+        return "Practice"
+
+    handler._click_insert_for_title = matched
+
+    class NoFooterTab:
+        def __init__(self):
+            self.waits = []
+
+        async def evaluate(self, script):
+            return False
+
+        async def wait_for_timeout(self, ms):
+            self.waits.append(ms)
+
+    tab = NoFooterTab()
+    assert asyncio.run(handler.insert_from_list(tab, object(), "Practice")) is False
+    assert len(tab.waits) == 23
+
+
+def test_finalize_clicks_named_save_and_close_button():
+    handler = _handler()
+
+    class TitleInput:
+        async def is_visible(self, **kwargs):
+            return True
+
+        async def is_enabled(self, **kwargs):
+            return True
+
+        async def wait_for(self, **kwargs):
+            return None
+
+        async def click(self, **kwargs):
+            return None
+
+        async def fill(self, value, **kwargs):
+            assert value == "Practice"
+
+    class SaveButton:
+        def __init__(self, tab):
+            self.first = self
+            self.tab = tab
+
+        async def click(self, **kwargs):
+            self.tab.saved = True
+
+    class PageTab:
+        def __init__(self):
+            self.saved = False
+
+        def locator(self, selector):
+            class TitleLocator:
+                first = TitleInput()
+
+                async def count(self):
+                    return 1
+            return TitleLocator()
+
+        def get_by_role(self, role, name, exact):
+            assert (role, name, exact) == ("button", "Save and Close", True)
+            return SaveButton(self)
+
+        async def wait_for_timeout(self, ms):
+            return None
+
+    async def no_grade_prompt(*args):
+        return "absent"
+
+    handler._handle_grade_prompt = no_grade_prompt
+    tab = PageTab()
+    assert asyncio.run(handler.finalize(tab, "Practice", is_quiz=False)) is True
+    assert tab.saved is True
+
+
+def test_phase_b_stops_after_three_unconfirmed_pages(tmp_path, monkeypatch):
+    import h5p_handler as mod
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "downloads" / "h5p").mkdir(parents=True)
+    (tmp_path / "downloads" / "h5p" / "Practice.h5p").write_bytes(b"test")
+    monkeypatch.setattr(mod, "__file__", str(tmp_path / "src" / "h5p_handler.py"))
+
+    messages = []
+    handler = _handler()
+    handler.log = lambda msg, tag="info": messages.append(msg)
+    handler.h5p_phase_b_only = True
+    handler._build_assignments = lambda *args: [
+        {
+            "belongs_to_course": True, "bs_module_id": "1", "bs_module_title": "Week 1",
+            "moodle_section": "Week 1", "name": f"Practice {n}", "should_grade": False,
+        }
+        for n in range(5)
+    ]
+    attempts = []
+
+    class Page:
+        async def close(self):
+            return None
+
+        async def wait_for_timeout(self, ms):
+            return None
+
+    class Context:
+        async def new_page(self):
+            attempts.append(1)
+            return Page()
+
+    async def never_present(*args):
+        return False
+
+    async def editor(*args):
+        return object()
+
+    async def inserted(*args, **kwargs):
+        return True
+
+    handler._verify_topic_in_module = never_present
+    handler.open_editor_and_get_frame = editor
+    handler.insert_from_list = inserted
+    handler.finalize = inserted
+
+    asyncio.run(handler.embed_in_brightspace(Context(), object(), [], [], "https://bs", "1"))
+
+    assert len(attempts) == 3
+    assert len(handler._summary["h5p_failed"]) == 3
+    assert any("2 remaining item(s) were not attempted" in msg for msg in messages)
 
 
 class MoodleSaveFailureTab:

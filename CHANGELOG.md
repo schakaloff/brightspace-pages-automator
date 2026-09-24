@@ -5,6 +5,20 @@ Add a new `## X.Y.Z` section here whenever you bump `APP_VERSION` in
 The matching section is pulled into the GitHub Release notes automatically,
 and shown to users in the in-app "Update available" dialog.
 
+## 0.8.10
+- The Checker now accepts Moodle section links, can stop an active run, reports
+  incomplete scrapes before changing Brightspace, and can order existing pages
+  to match Moodle.
+- H5P uploads reuse a single cloud inventory, avoid duplicate inserts, verify
+  saved pages, and place pages in Moodle order.
+- The Collector verifies saved content, preserves links and files when an insert
+  fails, keeps hidden instructor material separate, and checks that collected
+  topics belong to the selected unit.
+- Restyle and Collect offer Calm and Classic page designs. Restyle removes old
+  generated resource markers and reports accessibility issues for review.
+- Added visual checks for page designs and accessibility checks for generated
+  HTML. Fixed the high-DPI icon test and bundled the Classic design on Mac.
+
 ## 0.8.9
 - Rolled back the strict content guardrails added since September 14. Claude
   styling works as it did before them: Claude sees the real page HTML, and

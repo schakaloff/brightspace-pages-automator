@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 from urllib.parse import urlparse
 
+from content_matcher import _numbers_conflict
 from js_helpers import DEEP_FIND_JS, _norm
+from rebuild_helpers import valid_section_name
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, Page
@@ -47,6 +49,7 @@ class H5PHandler:
         self._grade_recovery = grade_recovery
         self.grade_all = False
         self._DEEP_FIND_JS = DEEP_FIND_JS
+        self._last_cloud_scan_complete = False
 
     @staticmethod
     def activity_key(item: dict) -> str:
@@ -494,7 +497,6 @@ class H5PHandler:
                         continue
             if not editor_clicked:
                 self.log("  ⚠ Could not click editor body — toolbar may not activate", "warn")
-            await tab.wait_for_timeout(1500)
 
             if for_quiz:
                 # Quiz editor: open via Creator+ Authoring Tools → H5P menu item.
@@ -589,7 +591,6 @@ class H5PHandler:
                     return False
 
                 self.log("  ✓ Insert Stuff dialog opened — looking for H5P provider…", "dim")
-                await tab.wait_for_timeout(2000)
 
                 # The Insert Stuff dialog lists providers; find and click the H5P one.
                 h5p_provider_found = False
@@ -617,7 +618,6 @@ class H5PHandler:
                     await self._diagnose(tab, ["h5p", "insert", "provider", "lti"])
                     return False
 
-            await tab.wait_for_timeout(2000)
             return True
         except Exception as e:
             self.log(f"  ✗ _h5p_open_interactives error: {e}", "error")
@@ -759,6 +759,57 @@ class H5PHandler:
         return section_map, title_map
 
     @staticmethod
+    def _module_for_section(section_name: str, bs_flat: list) -> Optional[dict]:
+        """Find one safe Brightspace destination for a Moodle section."""
+        if not valid_section_name(section_name):
+            return None
+        modules = [item for item in bs_flat
+                   if item.get("kind") == "MODULE" and item.get("id")]
+        name = _norm(section_name)
+        exact = [item for item in modules if _norm(item.get("title", "")) == name]
+        if exact:
+            return exact[0] if len(exact) == 1 else None
+        keys = {_norm(item.get("title", "")) for item in modules}
+        close = difflib.get_close_matches(name, list(keys), n=1, cutoff=0.70)
+        if not close or _numbers_conflict(name, close[0]):
+            return None
+        candidates = [item for item in modules
+                      if _norm(item.get("title", "")) == close[0]]
+        return candidates[0] if len(candidates) == 1 else None
+
+    @classmethod
+    def _build_assignments(cls, h5p_files: list, moodle_items: list,
+                           bs_flat: list, grade_all: bool) -> list[dict]:
+        section_map, title_map = cls._moodle_h5p_maps(moodle_items)
+        stems = cls._download_stems(moodle_items)
+        moodle_order = {
+            stems[id(item)]: index
+            for index, item in enumerate(moodle_items)
+            if id(item) in stems
+        }
+        assignments = []
+        for file in h5p_files:
+            belongs_to_course = file.stem in title_map
+            section = section_map.get(file.stem, "")
+            module = cls._module_for_section(section, bs_flat) if belongs_to_course else None
+            assignments.append({
+                "file": file,
+                "name": title_map.get(file.stem, file.stem),
+                "should_grade": grade_all,
+                "belongs_to_course": belongs_to_course,
+                "moodle_section": section,
+                "bs_module_title": module["title"] if module else None,
+                "bs_module_id": module["id"] if module else None,
+            })
+        mod_order = {item["id"]: i for i, item in enumerate(bs_flat)
+                     if item.get("kind") == "MODULE" and item.get("id")}
+        assignments.sort(key=lambda item: (
+            mod_order.get(item["bs_module_id"], 9999),
+            moodle_order.get(item["file"].stem, len(moodle_items)),
+        ))
+        return assignments
+
+    @staticmethod
     def _norm_title(text: str) -> str:
         """Normalise a title for comparison.
 
@@ -800,6 +851,8 @@ class H5PHandler:
         visited: set = {start_url}
         pending: list = []
         pages = 0
+        complete = False
+        self._last_cloud_scan_complete = False
 
         while pages < max_pages:
             await self._wait_for_list_settled(tab, h5p_frame)
@@ -823,6 +876,7 @@ class H5PHandler:
                 if href not in visited and href not in pending:
                     pending.append(href)
             if not pending:
+                complete = True
                 break
 
             next_url = pending.pop(0)
@@ -849,7 +903,9 @@ class H5PHandler:
                 await tab.wait_for_timeout(1000)
             except Exception as e:
                 self.log(f"    ⚠ Could not return to page 1: {e}", "warning")
+                complete = False
 
+        self._last_cloud_scan_complete = complete and bool(titles)
         return titles
 
     async def _click_when_ready(self, owner, selector: str, label: str, timeout: int = 10000) -> bool:
@@ -1019,26 +1075,36 @@ class H5PHandler:
         )
         return False
 
-    async def upload_one(self, tab, h5p_frame, h5p_file, item_name) -> bool:
-        """Upload one .h5p to H5P cloud via an already-open content list frame. Returns to list after."""
+    async def upload_one(self, tab, h5p_frame, h5p_file, item_name,
+                         known_cloud_titles: Optional[list[str]] = None) -> bool:
+        """Upload one .h5p through the cloud editor and return to its list."""
         list_url = h5p_frame.url
         try:
+            if known_cloud_titles is not None and h5p_frame.is_detached():
+                h5p_frame = await self.find_list_frame(tab)
+                if not h5p_frame:
+                    self.log(f"  ✗ H5P content list frame lost — cannot upload {item_name}", "error")
+                    return False
+                list_url = h5p_frame.url
             # Check if already exists in cloud content list — skip if found.
             # Uses the same full-title rule as Phase A: a prefix rule made
             # "…Question 1" swallow "…Question 2&3" and "…Question 5", which
             # were then never uploaded at all.
-            try:
-                cloud_titles = await self._collect_cloud_titles(tab, h5p_frame)
-            except Exception as frame_err:
-                if "context was destroyed" in str(frame_err) or "Target closed" in str(frame_err):
-                    h5p_frame = await self.find_list_frame(tab)
-                    if not h5p_frame:
-                        self.log(f"  ✗ H5P content list frame lost — cannot upload {item_name}", "error")
-                        return False
-                    list_url = h5p_frame.url
+            if known_cloud_titles is not None:
+                cloud_titles = known_cloud_titles
+            else:
+                try:
                     cloud_titles = await self._collect_cloud_titles(tab, h5p_frame)
-                else:
-                    raise
+                except Exception as frame_err:
+                    if "context was destroyed" in str(frame_err) or "Target closed" in str(frame_err):
+                        h5p_frame = await self.find_list_frame(tab)
+                        if not h5p_frame:
+                            self.log(f"  ✗ H5P content list frame lost — cannot upload {item_name}", "error")
+                            return False
+                        list_url = h5p_frame.url
+                        cloud_titles = await self._collect_cloud_titles(tab, h5p_frame)
+                    else:
+                        raise
 
             matched = self._title_in_cloud(item_name, cloud_titles)
             self.log(
@@ -1302,12 +1368,15 @@ class H5PHandler:
         wanted = ["add grade item"] if should_grade else [
             "proceed without grade item", "proceed without", "skip"
         ]
-        for _ in range(3):
-            await tab.wait_for_timeout(700)
+        # Brightspace can show this choice immediately after Insert. Check
+        # promptly, while still allowing a few seconds for a slow response.
+        for attempt in range(15):
             if await self._auto_dismiss(tab, wanted):
                 label = "Add Grade Item" if should_grade else "Proceed Without Grade Item"
                 self.log(f"  → Chose '{label}' for {item_name}", "info")
                 return "handled"
+            if attempt < 14:
+                await tab.wait_for_timeout(200)
 
         if not should_grade:
             self.log("  → No grade item dialog found (continuing ungraded)", "dim")
@@ -1320,11 +1389,12 @@ class H5PHandler:
             )
             action = await self._grade_recovery_action(item_name, should_grade)
             if action == "retry":
-                for _ in range(3):
-                    await tab.wait_for_timeout(700)
+                for attempt in range(15):
                     if await self._auto_dismiss(tab, wanted):
                         self.log(f"  → Chose 'Add Grade Item' for {item_name}", "info")
                         return "handled"
+                    if attempt < 14:
+                        await tab.wait_for_timeout(200)
                 continue
             if action == "continue":
                 self.log("  → User confirmed the gradebook choice manually", "info")
@@ -1348,9 +1418,9 @@ class H5PHandler:
             self.log(f"  ✓ Clicked Insert for: {matched}", "dim")
 
             # Click Insert in dialog footer (d2l-button[data-dialog-action="insert"])
-            await tab.wait_for_timeout(1500)
             self.log("  → Clicking Insert in dialog footer…", "dim")
-            for _ in range(5):
+            footer_clicked = False
+            for attempt in range(24):
                 try:
                     ok = await tab.evaluate(f"""async () => {{
                         {df}
@@ -1364,10 +1434,15 @@ class H5PHandler:
                         return true;
                     }}""")
                     if ok:
+                        footer_clicked = True
                         break
                 except Exception:
                     pass
-                await tab.wait_for_timeout(1000)
+                if attempt < 23:
+                    await tab.wait_for_timeout(250)
+            if not footer_clicked:
+                self.log("  ✗ Insert dialog footer button never became available", "error")
+                return False
 
             self.log("  → Checking for grade item choice…", "dim")
             grade_status = await self._handle_grade_prompt(tab, item_name, should_grade)
@@ -1376,7 +1451,6 @@ class H5PHandler:
             if grade_status in ("skip", "stop"):
                 return False
             if grade_status == "handled":
-                await tab.wait_for_timeout(1000)
                 # After the choice, a plain <button class="d2l-button" primary>Insert</button>
                 # appears in the Interactives dialog — search all frames for it
                 self.log("  → Clicking Insert again after gradebook choice…", "dim")
@@ -1416,9 +1490,10 @@ class H5PHandler:
                             pass
                     if second_insert_clicked:
                         break
-                    await tab.wait_for_timeout(800)
+                    await tab.wait_for_timeout(300)
                 if not second_insert_clicked:
-                    self.log("  ⚠ Second Insert button not found", "warning")
+                    self.log("  ✗ Second Insert button not found; page was not embedded", "error")
+                    return False
             return True
         except Exception as e:
             self.log(f"  ✗ _h5p_insert_from_list error: {e}", "error")
@@ -1625,7 +1700,6 @@ class H5PHandler:
             return False
 
     async def finalize(self, tab, title: str, is_quiz: bool, should_grade: bool = False) -> bool:
-        df = self._DEEP_FIND_JS
         try:
             # Fill title — prefer exact maxlength match, fall back to any d2l-input
             self.log(f"  → Setting title: {title!r}…", "dim")
@@ -1654,39 +1728,36 @@ class H5PHandler:
                 except Exception as title_err:
                     self.log(f"    title selector {sel} failed: {str(title_err).splitlines()[0]}", "dim")
             if not title_filled:
-                self.log("  ⚠ Title input not found", "warning")
-            await tab.wait_for_timeout(500)
-
-            # Save and Close — use d2l-button.d2l-desktop (documented selector)
+                self.log("  ✗ Title input not found; page was not saved", "error")
+                return False
+            # Save the named action. A generic d2l-desktop selector can match a
+            # different control on the New Page screen.
             self.log("  → Clicking Save and Close…", "dim")
-            saved = await tab.evaluate(f"""async () => {{
-                {df}
-                var btn = deepFind(document, function(e) {{
-                    return (e.tagName || '').toUpperCase() === 'D2L-BUTTON'
-                        && e.classList && e.classList.contains('d2l-desktop');
-                }});
-                if (!btn) return false;
-                var inner = btn.shadowRoot && btn.shadowRoot.querySelector('button');
-                (inner || btn).click();
-                return true;
-            }}""")
-            if not saved:
-                self.log("  ⚠ d2l-button.d2l-desktop not found — Save and Close may have failed", "warning")
+            try:
+                await tab.get_by_role("button", name="Save and Close", exact=True).first.click(timeout=8000)
+            except Exception as exc:
+                self.log(
+                    f"  ✗ Save and Close could not be clicked: {str(exc).splitlines()[0]}",
+                    "error",
+                )
+                return False
 
             # Some Brightspace versions show the choice only after Save and Close.
-            await tab.wait_for_timeout(2000)
             if getattr(self, "_grade_choice_completed", False):
                 wanted = ["add grade item"] if should_grade else [
                     "proceed without grade item", "proceed without", "skip"
                 ]
-                clicked = await self._auto_dismiss(tab, wanted)
-                grade_status = "handled" if clicked else "absent"
+                for attempt in range(8):
+                    if await self._auto_dismiss(tab, wanted):
+                        break
+                    if attempt < 7:
+                        await tab.wait_for_timeout(250)
+                grade_status = "handled"  # The earlier choice is still valid.
             else:
                 grade_status = await self._handle_grade_prompt(tab, title, should_grade)
             self._last_grade_status = grade_status
             if grade_status in ("skip", "stop"):
                 return False
-            await tab.wait_for_timeout(2000)
             return True
         except Exception as e:
             self.log(f"  ✗ _h5p_finalize error: {e}", "error")
@@ -1702,7 +1773,6 @@ class H5PHandler:
             unit_url,
             wait_until="domcontentloaded", timeout=20000,
         )
-        await tab.wait_for_timeout(2000)
 
         # Poll instead of single-shot: D2L renders these lazily and a fixed
         # 2s sleep intermittently misses them ("Page tile not found").
@@ -1741,7 +1811,10 @@ class H5PHandler:
                 f"{'clicked' if clicked else 'button not found'}",
                 "dim",
             )
-            await tab.wait_for_timeout(1200)
+            if await self._tile_chooser_open(tab):
+                create_ok = True
+                break
+            await tab.wait_for_timeout(300)
         if not create_ok:
             self.log("  ✗ Create New chooser never opened", "error")
             return None
@@ -1778,7 +1851,6 @@ class H5PHandler:
             await tab.wait_for_load_state("domcontentloaded", timeout=15000)
         except Exception:
             pass
-        await tab.wait_for_timeout(1500)
 
         ok = await self.open_interactives(tab, for_quiz=False)
         if not ok:
@@ -1914,54 +1986,37 @@ class H5PHandler:
             self.log("  ⚠ No .h5p files found in downloads/h5p/ — skipping embed", "warning")
             return
 
-        section_map, title_map = self._moodle_h5p_maps(moodle_items)
         for key in ("h5p_inserted", "h5p_failed", "h5p_graded", "h5p_ungraded",
                     "h5p_skipped", "h5p_grade_failed", "h5p_already_present"):
             self._summary.setdefault(key, [])
 
-        bs_mod_map: dict = {}
-        bs_mod_orig: dict = {}
-        for item in bs_flat:
-            if item["kind"] == "MODULE" and item.get("id"):
-                nk = _norm(item["title"])
-                bs_mod_map[nk] = item["id"]
-                bs_mod_orig[nk] = item["title"]
+        assignments = self._build_assignments(
+            h5p_files, moodle_items, bs_flat, self.grade_all
+        )
 
-        assignments = []
-        for f in h5p_files:
-            # The stem is the sanitised filename; the ORIGINAL Moodle title is
-            # what the cloud, duplicate checks, and Phase B page titles use.
-            name = title_map.get(f.stem, f.stem)
-            moodle_section = section_map.get(f.stem, "")
-            bs_module_title = None
-            bs_module_id = None
-            if moodle_section:
-                close = difflib.get_close_matches(_norm(moodle_section), list(bs_mod_map.keys()), n=1, cutoff=0.55)
-                if close:
-                    bs_module_title = bs_mod_orig[close[0]]
-                    bs_module_id = bs_mod_map[close[0]]
-            assignments.append({
-                "file": f, "name": name,
-                "should_grade": self.grade_all,
-                "moodle_section": moodle_section,
-                "bs_module_title": bs_module_title,
-                "bs_module_id": bs_module_id,
-            })
-
-        mod_order = {item["id"]: i for i, item in enumerate(bs_flat) if item["kind"] == "MODULE" and item.get("id")}
-        assignments.sort(key=lambda a: mod_order.get(a["bs_module_id"], 9999))
-
-        matched = [a for a in assignments if a["bs_module_id"]]
+        this_course = [a for a in assignments if a["belongs_to_course"]]
+        other_course = [a for a in assignments if not a["belongs_to_course"]]
+        matched = [a for a in this_course if a["bs_module_id"]]
         self.log("", "dim")
-        self.log(f"🎮 H5P Phase 2: {len(assignments)} files  ({len(matched)} matched to BS modules)", "step")
+        self.log(
+            f"🎮 H5P Phase 2: {len(this_course)} course files "
+            f"({len(matched)} matched to BS units); "
+            f"{len(other_course)} unrelated cached files",
+            "step",
+        )
         self.log("   Matched count is Brightspace module matching; H5P cloud status is checked next.", "dim")
-        for a in assignments:
+        for a in this_course:
             self.log(f"   {a['name']}  →  {a['bs_module_title'] or '⚠ no match'}", "info")
 
-        # Only upload files that actually belong to this Moodle course.
-        # Files with no moodle_section are leftovers from other courses in the downloads folder.
-        this_course = [a for a in assignments if a["moodle_section"]]
-        other_course = [a for a in assignments if not a["moodle_section"]]
+        # A blank section name does not make a known Moodle activity a leftover.
+        unassigned = [a for a in this_course if not a["bs_module_id"]]
+        if unassigned:
+            sections = sorted({a["moodle_section"] or "(blank)" for a in unassigned})
+            self.log(
+                f"  ⚠ {len(unassigned)} current-course H5P file(s) have no "
+                f"Brightspace unit for Moodle section(s): {', '.join(sections)}",
+                "warning",
+            )
         if other_course:
             # Cached leftovers from other courses must never be uploaded, and
             # the user should SEE that they were ignored (dim lines are hidden
@@ -1973,6 +2028,14 @@ class H5PHandler:
             )
             for a in other_course:
                 self.log(f"      ignored leftover: {a['name']}", "info")
+
+        if unassigned:
+            self.log(
+                "  ✗ H5P upload and insertion stopped until every current-course "
+                "activity has a verified Brightspace unit.",
+                "error",
+            )
+            return
 
         phase_b_only = getattr(self, "h5p_phase_b_only", False)
 
@@ -2004,6 +2067,7 @@ class H5PHandler:
                 # Bulk-scan the whole library once, all pager pages included —
                 # no per-item navigation needed.
                 cloud_titles = []
+                self._last_cloud_scan_complete = False
                 try:
                     cloud_titles = await self._collect_cloud_titles(upload_tab, h5p_frame)
                     self.log(
@@ -2021,6 +2085,16 @@ class H5PHandler:
                 except Exception as e:
                     self.log(f"  ⚠ H5P cloud scan failed: {str(e).splitlines()[0]}", "warning")
                     # Frame may not be ready yet; upload_one still has a per-item duplicate check.
+
+                known_cloud_titles = (
+                    cloud_titles if getattr(self, "_last_cloud_scan_complete", False) else None
+                )
+                if known_cloud_titles is not None:
+                    self.log(
+                        "  ✓ Reusing this complete cloud list for duplicate checks "
+                        "during Phase A.",
+                        "dim",
+                    )
 
                 def _in_cloud(name):
                     key = self._norm_title(name)
@@ -2070,10 +2144,17 @@ class H5PHandler:
                                 self.log("⏸ Stopped by user — aborting H5P upload phase", "warning")
                                 return
                             self.log(f"  [{idx}/{len(to_upload)}] Uploading: {item['name']}…", "info")
-                            ok = await self.upload_one(upload_tab, h5p_frame, item["file"], item["name"])
+                            ok = await self.upload_one(
+                                upload_tab, h5p_frame, item["file"], item["name"],
+                                known_cloud_titles=known_cloud_titles,
+                            )
                             if not ok:
                                 self.log(f"    ✗ Upload failed — will skip insert for this item", "warning")
                                 item["upload_failed"] = True
+                            elif known_cloud_titles is not None and not self._title_in_cloud(
+                                item["name"], known_cloud_titles
+                            ):
+                                known_cloud_titles.append(item["name"])
             finally:
                 try:
                     await upload_tab.close()
@@ -2097,6 +2178,8 @@ class H5PHandler:
         N = len(matched)
         newly_inserted_count = 0
         already_present_count = 0
+        consecutive_save_failures = 0
+        not_attempted = 0
 
         for idx, item in enumerate(matched, 1):
             if self._should_stop():
@@ -2117,6 +2200,7 @@ class H5PHandler:
                 page, course_id, bs_module_id, name
             )
             if already_in_bs:
+                consecutive_save_failures = 0
                 already_present_count += 1
                 self._summary["h5p_already_present"].append((name, bs_module_title))
                 if item["should_grade"]:
@@ -2160,21 +2244,50 @@ class H5PHandler:
                         if self._last_grade_status == "stop":
                             return
                         continue
-                    self.log(f"    ⚠ Finalize had errors", "warning")
+                    self.log("    ✗ Page was not saved", "error")
+                    self._summary["h5p_failed"].append((name, bs_module_title))
+                    consecutive_save_failures += 1
+                    if consecutive_save_failures >= 3:
+                        not_attempted = N - idx
+                        self.log(
+                            f"  ⏹ Stopping Phase B after 3 pages could not be saved; "
+                            f"{not_attempted} remaining item(s) were not attempted.",
+                            "error",
+                        )
+                        break
+                    continue
 
-                # Verify via API that the topic actually landed
-                confirmed = await self._verify_topic_in_module(
-                    page, course_id, bs_module_id, name
-                )
+                # Brightspace can publish the new topic shortly after the
+                # editor closes. Poll the API rather than assuming a fixed
+                # delay is enough, or treating one early miss as a failure.
+                confirmed = False
+                for attempt in range(4):
+                    confirmed = await self._verify_topic_in_module(
+                        page, course_id, bs_module_id, name
+                    )
+                    if confirmed:
+                        break
+                    if attempt < 3:
+                        await tab.wait_for_timeout(750)
                 if confirmed:
+                    consecutive_save_failures = 0
                     self.log(f"    ✓ Done + verified: {name} → {bs_module_title}", "success")
                     self._summary["h5p_inserted"].append((name, bs_module_title))
                     newly_inserted_count += 1
                     bucket = "h5p_graded" if item["should_grade"] else "h5p_ungraded"
                     self._summary[bucket].append((name, bs_module_title))
                 else:
-                    self.log(f"    ⚠ Inserted but not confirmed in module via API", "warning")
+                    self.log("    ✗ Saved page could not be confirmed in its unit", "error")
                     self._summary["h5p_failed"].append((name, bs_module_title))
+                    consecutive_save_failures += 1
+                    if consecutive_save_failures >= 3:
+                        not_attempted = N - idx
+                        self.log(
+                            f"  ⏹ Stopping Phase B after 3 pages could not be verified; "
+                            f"{not_attempted} remaining item(s) were not attempted.",
+                            "error",
+                        )
+                        break
             except Exception as e:
                 self.log(f"    ✗ Error on {name}: {e}", "error")
                 self._summary["h5p_failed"].append((name, bs_module_title))
@@ -2185,6 +2298,11 @@ class H5PHandler:
                     pass
 
         self.log("", "dim")
+        if not_attempted:
+            self.log(
+                f"  {not_attempted} H5P item(s) were left untouched after repeated save failures.",
+                "warning",
+            )
         self.log(
             f"✅ Brightspace H5P result: {newly_inserted_count} newly inserted, "
             f"{already_present_count} already present, "
