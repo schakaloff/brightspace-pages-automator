@@ -22,7 +22,7 @@ from collections import Counter
 from functools import lru_cache
 import threading
 import uuid
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 import time
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -382,7 +382,7 @@ _JS_MOODLE_ITEMS = """() => {
 # Read-only: walks every HTML topic and requests each course-file link it
 # contains, so a file the Moodle import never carried over shows up as broken
 # instead of looking fine in the page.
-_JS_BROKEN_FILE_LINKS = """async (courseId) => {
+_JS_BROKEN_FILE_LINKS = r"""async (courseId) => {
     const broken = [], seen = new Set();
     let pages = 0, checked = 0;
     async function json(path) {
@@ -402,18 +402,30 @@ _JS_BROKEN_FILE_LINKS = """async (courseId) => {
             pages++;
             const holder = document.createElement('div');
             holder.innerHTML = await r.text();
-            for (const anchor of holder.querySelectorAll('a[href*="/content/enforced/"]')) {
-                const href = anchor.href;
+            for (const node of holder.querySelectorAll(
+                'a[href], img[src], source[src], video[src], video[poster], audio[src], '
+                + 'iframe[src], embed[src], object[data]')) {
+                const attr = node.hasAttribute('href') ? 'href'
+                    : node.hasAttribute('poster') ? 'poster'
+                    : node.hasAttribute('data') ? 'data' : 'src';
+                const raw = node.getAttribute(attr) || '';
+                if (!raw.includes('/content/enforced/')) continue;
+                const href = new URL(raw, location.origin).href;
                 const key = entry.Id + '|' + href;
                 if (seen.has(key)) continue;
                 seen.add(key);
                 checked++;
-                const probe = await fetch(href, { credentials: 'include' });
-                if (probe.ok && !probe.url.includes('/d2l/error/')) continue;
+                let works = false;
+                try {
+                    const probe = await fetch(href,
+                        { credentials: 'include', redirect: 'manual' });
+                    works = probe.ok && !probe.url.includes('/d2l/error/');
+                } catch (_) { /* A failed request is a broken file, not a failed scan. */ }
+                if (works) continue;
                 broken.push({
                     topic_id: entry.Id,
                     topic_title: entry.Title || '',
-                    text: (anchor.textContent || '').trim().slice(0, 80),
+                    text: (node.textContent || node.getAttribute('alt') || node.tagName).trim().slice(0, 80),
                     href,
                 });
             }
@@ -421,48 +433,6 @@ _JS_BROKEN_FILE_LINKS = """async (courseId) => {
     }
     await walk(await json(`/d2l/api/le/1.75/${courseId}/content/root/`));
     return { broken, pages, checked };
-}"""
-
-
-# Replaces exactly one link target inside a page, then reads the page back to
-# confirm the new address is really stored.
-_JS_PATCH_TOPIC_LINK = """async ([courseId, topicId, oldHref, newHref]) => {
-    const api = `/d2l/api/le/1.75/${courseId}/content/topics/${topicId}/file`;
-    // Brightspace serves a page from cache for a moment after it is written,
-    // so every read here is cache-busted and the check is retried.
-    const read = async () => {
-        const r = await fetch(`${api}?_=${Date.now()}_${Math.random()}`,
-            { credentials: 'include', cache: 'no-store' });
-        return r.ok ? await r.text() : null;
-    };
-    const xsrf = localStorage.getItem('XSRF.Token');
-    if (!xsrf) return { ok: false, why: 'no XSRF token' };
-    const html = await read();
-    if (html === null) return { ok: false, why: 'page could not be read' };
-    const holder = document.createElement('div');
-    holder.innerHTML = html;
-    let target = null;
-    for (const anchor of holder.querySelectorAll('a[href]')) {
-        if (anchor.href === oldHref) { target = anchor.getAttribute('href'); break; }
-    }
-    if (target === null) {
-        return html.includes(newHref)
-            ? { ok: true, why: 'already pointed at the new file' }
-            : { ok: false, why: 'link no longer in page' };
-    }
-    const updated = html.split(target).join(newHref);
-    if (updated === html) return { ok: false, why: 'link text not found in source' };
-    const form = new FormData();
-    form.append('file', new Blob([updated], { type: 'text/html' }), 'index.html');
-    const put = await fetch(api,
-        { method: 'PUT', credentials: 'include', headers: { 'X-Csrf-Token': xsrf }, body: form });
-    if (!put.ok) return { ok: false, why: `PUT ${put.status}: ${(await put.text()).slice(0, 120)}` };
-    for (const wait of [0, 600, 1500]) {
-        if (wait) await new Promise(done => setTimeout(done, wait));
-        const back = await read();
-        if (back !== null && back.includes(newHref)) return { ok: true, why: '' };
-    }
-    return { ok: false, why: 'saved, but the new link was not visible on re-read' };
 }"""
 
 
@@ -501,6 +471,7 @@ class ContentChecker:
         # attach an already-existing activity to Content.
         self.full_run               = full_run
         self.order_only             = False
+        self.books_only             = False
         self.keep_browser_open      = keep_browser_open
         self.stop_flag              = [False]
         self.log                    = self._make_log_filter(log)
@@ -2497,11 +2468,49 @@ class ContentChecker:
     async def _patch_topic_link(
         self, bs_page: "Page", course_id: str, topic_id, old_href: str, new_href: str
     ) -> tuple:
-        """Replace one link inside a page and verify the saved result."""
-        result = await bs_page.evaluate(
-            _JS_PATCH_TOPIC_LINK, [str(course_id), str(topic_id), old_href, new_href]
-        ) or {}
-        return bool(result.get("ok")), str(result.get("why") or "unknown")
+        """Replace a broken link in the page's Manage Files HTML and verify it."""
+        from bs4 import BeautifulSoup
+        from book_migration import BrightspaceBookAPI
+        from unit_overview import BrowserContentAPI
+
+        content = BrowserContentAPI(bs_page, str(course_id), "0")
+        files = BrightspaceBookAPI(bs_page, course_id)
+        topic = await content.get_topic(topic_id)
+        root = await files.course_root()
+        path = unquote(urlparse(str(topic.get("Url") or "")).path)
+        if not path.startswith(root):
+            return False, "page is not stored in this course's Manage Files"
+        relative = path[len(root):]
+        if not relative or ".." in relative.split("/") or "/" not in relative:
+            return False, "page file path is unsafe or has no folder"
+        folder, filename = relative.rsplit("/", 1)
+        original = await content.get_topic_html(topic_id)
+        soup = BeautifulSoup(original, "lxml")
+        candidates = set()
+        base = f"{urlparse(self.bs_url).scheme}://{urlparse(self.bs_url).netloc}"
+        for tag in soup.find_all(True):
+            for attr in ("href", "src", "poster", "data"):
+                raw = tag.get(attr)
+                if raw and urljoin(base, raw) == old_href:
+                    candidates.add(raw)
+        if not candidates:
+            return (new_href in original,
+                    "already pointed at the new file" if new_href in original
+                    else "link no longer in page")
+        updated = original
+        for raw in candidates:
+            updated = updated.replace(raw, new_href)
+        if updated == original:
+            return False, "link text not found in source"
+        await files.upload_file(folder, filename, updated.encode("utf-8"),
+                                "text/html", overwrite=True)
+        for delay in (0, 0.6, 1.5):
+            if delay:
+                await asyncio.sleep(delay)
+            saved = await content.get_topic_html(topic_id)
+            if new_href in saved and all(raw not in saved for raw in candidates):
+                return True, ""
+        return False, "saved page could not be verified"
 
     async def _repair_broken_file_links(
         self, context: "BrowserContext", bs_page: "Page", course_id: str,
@@ -2526,12 +2535,10 @@ class ContentChecker:
             self.log("  Skipped by user.", "dim")
             return 0
 
-        host_module = next(
-            (i["id"] for i in (bs_flat or []) if i.get("kind") == "MODULE" and i.get("id")), None
-        )
-        if host_module is None:
-            self.log("  No unit available to receive the uploads", "error")
-            return 0
+        from book_migration import BrightspaceBookAPI
+        files = BrightspaceBookAPI(bs_page, course_id)
+        await files.course_root()
+        await files.ensure_files_folder("Recovered Files")
 
         # A retry must not pile up copies of the same file, so an upload is
         # skipped when the course already serves that name.
@@ -2565,17 +2572,13 @@ class ContentChecker:
                     blob, content_type, real_name = await self._fetch_moodle_binary(
                         context, entry["moodle"].get("href", "")
                     )
-                    hosted, helper_topic = await self._host_course_file(
-                        bs_page, course_id, host_module, real_name or name, blob, content_type
+                    original_name = Path(real_name or name)
+                    digest = hashlib.sha256(str(entry["moodle"].get("href") or "").encode()).hexdigest()[:8]
+                    stored_name = f"{original_name.stem}-{digest}{original_name.suffix}"
+                    hosted = await files.upload_file(
+                        "Recovered Files", stored_name, blob, content_type
                     )
                     uploaded[name] = hosted
-                    try:
-                        from unit_overview import BrowserContentAPI
-                        await BrowserContentAPI(
-                            bs_page, str(course_id), str(host_module)
-                        ).delete_topic(helper_topic)
-                    except Exception:
-                        pass
                     self.log(f"  Uploaded: {real_name or name}", "success")
                 patched, why = await self._patch_topic_link(
                     bs_page, course_id, entry["topic_id"], entry["href"], uploaded[name]
@@ -2645,15 +2648,29 @@ class ContentChecker:
                 self.log(f"  ✗ {destination['title']}: could not reorder ({str(exc).splitlines()[0]})", "error")
 
     async def _create_missing_page_topics(
-        self, bs_page: "Page", course_id: str, results: list, bs_flat: list
+        self, context: "BrowserContext", bs_page: "Page", course_id: str,
+        results: list, bs_flat: list
     ) -> int:
-        """Create verified HTML topics using the existing preservation adapter."""
+        """Create verified pages with Moodle files hosted in Manage Files."""
+        from book_migration import (
+            BookChapter, BrightspaceBookAPI, _moodle_asset, asset_filename,
+            chapter_asset_urls, rewrite_chapter_links, _unique_activity_targets,
+        )
         from unit_overview import has_meaningful_unit_content
 
         modules = exact_module_map(bs_flat)
+        files = BrightspaceBookAPI(bs_page, course_id)
+        activity_targets = {key: value.format(course_id=course_id)
+                            for key, value in _unique_activity_targets(bs_flat).items()}
+        activity_urls = {
+            str(item.get("href")): activity_targets[str(item.get("name") or "").strip().casefold()]
+            for item in results if item.get("href")
+            and str(item.get("name") or "").strip().casefold() in activity_targets
+        }
         created = 0
         for item in results:
-            if item.get("type") != "PAGE" or item.get("status") != "missing" or item.get("embedded"):
+            if (item.get("type") != "PAGE" or item.get("status") != "missing"
+                    or item.get("embedded") or item.get("hint") == "modtype_book"):
                 continue
             title = str(item.get("name", "")).strip()
             source_html = str(item.get("page_html", "") or "")
@@ -2663,6 +2680,36 @@ class ContentChecker:
                 continue
             if not source_html or not has_meaningful_unit_content(source_html):
                 self.log(f"  ↷ PAGE needs manual copy (no safe body extracted): {title}", "warning")
+                continue
+
+            chapter = BookChapter(title, str(item.get("href") or ""), "page", source_html)
+            assets = chapter_asset_urls(chapter)
+            hosted = {}
+            if assets:
+                await files.course_root()
+                await files.ensure_files_folder("Page Assets")
+            for url in sorted(assets):
+                if self.stop_flag[0]:
+                    break
+                filename = asset_filename(url, {asset_filename(url).casefold()})
+                try:
+                    relative_path = f"Page Assets/{filename}"
+                    if await files.file_exists(relative_path):
+                        hosted[url] = (await files.course_root()) + quote(relative_path, safe="/")
+                    else:
+                        blob, content_type, _ = await _moodle_asset(context, url)
+                        hosted[url] = await files.upload_file(
+                            "Page Assets", filename, blob, content_type)
+                except Exception as exc:
+                    self.log(f"  ✗ PAGE {title}: could not store {filename}: {str(exc).splitlines()[0]}", "error")
+            if self.stop_flag[0]:
+                break
+            source_html, unresolved = rewrite_chapter_links(
+                chapter, hosted, activity_targets, {}, activity_urls)
+            if unresolved:
+                self.log(f"  ⚠ PAGE {title}: {len(unresolved)} Moodle link(s) need review; page was not created", "warning")
+                for url in unresolved[:10]:
+                    self.log(f"      ↳ {url[:180]}", "dim")
                 continue
 
             if await self._create_verified_html_topic(bs_page, course_id, destination, title, source_html):
@@ -3164,6 +3211,11 @@ class ContentChecker:
                 await self._abort_bad_scrape(tab, items, suspect)
                 await tab.close()
                 return None
+
+            if self.books_only:
+                await tab.close()
+                self.log("📘 Book-only run: Moodle page, folder and H5P scans skipped.", "dim")
+                return items
 
             # Deep scan: (1) scan label bodies on the course page itself,
             # (2) navigate to each PAGE topic for its body HTML,
@@ -3696,7 +3748,8 @@ class ContentChecker:
         # FILE hrefs point to direct downloads, not scannable HTML pages
         pages_to_scan = [
             i for i in items
-            if i["type"] == "PAGE" and i.get("href") and not i.get("embedded")
+            if (i["type"] == "PAGE" and i.get("href") and not i.get("embedded")
+                and i.get("hint") != "modtype_book")
         ]
 
         if not pages_to_scan:
@@ -4510,6 +4563,48 @@ class ContentChecker:
                         await asyncio.sleep(0.5)
                 return
 
+            if self.books_only:
+                from book_migration import migrate_book
+
+                modules = exact_module_map(bs_flat)
+                current_section = ""
+                books = []
+                for item in moodle_items:
+                    if item.get("type") == "SECTION":
+                        current_section = str(item.get("name") or "")
+                    elif item.get("hint") == "modtype_book" and item.get("href"):
+                        books.append((current_section, item))
+                if not books:
+                    self.log("No Moodle Books found in this course or section.", "warning")
+                for section, book in books:
+                    if self.stop_flag[0]:
+                        break
+                    destination = modules.get(_norm(section))
+                    if not destination:
+                        self.log(f"  ⚠ {book.get('name')}: no unique matching Brightspace unit for {section!r}", "warning")
+                        continue
+                    try:
+                        outcome = await migrate_book(
+                            context, page, course_id, str(destination["id"]),
+                            str(book["name"]), str(book["href"]), bs_flat,
+                            moodle_items, self.log, lambda: self.stop_flag[0],
+                            flag_unmatched_lti=True)
+                        self.log(
+                            f"📘 {book['name']}: {outcome.get('created', 0)} chapter(s) created, "
+                            f"{outcome.get('reused', 0)} reused, "
+                            f"{outcome.get('hidden', 0)} needing review, "
+                            f"{outcome.get('flagged', 0)} activity link(s) flagged", "step")
+                        bs_flat = await self._fetch_bs_toc(page, course_id) or bs_flat
+                    except Exception as exc:
+                        self.log(f"  ✗ Book {book.get('name')}: {str(exc).splitlines()[0]}", "error")
+                self.log("✓ Book split finished.", "success")
+                if self.on_complete:
+                    self.on_complete()
+                if self.keep_browser_open:
+                    while browser.is_connected():
+                        await asyncio.sleep(0.5)
+                return
+
             # ── Compare + scans ───────────────────────────────────────────────
             self.log("─" * 52, "dim")
             self.log("Comparing Moodle items against Brightspace…", "info")
@@ -4645,7 +4740,7 @@ class ContentChecker:
 
             if self.full_run and not self.link_repair_only:
                 created_urls = await self._create_missing_url_topics(page, course_id, results, bs_flat)
-                created_pages = await self._create_missing_page_topics(page, course_id, results, bs_flat)
+                created_pages = await self._create_missing_page_topics(context, page, course_id, results, bs_flat)
                 if created_urls or created_pages:
                     self.log(f"🔗 URL topics created: {created_urls}", "step")
                     self.log(f"📖 PAGE topics created: {created_pages}", "step")
@@ -4743,6 +4838,37 @@ class ContentChecker:
                 self._summary["timings"]["H5P embed (Phase B)"] = time.time() - t0
                 if not self.stop_flag[0]:
                     await self._order_units_like_moodle(page, course_id, results)
+
+            # A Moodle Book is one course activity containing multiple chapters.
+            # Handle it after ordinary activities so chapter links can target
+            # already-created Brightspace assignments and H5P content.
+            if self.full_run and not self.link_repair_only and not self.stop_flag[0]:
+                books = [r for r in results if r.get("hint") == "modtype_book"
+                         and r.get("href") and not r.get("embedded")]
+                if books:
+                    from book_migration import migrate_book
+                    modules = exact_module_map(bs_flat)
+                    bs_flat = await self._fetch_bs_toc(page, course_id) or bs_flat
+                    for book in books:
+                        if self.stop_flag[0]:
+                            break
+                        destination = modules.get(_norm(str(book.get("section") or "")))
+                        if not destination:
+                            self.log(f"  ↷ Book needs review (no unique exact unit): {book.get('name')}", "warning")
+                            continue
+                        try:
+                            outcome = await migrate_book(
+                                context, page, course_id, str(destination["id"]),
+                                str(book["name"]), str(book["href"]), bs_flat,
+                                moodle_items, self.log, lambda: self.stop_flag[0],
+                                flag_unmatched_lti=True)
+                            self.log(
+                                f"📘 {book['name']}: {outcome.get('created', 0)} chapter(s) created, "
+                                f"{outcome.get('reused', 0)} reused, "
+                                f"{outcome.get('hidden', 0)} needing review", "step")
+                            bs_flat = await self._fetch_bs_toc(page, course_id) or bs_flat
+                        except Exception as exc:
+                            self.log(f"  ✗ Book {book.get('name')}: {str(exc).splitlines()[0]}", "error")
 
             # ── Final summary + cleanup prompt ────────────────────────────────
             self._log_final_summary(results)

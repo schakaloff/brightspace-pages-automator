@@ -1,6 +1,8 @@
 import asyncio
 from types import SimpleNamespace
 
+import book_migration
+import unit_overview
 from content_checker import ContentChecker
 
 
@@ -53,3 +55,43 @@ def test_moodle_file_index_resolves_direct_redirect_and_resource_page():
     assert indexed["slides.pptx"] == [results[1]]
     assert request.urls[0].endswith("id=1&redirect=1")
     assert request.urls[1].endswith("id=2&redirect=1")
+
+
+def test_existing_page_media_link_is_rewritten_in_manage_files(monkeypatch):
+    old = "https://learn.okanagancollege.ca/content/enforced/Course/Content/missing.mp4"
+    new = "/content/enforced/Course/Recovered Files/video.mp4"
+    store = {"html": f'<p>Keep this text.</p><video><source src="{old}"></video>'}
+
+    class FakeContent:
+        def __init__(self, *_args):
+            pass
+
+        async def get_topic(self, _topic_id):
+            return {"Url": "/content/enforced/Course/Content/page.html"}
+
+        async def get_topic_html(self, _topic_id):
+            return store["html"]
+
+    class FakeFiles:
+        def __init__(self, *_args):
+            pass
+
+        async def course_root(self):
+            return "/content/enforced/Course/"
+
+        async def upload_file(self, folder, filename, blob, content_type, overwrite=False):
+            assert (folder, filename, content_type, overwrite) == (
+                "Content", "page.html", "text/html", True)
+            store["html"] = blob.decode("utf-8")
+
+    monkeypatch.setattr(unit_overview, "BrowserContentAPI", FakeContent)
+    monkeypatch.setattr(book_migration, "BrightspaceBookAPI", FakeFiles)
+    checker = object.__new__(ContentChecker)
+    checker.bs_url = "https://learn.okanagancollege.ca/d2l/le/lessons/1"
+    ok, why = asyncio.run(checker._patch_topic_link(
+        SimpleNamespace(), "1", "44", old, new))
+
+    assert ok, why
+    assert old not in store["html"]
+    assert new in store["html"]
+    assert "Keep this text." in store["html"]

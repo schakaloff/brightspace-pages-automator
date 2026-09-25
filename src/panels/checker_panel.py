@@ -99,6 +99,9 @@ class CheckerPanel(QWidget):
         order_act = run_menu.addAction("Order Existing Pages Like Moodle")
         order_act.triggered.connect(self._start_order_only)
 
+        book_act = run_menu.addAction("Split Moodle Books into Pages")
+        book_act.triggered.connect(self._start_books_only)
+
         run_menu.addSeparator()
 
         self._relink_act = run_menu.addAction("Re-link Moodle files")
@@ -198,7 +201,7 @@ class CheckerPanel(QWidget):
         })
 
     def _run_worker(self, phase_b: bool = False, full_run: bool = False,
-                    order_only: bool = False):
+                    order_only: bool = False, books_only: bool = False):
         if self._run_btn.text() == "⏹ Stop":
             return
         bs_url     = self._bs_entry.text().strip()
@@ -209,8 +212,8 @@ class CheckerPanel(QWidget):
         if phase_b and not bs_url:
             self._log.append_log("Paste a Brightspace URL first.", "warning")
             return
-        if order_only and (not bs_url or not moodle_url):
-            self._log.append_log("Paste both course URLs to match their page order.", "warning")
+        if (order_only or books_only) and (not bs_url or not moodle_url):
+            self._log.append_log("Paste both course URLs first.", "warning")
             return
 
         self.save_state()
@@ -317,7 +320,8 @@ class CheckerPanel(QWidget):
                 checker.h5p_skip_flag = skip_flag
                 checker.stop_flag = self._stop_flag
                 checker.order_only = order_only
-                checker.keep_browser_open = not order_only
+                checker.books_only = books_only
+                checker.keep_browser_open = not (order_only or books_only)
                 if phase_b:
                     checker.do_relink = False
                     checker.do_h5p_embed = True
@@ -368,6 +372,12 @@ class CheckerPanel(QWidget):
             self._log.append_log("Browser engine still installing — please wait.", "warning")
             return
         self._run_worker(order_only=True)
+
+    def _start_books_only(self):
+        if not self._mw.chromium_ready:
+            self._log.append_log("Browser engine still installing — please wait.", "warning")
+            return
+        self._run_worker(books_only=True)
 
     def _stop_run(self):
         """Cancel the active browser task and release any user prompt waits."""
