@@ -285,7 +285,9 @@ def _compact_text(value: str) -> str:
     return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value).casefold())
 
 
-def content_is_preserved(original_html: str, styled_html: str) -> tuple[bool, str]:
+def content_is_preserved(
+    original_html: str, styled_html: str, *, allow_label_colons: bool = False
+) -> tuple[bool, str]:
     """Lenient check for AI-styled output.
 
     Every authored text passage and every link, image, file, or embed URL from
@@ -298,6 +300,16 @@ def content_is_preserved(original_html: str, styled_html: str) -> tuple[bool, st
     styled_text = _compact_text(styled.visible_text)
     for part in original.visible_parts:
         if _compact_text(part) not in styled_text:
+            # A styled heading may turn "Instructor:" into "Instructor".
+            # Permit only that trailing label punctuation; names, times,
+            # addresses, links, and the rest of the passage still need to match.
+            if allow_label_colons and part.rstrip().endswith(":"):
+                label = part.rstrip()[:-1].strip()
+                if label and re.search(
+                    r"(?<!\w)" + re.escape(label).replace(r"\ ", r"\s+") + r"(?!\w)",
+                    styled.visible_text, re.I,
+                ):
+                    continue
             preview = part if len(part) <= 60 else part[:57] + "..."
             return False, f"text is missing: {preview!r}"
 

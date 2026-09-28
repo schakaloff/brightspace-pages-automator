@@ -70,6 +70,21 @@ def _clean_html(html: str) -> str:
     return result.strip()
 
 
+def _visible_word_count(markup: str) -> int:
+    """Words a reader would see, ignoring head, scripts and styles.
+
+    Uses the lenient ``html.parser`` on purpose: it keeps content that follows
+    a stray ``</html>``, which is exactly what the styler's own cleaning must be
+    compared against.
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(markup or "", "html.parser")
+    for tag in soup.find_all(["head", "script", "style", "title"]):
+        tag.decompose()
+    return len(soup.get_text(" ", strip=True).split())
+
+
 def _restore_kaltura_sizing(cleaned_html: str, styled_html: str, log=None) -> str:
     """Kaltura's player library sizes itself off the inline width/height style
     on its `id="kaltura_player_*"` container div. Claude's restyle rewrite is
@@ -194,6 +209,15 @@ async def apply_style(
         f"  ({len(cleaned_html.split()):,} words)",
         "info",
     )
+    source_words, cleaned_words = _visible_word_count(source_html), _visible_word_count(cleaned_html)
+    if source_words >= 20 and cleaned_words < source_words * 0.6:
+        log(
+            f"❌ Cleaning kept only {cleaned_words:,} of the page's {source_words:,} words. "
+            "Claude would restyle a page that is mostly missing, so styling was "
+            "skipped and the page was left as it is.",
+            "error",
+        )
+        return None, None
 
     prompt = prompt_template.format(
         source_html=cleaned_html,

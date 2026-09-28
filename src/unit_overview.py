@@ -29,8 +29,8 @@ _PRESERVED_MODULE_FIELDS = (
 
 def extract_description_html(module: dict) -> str:
     description = (module or {}).get("Description") or {}
-    if description.get("Html") is not None:
-        return str(description.get("Html") or "")
+    if description.get("Html"):
+        return str(description["Html"])
     text = str(description.get("Text") or "")
     return f"<p>{html.escape(text)}</p>" if text.strip() else ""
 
@@ -125,7 +125,9 @@ class BrowserContentAPI:
     async def get_module(self) -> dict:
         result = await self.page.evaluate(
             """async ([courseId, moduleId]) => {
-                const r = await fetch(`/d2l/api/le/1.0/${courseId}/content/modules/${moduleId}`,
+                // LE 1.0 omits Description and ParentModuleId. Both are needed
+                // before section text can be moved without losing it.
+                const r = await fetch(`/d2l/api/le/1.75/${courseId}/content/modules/${moduleId}`,
                     { credentials: 'include', headers: { Accept: 'application/json' } });
                 if (!r.ok) throw new Error(`GET module ${r.status}: ${(await r.text()).slice(0,200)}`);
                 return await r.json();
@@ -192,7 +194,7 @@ class BrowserContentAPI:
     async def get_topic(self, topic_id: int | str) -> dict:
         return await self.page.evaluate(
             """async ([courseId, topicId]) => {
-                const r = await fetch(`/d2l/api/le/1.0/${courseId}/content/topics/${topicId}`,
+                const r = await fetch(`/d2l/api/le/1.75/${courseId}/content/topics/${topicId}`,
                     { credentials: 'include', headers: { Accept: 'application/json' } });
                 if (!r.ok) throw new Error(`GET topic ${r.status}: ${(await r.text()).slice(0,200)}`);
                 return await r.json();
@@ -268,7 +270,7 @@ class BrowserContentAPI:
                 if (!xsrf) throw new Error('update module: no XSRF token');
                 const headers = { 'Content-Type': 'application/json' };
                 headers['X-Csrf-Token'] = xsrf;
-                const r = await fetch(`/d2l/api/le/1.0/${courseId}/content/modules/${moduleId}`,
+                const r = await fetch(`/d2l/api/le/1.75/${courseId}/content/modules/${moduleId}`,
                     { method: 'PUT', credentials: 'include', headers, body: JSON.stringify(payload) });
                 if (!r.ok) throw new Error(`PUT module ${r.status}: ${(await r.text()).slice(0,200)}`);
             }""",

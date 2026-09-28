@@ -200,6 +200,22 @@ def test_collector_panel_has_multi_unit_checkboxes(qtbot):
     assert panel._auto_continue_chk.isEnabled() is False
 
 
+def test_collector_cleanup_mode_requires_an_existing_page(qtbot):
+    from unittest.mock import MagicMock
+    from gui_panels import CollectorPanel
+
+    mw = MagicMock(); mw.chromium_ready = False; mw.load_config.return_value = {}
+    panel = CollectorPanel(mw); qtbot.addWidget(panel)
+    panel.show()
+    panel._cleanup_only_chk.setChecked(True)
+
+    assert panel._run_btn.text() == "Clear Section Duplicate"
+    assert not panel._auto_create_chk.isChecked()
+    assert not panel._auto_create_chk.isEnabled()
+    assert panel._target_entry.isVisible()
+    assert not panel._multi_unit_chk.isEnabled()
+
+
 def test_multi_unit_toggle_enables_auto_continue_checkbox(qtbot):
     from unittest.mock import MagicMock
     from gui_panels import CollectorPanel

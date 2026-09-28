@@ -126,6 +126,17 @@ class CollectorPanel(QWidget):
         self._target_hint.setWordWrap(True)
         top.addWidget(self._target_hint)
 
+        self._cleanup_only_chk = QCheckBox(
+            "Already styled? Clear duplicate section text only"
+        )
+        self._cleanup_only_chk.setObjectName("clear_section_duplicate_checkbox")
+        self._cleanup_only_chk.setToolTip(
+            "Use the existing combined page URL above. This checks that the page "
+            "contains the section text, then clears the original section without "
+            "running Claude again."
+        )
+        top.addWidget(self._cleanup_only_chk)
+
         # ── Style ────────────────────────────────────────────────────────────
         top.addWidget(_form_label("STYLE / THEME"))
         self._swatch_frames, self._selected_theme = _build_theme_swatches(top)
@@ -171,6 +182,7 @@ class CollectorPanel(QWidget):
         )
         self._multi_unit_chk.toggled.connect(self._on_multi_unit_toggle)
         adv.addWidget(self._multi_unit_chk)
+        self._cleanup_only_chk.toggled.connect(self._on_cleanup_only_toggle)
 
         self._auto_continue_chk = QCheckBox("Don't ask me before each unit")
         self._auto_continue_chk.setObjectName("chk_dont_ask_before_each_unit")
@@ -254,8 +266,8 @@ class CollectorPanel(QWidget):
             "QPushButton:disabled { background-color:#1a2a2c; color:#636780; }"
         )
         self._run_btn.setToolTip(
-            "Scrapes all topic pages in the unit, combines them into one collapsible page,\n"
-            "and writes the result to the target page."
+            "Combines the section introduction and its topic pages into one styled page.\n"
+            "After styling is verified, the introduction is removed from the section."
         )
         self._run_btn.clicked.connect(self._on_primary_clicked)
         self._btn_row.addWidget(self._secondary_btn)
@@ -341,16 +353,23 @@ class CollectorPanel(QWidget):
             self._status_row.setVisible(False)
             self._secondary_btn.hide()
             self._run_btn.show()
-            self._run_btn.setText("Create Combined Unit Page")
+            self._run_btn.setText(
+                "Clear Section Duplicate" if self._cleanup_only_chk.isChecked()
+                else "Create Combined Unit Page"
+            )
             self._run_btn.setEnabled(True)
             self._set_inputs_enabled(True)
         elif state == CollectState.RUNNING:
             self._show_status(
-                "Collecting pages… this usually takes 1–3 min.", running=True
+                "Checking the existing page and section…" if self._cleanup_only_chk.isChecked()
+                else "Collecting pages… this usually takes 1–3 min.", running=True
             )
             self._secondary_btn.hide()
             self._run_btn.show()
-            self._run_btn.setText("Collecting… usually 1–3 min")
+            self._run_btn.setText(
+                "Checking and clearing…" if self._cleanup_only_chk.isChecked()
+                else "Collecting… usually 1–3 min"
+            )
             self._run_btn.setEnabled(False)
             self._set_inputs_enabled(False)
         elif state == CollectState.SUCCESS:
@@ -369,13 +388,14 @@ class CollectorPanel(QWidget):
     def _set_inputs_enabled(self, enabled: bool):
         self._unit_entry.setEnabled(enabled)
         self._target_entry.setEnabled(enabled)
-        self._auto_create_chk.setEnabled(enabled)
+        self._auto_create_chk.setEnabled(enabled and not self._cleanup_only_chk.isChecked())
+        self._cleanup_only_chk.setEnabled(enabled)
         self._adv_btn.setEnabled(enabled)
         self._adv_container.setEnabled(enabled)
         self._parallel_spin.setEnabled(enabled)
         self._moodle_entry.setEnabled(enabled)
         self._style_preset.setEnabled(enabled)
-        self._multi_unit_chk.setEnabled(enabled)
+        self._multi_unit_chk.setEnabled(enabled and not self._cleanup_only_chk.isChecked())
         # dependent checkbox keeps its parent-gated rule when re-enabling
         self._auto_continue_chk.setEnabled(enabled and self._multi_unit_chk.isChecked())
         for swatch in self._swatch_frames.values():
@@ -429,6 +449,15 @@ class CollectorPanel(QWidget):
                 "for a new result. The target page's content will be replaced."
             )
 
+    def _on_cleanup_only_toggle(self, checked: bool):
+        if checked:
+            self._auto_create_chk.setChecked(False)
+            self._multi_unit_chk.setChecked(False)
+            if self._state == CollectState.SUCCESS:
+                self._state = CollectState.READY
+        if self._state != CollectState.RUNNING:
+            self._apply_state()
+
     def _on_multi_unit_toggle(self, checked: bool):
         self._auto_continue_chk.setEnabled(checked)
         if not checked:
@@ -463,10 +492,13 @@ class CollectorPanel(QWidget):
         target_url = _normalize_url(self._target_entry.text())
         moodle_url = _normalize_url(self._moodle_entry.text())
         auto_create = self._auto_create_chk.isChecked()
+        cleanup_only = self._cleanup_only_chk.isChecked()
         multi_unit  = self._multi_unit_chk.isChecked()
         auto_continue = self._auto_continue_chk.isChecked()
         if not unit_url:
             self._log.append_log("Paste a Brightspace unit URL first.", "warning"); return
+        if cleanup_only and not target_url:
+            self._log.append_log("Paste the existing styled combined page URL first.", "warning"); return
         if not target_url and not auto_create:
             self._log.append_log(
                 "Paste a target page URL, or turn on “Auto-create the target page”.", "warning"
@@ -530,6 +562,7 @@ class CollectorPanel(QWidget):
                         unit_url=unit_url,
                         target_url=target_url,
                         auto_create_target=auto_create,
+                        cleanup_only=cleanup_only,
                         log=lambda msg, tag="info": q.put((msg, tag)),
                         on_complete=on_done,
                         **shared_kwargs,
@@ -617,7 +650,10 @@ class CollectorPanel(QWidget):
                 if msg == "__DONE__":
                     # Backend fires __DONE__ on both success and failure; decide
                     # final state from the success sentinel sniffed below.
-                    self._state = CollectState.SUCCESS if self._succeeded else CollectState.READY
+                    self._state = (
+                        CollectState.READY if self._cleanup_only_chk.isChecked()
+                        else CollectState.SUCCESS if self._succeeded else CollectState.READY
+                    )
                     self._apply_state()
                 elif msg == "__SUCCESS__":
                     self.step_success.emit()

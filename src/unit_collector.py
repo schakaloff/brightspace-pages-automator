@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import binascii
 from collections import Counter
 import html
 import json
@@ -72,6 +74,84 @@ def split_by_visibility(topics: list, hidden_ids: set) -> tuple:
         topic["hidden"] = is_hidden
         (hidden if is_hidden else visible).append(topic)
     return visible, hidden
+
+
+def html_body_fragment(markup: str) -> str:
+    """Return only the body content of a whole HTML document.
+
+    A Brightspace topic's source is a complete document (doctype, ``<head>``
+    with D2L's default font CSS, ``<body>``). Pasting several of those into one
+    combined page nests documents inside each other: browsers shrug it off, but
+    every parser downstream reads the first ``</html>`` as the end of the page.
+    That is how a 5,700-character combined page reached Claude as 70.
+    """
+    if not markup or not re.search(r"<\s*(?:!doctype|html|head|body)\b", markup, re.I):
+        return markup
+    from bs4 import BeautifulSoup, Doctype
+
+    soup = BeautifulSoup(markup, "html.parser")
+    body = soup.find("body")
+    if body is not None:
+        return body.decode_contents().strip()
+    for tag in soup.find_all("head"):
+        tag.decompose()
+    for tag in soup.find_all("html"):
+        tag.unwrap()
+    for item in soup.contents:
+        if isinstance(item, Doctype):
+            item.extract()
+    return soup.decode().strip()
+
+
+def course_file_link_html(url: str, label: str) -> str:
+    return (
+        f'<p><a href="{html.escape(url, quote=True)}">'
+        f"{html.escape(str(label))}</a></p>\n"
+    )
+
+
+_UNIT_SOURCE_ID = "bpa-unit-description-source"
+
+
+def unit_source_marker(source_html: str) -> str:
+    """Keep the original unit description available for a later collector run."""
+    encoded = base64.b64encode(source_html.encode("utf-8")).decode("ascii")
+    return f'<template id="{_UNIT_SOURCE_ID}">{encoded}</template>'
+
+
+def stored_unit_source(page_html: str) -> tuple[bool, str]:
+    """Return (marker present, original HTML), rejecting damaged markers."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(page_html or "", "html.parser")
+    markers = soup.find_all("template", id=_UNIT_SOURCE_ID)
+    if not markers:
+        return False, ""
+    if len(markers) != 1:
+        raise ValueError("the combined page has multiple unit-description markers")
+    try:
+        encoded = re.sub(r"\s+", "", markers[0].decode_contents())
+        original = base64.b64decode(encoded, validate=True).decode("utf-8")
+    except (binascii.Error, ValueError, UnicodeError) as exc:
+        raise ValueError("the combined page's unit-description marker is damaged") from exc
+    if not original:
+        raise ValueError("the combined page's unit-description marker is empty")
+    return True, original
+
+
+def with_unit_source_marker(page_html: str, source_html: str) -> str:
+    """Replace a previous marker without changing the page's visible content."""
+    without_old = re.sub(
+        rf'<template\b[^>]*\bid\s*=\s*["\']{_UNIT_SOURCE_ID}["\'][^>]*>'
+        rf'.*?</template\s*>',
+        "", page_html or "", flags=re.I | re.S,
+    )
+    closing = re.search(r"</(?:body|html)\s*>", without_old, re.I)
+    insert_at = closing.start() if closing else len(without_old)
+    return (
+        without_old[:insert_at] + "\n" + unit_source_marker(source_html)
+        + "\n" + without_old[insert_at:]
+    )
 
 
 def is_collector_target_title(value: object) -> bool:
@@ -1808,7 +1888,99 @@ class UnitCollector:
 
     # ── Main run ──────────────────────────────────────────────────────────────
 
-    async def _collect_into(self, context, topics: list, target_url: str) -> bool:
+    _JS_COURSE_FILE_EXISTS = """async (path) => {
+        try {
+            const r = await fetch(path, { method: 'HEAD', credentials: 'include', cache: 'no-store' });
+            return r.ok;
+        } catch (e) { return false; }
+    }"""
+
+    async def _course_root(self, page: Page, course_id: str) -> str:
+        """The course's Manage Files folder, e.g. ``/content/enforced/24877-X/``."""
+        try:
+            course = await page.evaluate(
+                """async (id) => {
+                    const r = await fetch(`/d2l/api/lp/1.49/courses/${id}`,
+                        { credentials: 'include', headers: { Accept: 'application/json' } });
+                    return r.ok ? await r.json() : null;
+                }""",
+                str(course_id),
+            )
+        except Exception:
+            return ""
+        path = str((course or {}).get("Path") or "")
+        if not re.fullmatch(r"/content/enforced/[^/]+/?", path):
+            return ""
+        return path.rstrip("/") + "/"
+
+    async def _upload_files(
+        self, tab: Page, target_url: str, file_items: list
+    ) -> tuple[str, int, int]:
+        """Upload files through Insert Stuff and return link HTML for them.
+
+        Insert Stuff is used only as an uploader: it puts each file into the
+        course's Manage Files the moment Upload is clicked. The editor session
+        is then abandoned, and the caller writes the links through the content
+        API. A link is only made once the uploaded file is proven to exist.
+
+        Returns ``(links_html, fallback_link_count, unresolved_count)``.
+        """
+        from editor_save import _topic_ids
+        from urllib.parse import quote
+
+        ids = _topic_ids(target_url)
+        course_root = await self._course_root(tab, ids[0]) if ids else ""
+        if not course_root:
+            self.log(
+                "⚠ Could not read this course's file folder — files will be linked "
+                "to their original topics instead of uploaded.", "warning",
+            )
+
+        editor_ready = False
+        if course_root:
+            editor_ready = await self._navigate_to_edit(tab, target_url)
+            if not editor_ready:
+                self.log("✗ Could not open the page editor to upload files", "error")
+
+        parts: list[str] = []
+        fallback_links = unresolved = 0
+        if editor_ready:
+            self.log(f"Uploading {len(file_items)} file(s)...", "info")
+            await tab.wait_for_timeout(3000)
+        for f in file_items:
+            label = f.get("corrected_name") or f.get("topic_label") or f.get("filename", "File")
+            if editor_ready:
+                await self._editor_cursor_end(tab)
+                if await self._insert_file(tab, f):
+                    uploaded_url = course_root + quote(f["filename"])
+                    if await tab.evaluate(self._JS_COURSE_FILE_EXISTS, uploaded_url):
+                        parts.append(course_file_link_html(uploaded_url, label))
+                        continue
+                    self.log(
+                        f"  ⚠ {f['filename']} was not found in Manage Files after "
+                        "uploading.", "warning",
+                    )
+            # Fallback: prefer the file's permanent Manage Files address
+            # (survives topic deletion); otherwise link to the topic itself.
+            fallback_url = f.get("direct_url") or f.get("topic_url") or ""
+            unresolved += 1
+            if not fallback_url:
+                self.log(
+                    f"  ✗ Could not upload {f['filename']} and there is no original "
+                    "URL to link to.", "error",
+                )
+                continue
+            parts.append(course_file_link_html(fallback_url, label))
+            fallback_links += 1
+            self.log(
+                f"  ⚠ Linked {f['filename']} to its original file instead of "
+                "uploading it.", "warning",
+            )
+        return "".join(parts), fallback_links, unresolved
+
+    async def _collect_into(
+        self, context, topics: list, target_url: str, unit_description_html: str = ""
+    ) -> bool:
         """Scrape *topics*, assemble them into *target_url*, then transform it.
 
         Split out of run() so the same pipeline can fill either the student
@@ -1848,6 +2020,13 @@ class UnitCollector:
         from content_preservation import add_generated_heading
         from youtube_embed import parse_youtube_url
 
+        if unit_description_html:
+            linked_intro = link_known_topic_references(
+                html_body_fragment(unit_description_html), topics
+            )
+            sections.append(add_generated_heading("Overview", linked_intro) + "\n<hr/>\n")
+            self.log("  + Unit description (Overview)", "dim")
+
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 self.log(f"✗ Topic {i + 1} scrape failed: {result}", "error")
@@ -1868,7 +2047,7 @@ class UnitCollector:
                 from bs4 import BeautifulSoup
 
                 linked_html = link_known_topic_references(
-                    result["html"], topics, topic.get("url", "")
+                    html_body_fragment(result["html"]), topics, topic.get("url", "")
                 )
                 section = add_generated_heading(topic["label"], linked_html)
                 current_resource_heading = (
@@ -1977,60 +2156,29 @@ class UnitCollector:
                 pass
             from editor_save import replace_topic_html
 
+            # Text first, on its own, so it is safe even if uploading goes wrong.
             if not await replace_topic_html(tab, target_url, assembled_html, self.log):
                 return False
 
             if file_items:
-                if not await self._navigate_to_edit(tab, target_url):
-                    self.log("✗ Could not open target editor for file insertion", "error")
-                    return False
-                self.log(f"Inserting {file_count} file(s)...", "info")
-                await tab.wait_for_timeout(3000)
-                for f in file_items:
-                    await self._editor_cursor_end(tab)
-                    if await self._insert_file(tab, f):
-                        continue
-                    # Fallback: prefer the file's permanent Manage Files
-                    # address (survives topic deletion); only if that
-                    # wasn't detected, link to the topic itself.
-                    fallback_url = f.get("direct_url") or f.get("topic_url") or ""
-                    if not fallback_url:
-                        self.log(
-                            f"  ⚠ Could not insert {f['filename']} and no "
-                            "original URL to link to — skipped.",
-                            "warning",
-                        )
-                        unresolved_count += 1
-                        continue
-                    link_label = (
-                        f.get("corrected_name")
-                        or f.get("topic_label")
-                        or f.get("filename", "File")
+                files_html, file_link_count, file_unresolved = await self._upload_files(
+                    tab, target_url, file_items
+                )
+                unresolved_count += file_unresolved
+                assembled_html = assembled_html.replace(
+                    "<h2>Files</h2>\n<p></p>\n",
+                    "<h2>Files</h2>\n" + files_html if files_html else "",
+                    1,
+                )
+                # The editor that uploaded the files is abandoned, never saved:
+                # its Save and Close has repeatedly reported success while
+                # discarding everything inserted in that session. The links go
+                # in through the same verified API write as the text.
+                if not await replace_topic_html(tab, target_url, assembled_html, self.log):
+                    self.log(
+                        "✗ The files were uploaded, but their links could not be "
+                        "saved to the page.", "error",
                     )
-                    safe_label = html.escape(str(link_label))
-                    safe_url = html.escape(fallback_url, quote=True)
-                    if await self._source_code_append(
-                        tab,
-                        f'<p><a href="{safe_url}">{safe_label}</a></p>\n',
-                    ):
-                        self.log(
-                            f"  ⚠ Could not insert {f['filename']} directly; "
-                            "added link to original file instead.",
-                            "warning",
-                        )
-                        file_link_count += 1
-                        unresolved_count += 1
-                    else:
-                        self.log(
-                            f"  ✗ Could not insert or link {f['filename']}.",
-                            "error",
-                        )
-                        unresolved_count += 1
-
-                if not await self._save_and_close(tab):
-                    self.log("✗ Could not save the inserted files", "error")
-                    return False
-                if not await self._verify_saved(tab, target_url, len(assembled_html)):
                     return False
         finally:
             try:
@@ -2080,6 +2228,83 @@ class UnitCollector:
                 "could not be copied as content or files.", "error",
             )
             return False
+        return True
+
+    async def _finish_unit_description_transfer(
+        self, page, original_module: dict, source_html: str,
+        clear_source: bool = True,
+    ) -> bool:
+        """Clear the section only after its combined page is verified and reusable."""
+        from content_preservation import content_is_equivalent, content_is_preserved
+        from editor_save import read_topic_html, replace_topic_html, _topic_ids
+        from unit_overview import (
+            BrowserContentAPI, _module_metadata_matches,
+            extract_description_html, has_meaningful_unit_content,
+        )
+        from target_page_creator import _parse_ids
+
+        course_id, module_id = _parse_ids(self.unit_url)
+        target_ids = _topic_ids(self.target_url)
+        if not course_id or not module_id or not target_ids or target_ids[0] != course_id:
+            self.log("✗ Could not verify the target belongs to this unit; section text was kept", "error")
+            return False
+        api = BrowserContentAPI(page, course_id, module_id)
+        try:
+            target = await api.get_topic(target_ids[1])
+            if str(target.get("ParentModuleId")) != str(module_id):
+                raise ValueError("the combined page is outside the source unit")
+            combined = await read_topic_html(page, self.target_url)
+            preserved, reason = content_is_preserved(
+                source_html, combined, allow_label_colons=True
+            )
+            if not preserved:
+                raise ValueError(f"combined page is missing section content: {reason}")
+
+            if clear_source:
+                current_module = await api.get_module()
+                metadata_ok, metadata_reason = _module_metadata_matches(original_module, current_module)
+                unchanged, description_reason = content_is_equivalent(
+                    source_html, extract_description_html(current_module)
+                )
+                if not metadata_ok or not unchanged:
+                    raise ValueError(metadata_reason or f"section changed during collection: {description_reason}")
+
+            marked = with_unit_source_marker(combined, source_html)
+            if not await replace_topic_html(page, self.target_url, marked, self.log):
+                raise ValueError("could not save the reusable copy in the combined page")
+            saved = await read_topic_html(page, self.target_url)
+            marker_present, stored = stored_unit_source(saved)
+            if not marker_present or stored != source_html:
+                raise ValueError("Brightspace did not retain the reusable copy")
+
+            if clear_source:
+                await api.replace_module_description(current_module, "")
+                cleared = await api.get_module()
+                metadata_ok, metadata_reason = _module_metadata_matches(original_module, cleared)
+                if not metadata_ok or has_meaningful_unit_content(extract_description_html(cleared)):
+                    raise ValueError(metadata_reason or "section description was not cleared")
+        except Exception as exc:
+            self.log(f"✗ Could not verify section text in the combined page: {exc}", "error")
+            # A failed update can still have cleared the section. Restore its
+            # original HTML if the read-back is ambiguous or metadata changed.
+            if clear_source:
+                try:
+                    actual = await api.get_module()
+                    if not has_meaningful_unit_content(extract_description_html(actual)):
+                        await api.replace_module_description(original_module, source_html)
+                        restored = await api.get_module()
+                        same, reason = content_is_equivalent(
+                            source_html, extract_description_html(restored)
+                        )
+                        if not same:
+                            self.log(f"✗ Section restoration could not be verified: {reason}", "error")
+                except Exception as restore_exc:
+                    self.log(f"✗ Section restoration could not be verified: {restore_exc}", "error")
+            return False
+        if clear_source:
+            self.log("✓ Section text moved into the styled combined page", "success")
+        else:
+            self.log("✓ Section text retained for future collector runs", "success")
         return True
 
     async def _collect_hidden_topics(self, context, page, hidden_topics: list) -> bool:
@@ -2159,7 +2384,11 @@ class UnitCollector:
         )
         return True
 
-    async def run(self, context: Optional[BrowserContext] = None, page: Optional[Page] = None) -> bool:
+    async def run(
+        self, context: Optional[BrowserContext] = None,
+        page: Optional[Page] = None,
+        cleanup_only: bool = False,
+    ) -> bool:
         """Run this unit. Returns True on a normal finish, False for the two
         known dead-ends (no target page, no topics found).
 
@@ -2196,6 +2425,45 @@ class UnitCollector:
             except Exception:
                 pass
 
+            if cleanup_only:
+                from editor_save import _topic_ids
+                from target_page_creator import _parse_ids
+                from unit_overview import (
+                    BrowserContentAPI, extract_description_html,
+                    has_meaningful_unit_content,
+                )
+
+                def cleanup_result(ok: bool) -> bool:
+                    if self._on_complete:
+                        self._on_complete()
+                    return ok
+
+                course_id, module_id = _parse_ids(self.unit_url)
+                target_ids = _topic_ids(self.target_url)
+                if not course_id or not module_id or not target_ids or target_ids[0] != course_id:
+                    self.log("✗ Paste the existing combined page URL to clear its section duplicate", "error")
+                    return cleanup_result(False)
+                api = BrowserContentAPI(page, course_id, module_id)
+                try:
+                    target = await api.get_topic(target_ids[1])
+                    if not is_collector_target_title(target.get("Title")):
+                        raise ValueError("the target is not a Collector combined page")
+                    original_module = await api.get_module()
+                    source_html = extract_description_html(original_module)
+                except Exception as exc:
+                    self.log(f"✗ Could not verify the existing combined page: {exc}", "error")
+                    return cleanup_result(False)
+                if not has_meaningful_unit_content(source_html):
+                    self.log("✓ Done! The original section text is already clear.", "success")
+                    return cleanup_result(True)
+                self.log("Verifying the styled page before clearing duplicate section text...", "info")
+                if not await self._finish_unit_description_transfer(
+                    page, original_module, source_html
+                ):
+                    return cleanup_result(False)
+                self.log("✓ Done! Duplicate section text cleared.", "success")
+                return cleanup_result(True)
+
             # ── Auto-create target page (optional, self-contained feature) ────
             # If no target URL was given and auto-create is on, make a blank page
             # in this same unit via the D2L API, then proceed exactly as if the
@@ -2230,14 +2498,73 @@ class UnitCollector:
                 if topic["url"].rstrip("/") != target_path
                 and not is_collector_target_title(topic.get("label"))
             ]
-            if not topics:
-                self.log("✗ No topics found — nothing to collect", "error")
+            from target_page_creator import _parse_ids
+            from unit_overview import (
+                BrowserContentAPI, extract_description_html,
+                has_meaningful_unit_content,
+            )
+            from editor_save import read_topic_html
+
+            course_id, module_id = _parse_ids(self.unit_url)
+            if not course_id or not module_id:
+                self.log("✗ Could not identify the source unit", "error")
+                return False
+            unit_api = BrowserContentAPI(page, course_id, module_id)
+            try:
+                original_module = await unit_api.get_module()
+                original_description = extract_description_html(original_module)
+                description_needs_move = has_meaningful_unit_content(original_description)
+                unit_description = original_description if description_needs_move else ""
+                if not description_needs_move:
+                    combined_before = await read_topic_html(page, self.target_url)
+                    marker_present, stored = stored_unit_source(combined_before)
+                    if marker_present:
+                        from content_preservation import content_is_preserved
+
+                        preserved, reason = content_is_preserved(
+                            stored, combined_before, allow_label_colons=True
+                        )
+                        if not preserved:
+                            raise ValueError(
+                                f"stored section text is missing from the combined page: {reason}"
+                            )
+                        unit_description = stored
+                        self.log("↻ Reusing section text from the existing combined page", "info")
+            except Exception as exc:
+                self.log(f"✗ Could not read the unit description safely: {exc}", "error")
+                return False
+
+            if not topics and not unit_description:
+                self.log("✗ No topics or section text found — nothing to collect", "error")
                 if self._on_complete:
                     self._on_complete()
                 if not external:
                     while browser.is_connected():
                         await asyncio.sleep(0.5)
                 return False
+            if not topics:
+                from editor_save import _topic_ids
+
+                target_ids = _topic_ids(self.target_url)
+                try:
+                    children = await unit_api.list_structure()
+                    if not isinstance(children, list):
+                        raise ValueError("Brightspace returned an invalid child list")
+                except Exception as exc:
+                    self.log(f"✗ Could not verify the section is empty: {exc}", "error")
+                    return False
+                uncollected = [
+                    child for child in children
+                    if isinstance(child, dict)
+                    and str(child.get("Id")) != (target_ids[1] if target_ids else "")
+                    and not is_collector_target_title(child.get("Title"))
+                ]
+                if uncollected:
+                    self.log(
+                        "✗ The section has child items, but the page scan found none. "
+                        "Its text was left in place; retry after the unit loads.", "error",
+                    )
+                    return False
 
             await self._build_name_matcher()
 
@@ -2270,21 +2597,66 @@ class UnitCollector:
                 for t in hidden_topics:
                     self.log(f"     • {t['label']}", "dim")
 
-            if visible_topics:
-                if not await self._collect_into(context, visible_topics, self.target_url):
-                    return False
+            student_ok = True
+            if visible_topics or unit_description:
+                if unit_description:
+                    student_ok = await self._collect_into(
+                        context, visible_topics, self.target_url, unit_description
+                    )
+                else:
+                    student_ok = await self._collect_into(
+                        context, visible_topics, self.target_url
+                    )
             else:
                 self.log(
                     "⚠ Every topic in this unit is hidden from students — the student "
                     "page was left empty.", "warning",
                 )
 
-            if hidden_topics and not await self._collect_hidden_topics(
-                context, page, hidden_topics
-            ):
-                return False
+            if student_ok and unit_description:
+                if not description_needs_move or self.claude_api_key:
+                    student_ok = await self._finish_unit_description_transfer(
+                        page, original_module, unit_description,
+                        clear_source=description_needs_move,
+                    )
+                else:
+                    self.log(
+                        "⚠ Section text was collected, but remains in the section "
+                        "until styling is enabled and verified.", "warning",
+                    )
+
+            # The instructor page is independent of the student page. A styling
+            # or review problem on one must not leave the hidden topics
+            # uncollected.
+            hidden_ok = True
+            if hidden_topics:
+                if not student_ok:
+                    self.log(
+                        "Continuing with the instructor page — the student page "
+                        "problems above are reported at the end.", "info",
+                    )
+                hidden_ok = await self._collect_hidden_topics(
+                    context, page, hidden_topics
+                )
 
             self.log("─" * 52, "dim")
+            if not (student_ok and hidden_ok):
+                failed = [
+                    name for name, ok in (
+                        ("student page", student_ok), ("instructor page", hidden_ok)
+                    ) if not ok
+                ]
+                self.log(
+                    f"✗ Finished with problems on the {' and '.join(failed)} — "
+                    "see the messages above.", "error",
+                )
+                if self._on_complete:
+                    self._on_complete()
+                if not external:
+                    while browser.is_connected():
+                        await asyncio.sleep(0.5)
+                return False
+
             self.log("✓ Done! Close the browser when finished.", "success")
 
             if self._on_complete:
@@ -2328,6 +2700,7 @@ async def run(
     moodle_password: str = "",
     context: Optional[BrowserContext] = None,
     page: Optional[Page] = None,
+    cleanup_only: bool = False,
 ) -> bool:
     return await UnitCollector(
         unit_url=unit_url,
@@ -2348,4 +2721,4 @@ async def run(
         moodle_url=moodle_url,
         moodle_username=moodle_username,
         moodle_password=moodle_password,
-    ).run(context=context, page=page)
+    ).run(context=context, page=page, cleanup_only=cleanup_only)
