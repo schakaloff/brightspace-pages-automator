@@ -55,7 +55,7 @@ class RestyleRunSummary:
         logger(f"Pages selected:       {self.pages_selected}", "info")
         logger(f"Pages changed:        {self.pages_changed}", "success")
         logger(
-            f"Pages not changed:    {self.pages_failed}",
+            f"Pages needing review: {self.pages_failed}",
             "warning" if self.pages_failed else "info",
         )
         if self.accessibility_pages_checked:

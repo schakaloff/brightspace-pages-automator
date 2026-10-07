@@ -6,6 +6,22 @@ The matching section is pulled into the GitHub Release notes automatically,
 and shown to users in the in-app "Update available" dialog.
 
 ## 0.8.10
+- Create batches of named pages in a chosen section, edit each page's content,
+  preview the draft, and clear the local list with one action. Creation tracks
+  verified results and stops on uncertain requests instead of retrying them.
+- Restyle any selection of pages from a section using a searchable checklist.
+  Batch progress reports saved, failed and skipped pages; Stop lets active
+  pages finish before stopping the queue.
+- Refreshed the Build & style hub, Check & fix screen, bulk page editor, and
+  loading screen with modern light/dark layouts and smaller-window scrolling.
+  Check & fix separates the read-only scan from explicitly selected fixes.
+- Added reviewed removal of selected Content topics without deleting linked
+  files or activities.
+- Collected pages keep each topic's authored description beside its content,
+  including file descriptions, and verify that styling preserves them.
+- Fixed narrow styled pages in Brightspace's student view and separated the
+  Calm and Classic styling instructions. Installed apps load the selected
+  bundled reference and report missing templates before starting a run.
 - The Checker now accepts Moodle section links, can stop an active run, reports
   incomplete scrapes before changing Brightspace, and can order existing pages
   to match Moodle.

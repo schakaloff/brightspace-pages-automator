@@ -85,6 +85,34 @@ def _visible_word_count(markup: str) -> int:
     return len(soup.get_text(" ", strip=True).split())
 
 
+_PAGE_WIDTH_STYLE = (
+    "width: 95% !important; max-width: 1000px !important; "
+    "min-width: 0; box-sizing: border-box"
+)
+
+
+def _keep_page_container_wide(styled_html: str) -> str:
+    """Keep a styled page wide when Brightspace renders it as a flex child.
+
+    The visual editor puts page HTML in a normal block, while the student view
+    applies the generated body's centered flex layout. If Claude omits a width
+    from .main-container, the student view shrinks the card to its shortest
+    content even though it fills the editor. An inline width survives the
+    different wrappers Brightspace uses for those two views.
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(styled_html, "html.parser")
+    container = soup.select_one(".main-container")
+    if container is None:
+        return styled_html
+    existing = str(container.get("style") or "").strip().rstrip(";")
+    if _PAGE_WIDTH_STYLE in existing:
+        return styled_html
+    container["style"] = f"{existing}; {_PAGE_WIDTH_STYLE}" if existing else _PAGE_WIDTH_STYLE
+    return str(soup)
+
+
 def _restore_kaltura_sizing(cleaned_html: str, styled_html: str, log=None) -> str:
     """Kaltura's player library sizes itself off the inline width/height style
     on its `id="kaltura_player_*"` container div. Claude's restyle rewrite is
@@ -228,18 +256,44 @@ async def apply_style(
         "symbol, and its aria-label. Style each as a restrained, compact cue using "
         "the theme accent colour; keep it immediately beside the text it introduces. "
         "Do not replace these authored cues with a different library or print any "
-        "[fa-*] shortcode. Do not add new decorative icons to resource rows."
+        "[fa-*] shortcode. Do not add new decorative icons to resource rows. "
+        "PAGE WIDTH: Give the outer .main-container width: 95% and max-width: 1000px. "
+        "Brightspace may render it as a flex child; without an explicit width, "
+        "a short file list collapses into a narrow box."
     )
+    if 'bpa-topic-description' in cleaned_html:
+        prompt += (
+            "\n\nTOPIC DESCRIPTIONS: Keep each .bpa-topic-description directly beside "
+            "the page, link, or file it describes. Preserve its authored text, "
+            "formatting, and links. Keep the Description label readable and "
+            "visually modest; do not move the description to another resource."
+        )
     if "BPA: CLASSIC" in (style_reference_html or ""):
         prompt += (
-            "\n\nCLASSIC PRESET OVERRIDE: Follow the supplied classic card-and-gradient "
-            "reference instead of the calm-resource direction above. Do not add info-list "
-            "panels or action-link buttons unless they already exist in the source. Preserve "
-            "the classic card spacing, heading treatment, and ordinary underlined links."
+            "\n\nCLASSIC PRESET DESIGN: Rebuild the source using the supplied classic "
+            "card-and-gradient reference, even if the source was previously styled with "
+            "another design. Use a .hero with a linear-gradient from --primary to --mid, "
+            "a large white uppercase page title, and spacious rounded .action-card sections "
+            "with shadows and theme-coloured section headings. Use ordinary underlined links "
+            "in the theme primary colour. Do not retain calm resource-directory spacing, "
+            "info-list panels, resource-row layouts, or action-link buttons from a previous "
+            "design; preserve their authored content and destinations in the classic cards. "
+            "Use only source content for titles and labels; reference placeholders are not content."
         )
     else:
         prompt += (
-            "\n\nCALM PRESET READABILITY OVERRIDE: Follow the supplied reference's quieter "
+            "\n\nCALM PRESET READABILITY OVERRIDE: Rebuild the source using the supplied "
+            "calm reference, even if the source was previously styled with another design. "
+            "Use a calm hierarchy: headings and body copy are charcoal; reserve the primary "
+            "colour for restrained accents; set --primary-soft to a low-opacity version of "
+            "the primary colour and use it only for grouped information. Links use an accessible "
+            "dark orange action colour and stay underlined. Do not move files to the bottom of "
+            "the page. Only make an existing standalone Zoom/meeting link into an .action-link "
+            "button when its nearby label makes the destination clear; preserve the original "
+            "link URL and text in a visually-hidden .sr-only sibling. For clear labelled fields "
+            "such as Professor, Email, or Office Location, use .info-list, .info-row, .info-label, "
+            "and .info-value. Remove previous gradient banners and oversized uppercase title "
+            "styling. Follow the supplied reference's quieter "
             "academic proportions. Do not add icons to labelled information rows and do not use "
             "vertical accent bars on the hero, information groups, or schedule groups. Do not use "
             "the theme colour for borders or outlines. Use spacing, pale backgrounds, and neutral "
@@ -372,6 +426,7 @@ async def apply_style(
                 result = "\n".join(lines[start:end]).strip()
 
             result = _restore_kaltura_sizing(cleaned_html, result, log=log)
+            result = _keep_page_container_wide(result)
             # The API can vary its link target from page to page. Keep the
             # authoring behavior deterministic, including Brightspace's
             # "New window" setting in the visual Edit Link dialog.

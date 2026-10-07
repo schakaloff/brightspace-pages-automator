@@ -520,7 +520,14 @@ class CollectorPanel(QWidget):
         theme_colors = PAGE_THEMES[theme_name]
         parallel     = self._parallel_spin.value()
 
-        style_reference_html = load_style_reference(self._style_preset.currentData())
+        try:
+            style_reference_html = load_style_reference(self._style_preset.currentData())
+        except OSError:
+            self._log.append_log(
+                "The selected page design could not be loaded. Restore the app's templates or reinstall it, then try again.",
+                "error",
+            )
+            return
 
         self._succeeded = False
         self._last_page_count = None

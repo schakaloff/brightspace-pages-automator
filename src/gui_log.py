@@ -26,6 +26,7 @@ class LogWidget(QTextEdit):
         self._at_bottom = True
         self._mode = "simple"
         self._entries: list[tuple[str, str]] = []
+        self._color_overrides: dict[str, str] = {}
         self.verticalScrollBar().valueChanged.connect(self._track_scroll)
         self._setup_zoom_badge()
         self._setup_mode_toggle()
@@ -75,6 +76,11 @@ class LogWidget(QTextEdit):
     def refresh_theme(self):
         self._apply_zoom_badge_style()
         self._apply_mode_btn_style()
+
+    def set_log_colors(self, colors: dict[str, str]):
+        """Allow a screen to use its own accessible theme colors in the log."""
+        self._color_overrides = dict(colors)
+        self._rerender()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -130,7 +136,7 @@ class LogWidget(QTextEdit):
     def _insert_line(self, text: str, tag: str):
         fmt = QTextCharFormat()
         key = _TAG_KEYS.get(tag, "LOG_INFO")
-        fmt.setForeground(QColor(gui_styles.current[key]))
+        fmt.setForeground(QColor(self._color_overrides.get(tag, gui_styles.current[key])))
         cursor = self.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         cursor.insertText(text + "\n", fmt)

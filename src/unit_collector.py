@@ -110,6 +110,24 @@ def course_file_link_html(url: str, label: str) -> str:
     )
 
 
+def topic_description_html(topic_metadata: dict) -> str:
+    """Read a topic's authored description from Brightspace's RichText data."""
+    from unit_overview import extract_description_html, has_meaningful_unit_content
+
+    fragment = html_body_fragment(extract_description_html(topic_metadata))
+    return fragment if has_meaningful_unit_content(fragment) else ""
+
+
+def topic_description_block(description_html: str) -> str:
+    if not description_html:
+        return ""
+    return (
+        '<div class="bpa-topic-description">\n'
+        '<p><strong>Description</strong></p>\n'
+        f'{description_html}\n</div>\n'
+    )
+
+
 _UNIT_SOURCE_ID = "bpa-unit-description-source"
 
 
@@ -625,14 +643,15 @@ class UnitCollector:
             self.log("⚠ No topics found — are you logged in? Is the unit expanded?", "warning")
         return unique
 
-    async def _fetch_hidden_topic_ids(self, page: Page) -> Optional[set]:
-        """Ask D2L which topics in this unit are hidden from students.
+    async def _fetch_hidden_topic_ids(self, page: Page, topics: list) -> Optional[set]:
+        """Read visibility and full descriptions for the topics being collected.
 
         The list item in the DOM carries no reliable visibility flag, so the
-        authoritative answer comes from the content API. Returns None when the
-        answer could not be obtained — the caller must treat that as fatal
-        rather than guessing, because guessing wrong publishes staff-only
-        material to students.
+        authoritative answer comes from the content API. LE 1.0's module
+        structure response omits descriptions, so read each selected topic
+        through LE 1.75 before assembling either combined page. Returns None
+        if any required metadata cannot be read; silently losing a description
+        or publishing a hidden topic is not a valid partial collection.
         """
         from target_page_creator import _parse_ids
 
@@ -663,6 +682,50 @@ class UnitCollector:
             for item in items
             if isinstance(item, dict) and (item.get("Id") or item.get("TopicId"))
         }
+        from unit_overview import BrowserContentAPI
+
+        api = BrowserContentAPI(page, course_id, module_id)
+        semaphore = asyncio.Semaphore(4)
+
+        async def read_topic(topic_id: str) -> dict:
+            async with semaphore:
+                return await api.get_topic(topic_id)
+
+        selected_ids = list(dict.fromkeys(
+            str(topic.get("topic_id")) for topic in topics if topic.get("topic_id")
+        ))
+        missing_ids = [topic_id for topic_id in selected_ids if topic_id not in self._topic_metadata]
+        if missing_ids:
+            self.log(
+                f"  ✗ {len(missing_ids)} topic(s) are missing from Brightspace's "
+                "structure response", "error",
+            )
+            return None
+        details = await asyncio.gather(
+            *(read_topic(topic_id) for topic_id in selected_ids),
+            return_exceptions=True,
+        )
+        for topic_id, detail in zip(selected_ids, details):
+            if isinstance(detail, Exception) or not isinstance(detail, dict):
+                self.log(
+                    f"  ✗ Could not read the full description for topic {topic_id}: "
+                    f"{detail}", "error",
+                )
+                return None
+            if "Description" not in detail or not isinstance(
+                detail["Description"], (dict, type(None))
+            ):
+                self.log(
+                    f"  ✗ Topic {topic_id} returned no usable Description field",
+                    "error",
+                )
+                return None
+            self._topic_metadata[topic_id]["Description"] = detail.get("Description")
+        description_count = sum(
+            bool(topic_description_html(self._topic_metadata[topic_id]))
+            for topic_id in selected_ids
+        )
+        self.log(f"  ✓ Read {description_count} topic description(s)", "dim")
         return {
             topic_id for topic_id, item in self._topic_metadata.items()
             if item.get("IsHidden") is True
@@ -1758,6 +1821,7 @@ class UnitCollector:
     async def _apply_claude_style(
         self, context, expected_min_chars: int = 0,
         required_section_links: Optional[list[tuple[str, str]]] = None,
+        required_descriptions: Optional[list[str]] = None,
     ) -> bool:
         if not self.claude_api_key:
             self.log("⚠ No Claude API key — skipping styling step", "warning")
@@ -1818,6 +1882,17 @@ class UnitCollector:
                 for item in moved[:5]:
                     self.log(f"  {item}", "detail")
                 return False
+
+            from content_preservation import content_is_preserved
+
+            for description in required_descriptions or []:
+                preserved, reason = content_is_preserved(description, styled_html)
+                if not preserved:
+                    self.log(
+                        f"✗ Styling dropped a topic description ({reason}). "
+                        "The assembled page was kept.", "error",
+                    )
+                    return False
 
             try:
                 from accessibility_checker import log_report, scan_html
@@ -1949,12 +2024,13 @@ class UnitCollector:
             await tab.wait_for_timeout(3000)
         for f in file_items:
             label = f.get("corrected_name") or f.get("topic_label") or f.get("filename", "File")
+            description_block = f.get("description_block") or ""
             if editor_ready:
                 await self._editor_cursor_end(tab)
                 if await self._insert_file(tab, f):
                     uploaded_url = course_root + quote(f["filename"])
                     if await tab.evaluate(self._JS_COURSE_FILE_EXISTS, uploaded_url):
-                        parts.append(course_file_link_html(uploaded_url, label))
+                        parts.append(course_file_link_html(uploaded_url, label) + description_block)
                         continue
                     self.log(
                         f"  ⚠ {f['filename']} was not found in Manage Files after "
@@ -1969,8 +2045,9 @@ class UnitCollector:
                     f"  ✗ Could not upload {f['filename']} and there is no original "
                     "URL to link to.", "error",
                 )
+                parts.append(description_block)
                 continue
-            parts.append(course_file_link_html(fallback_url, label))
+            parts.append(course_file_link_html(fallback_url, label) + description_block)
             fallback_links += 1
             self.log(
                 f"  ⚠ Linked {f['filename']} to its original file instead of "
@@ -2006,6 +2083,7 @@ class UnitCollector:
         html_count = link_count = file_count = file_link_count = 0
         unresolved_count = 0
         required_section_links: list[tuple[str, str]] = []
+        required_descriptions: list[str] = []
         current_resource_heading = ""
 
         # Insert Stuff uses the original filename in course Manage Files. Two
@@ -2019,6 +2097,15 @@ class UnitCollector:
 
         from content_preservation import add_generated_heading
         from youtube_embed import parse_youtube_url
+
+        def description_for(topic: dict) -> str:
+            metadata = self._topic_metadata.get(str(topic.get("topic_id") or ""), {})
+            source = topic_description_html(metadata)
+            if not source:
+                return ""
+            linked = link_known_topic_references(source, topics, topic.get("url", ""))
+            required_descriptions.append(linked)
+            return topic_description_block(linked)
 
         if unit_description_html:
             linked_intro = link_known_topic_references(
@@ -2035,6 +2122,7 @@ class UnitCollector:
                 sections.append(
                     f'<p><a href="{safe_url}">{html.escape(topic["label"])}</a></p>\n'
                 )
+                sections.append(description_for(topic))
                 if current_resource_heading:
                     required_section_links.append((current_resource_heading, topic["url"]))
                 link_count += 1
@@ -2042,6 +2130,7 @@ class UnitCollector:
                 continue
             topic = result["topic"]
             safe = html.escape(topic["label"])
+            description_block = description_for(topic)
 
             if result["html"]:
                 from bs4 import BeautifulSoup
@@ -2049,14 +2138,17 @@ class UnitCollector:
                 linked_html = link_known_topic_references(
                     html_body_fragment(result["html"]), topics, topic.get("url", "")
                 )
-                section = add_generated_heading(topic["label"], linked_html)
+                section = add_generated_heading(
+                    topic["label"], description_block + linked_html
+                )
                 current_resource_heading = (
                     topic["label"] if re.search(r"\b(slides?|recordings?)\b", topic["label"], re.I)
                     else ""
                 )
                 parsed = BeautifulSoup(linked_html, "html.parser")
                 has_authored_content = bool(
-                    parsed.get_text(" ", strip=True)
+                    description_block
+                    or parsed.get_text(" ", strip=True)
                     or parsed.find(["a", "img", "iframe", "video", "audio", "object", "embed", "script"])
                 )
                 sections.append(f"{section}\n" + ("<hr/>\n" if has_authored_content else ""))
@@ -2080,6 +2172,7 @@ class UnitCollector:
                         f'<p><strong>{link_label}:</strong> '
                         f'<a href="{safe_url}">{safe_url}</a></p>\n'
                     )
+                sections.append(description_block)
                 if current_resource_heading:
                     required_section_links.append((current_resource_heading, result["link_url"]))
                 link_count += 1
@@ -2097,6 +2190,7 @@ class UnitCollector:
                         f'<p><a href="{html.escape(slide_url, quote=True)}">'
                         f'{html.escape(topic["label"])}</a></p>\n'
                     )
+                    sections.append(description_block)
                     if current_resource_heading:
                         required_section_links.append((current_resource_heading, slide_url))
                     link_count += 1
@@ -2110,6 +2204,7 @@ class UnitCollector:
                     )
                     safe_url = html.escape(topic["url"], quote=True)
                     sections.append(f'<p><a href="{safe_url}">{html.escape(topic["label"])}</a></p>\n')
+                    sections.append(description_block)
                     if current_resource_heading:
                         required_section_links.append((current_resource_heading, topic["url"]))
                     link_count += 1
@@ -2117,6 +2212,7 @@ class UnitCollector:
                     continue
                 fi.setdefault("topic_url", topic.get("url", ""))
                 fi.setdefault("topic_label", topic["label"])
+                fi["description_block"] = description_block
                 file_items.append(fi)
                 file_count += 1
             else:
@@ -2131,6 +2227,7 @@ class UnitCollector:
                 sections.append(
                     f'<p><a href="{safe_url}">{safe}</a></p>\n'
                 )
+                sections.append(description_block)
                 if current_resource_heading:
                     required_section_links.append((current_resource_heading, topic["url"]))
                 link_count += 1
@@ -2214,6 +2311,7 @@ class UnitCollector:
             if not await self._apply_claude_style(
                 context, expected_min_chars=assembled_chars,
                 required_section_links=required_section_links,
+                required_descriptions=required_descriptions,
             ):
                 self.log(
                     "✗ Unit is only partially complete: text was saved, but "
@@ -2571,12 +2669,12 @@ class UnitCollector:
             # ── Split topics by who is allowed to see them ───────────────────
             # Brightspace visibility is per-topic; there is no way to hide text
             # inside a page. Staff-only topics therefore need a page of their own.
-            hidden_ids = await self._fetch_hidden_topic_ids(page)
+            hidden_ids = await self._fetch_hidden_topic_ids(page, topics)
             if hidden_ids is None:
                 self.log(
-                    "✗ Stopping this unit: Brightspace would not say which topics are "
-                    "hidden from students. Re-run once it responds — publishing "
-                    "staff-only content by mistake is worse than retrying.",
+                    "✗ Stopping this unit: Brightspace could not provide complete "
+                    "topic visibility and descriptions. Re-run once it responds; "
+                    "the combined page was not assembled from incomplete metadata.",
                     "error",
                 )
                 if self._on_complete:

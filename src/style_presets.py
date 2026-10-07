@@ -1,6 +1,7 @@
 """Named page-design references used by the restyling workflows."""
 
 from pathlib import Path
+import sys
 
 
 STYLE_PRESETS = {
@@ -10,10 +11,7 @@ STYLE_PRESETS = {
 
 
 def load_style_reference(preset: str) -> str:
-    """Return the requested bundled reference, falling back to the default."""
+    """Load the selected design from the checkout or installed app bundle."""
     filename = "style_reference_classic.html" if preset == "classic" else "style_reference.html"
-    path = Path(__file__).parent.parent / "templates" / filename
-    try:
-        return path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return ""
+    root = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).parent.parent
+    return (root / "templates" / filename).read_text(encoding="utf-8")

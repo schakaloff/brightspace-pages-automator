@@ -206,11 +206,13 @@ class Sidebar(QWidget):
         layout.addSpacing(6)
 
         _step_tooltips = {
-            1: "Step 1 — Checker: Compare Moodle and Brightspace course content, download missing files.",
+            1: "Scan Moodle and Brightspace, review what is missing, then choose which fixes to apply.",
             2: "Step 2 — Collect: Scrape all topics from a unit and combine them into one collapsible page.",
             3: "Step 3 — Restyle: Use Claude AI to apply an OC brand theme to a Brightspace page.",
             4: "Step 4 — Kaltura: Scan Moodle for Kaltura videos and create matching Brightspace pages.",
             5: "Step 5 — H5P: Download H5P activities from Moodle and paste them into matching Brightspace modules.",
+            6: "Move H5P activities and Kaltura videos from Moodle.",
+            7: "Collect a unit into one page, or restyle a page.",
         }
 
         # Step buttons (a (None, None, "Label") entry renders a section divider instead)

@@ -161,6 +161,7 @@ def test_text_only_collection_uses_api_without_opening_editor(monkeypatch):
     collector = UnitCollector.__new__(UnitCollector)
     collector.parallel_pages = 3
     collector.claude_api_key = ""
+    collector._topic_metadata = {}
     collector._name_matcher = lambda _label: None
     collector.log = lambda *_args: None
 

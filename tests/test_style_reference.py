@@ -86,17 +86,18 @@ def test_resource_reference_uses_compact_spacing():
     assert ".resource-directory .link-row, .resource-directory .resource-row { padding: 0.7rem 0; }" in reference
 
 
-def test_every_theme_prompt_uses_the_quiet_hierarchy_guidance():
+def test_every_theme_prompt_leaves_layout_to_the_selected_design():
     prompts = list((ROOT / "prompts").glob("*.txt"))
 
     assert len(prompts) == 9
     for prompt in prompts:
         text = prompt.read_text(encoding="utf-8")
-        assert "Use a calm hierarchy" in text
+        assert "The selected reference and design instructions control the layout" in text
         assert "Do not repeat a heading" in text
-        assert ".action-link" in text
-        assert "do not add badges" in text
-        assert "text file-type badge" not in text
+        assert "Use a calm hierarchy" not in text
+        assert ".action-link" not in text
+        assert ".info-list" not in text
+        assert ".resource-row" not in text
 
 
 def test_zoom_button_can_keep_the_original_url_for_content_preservation():

@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import asyncio
 import re
-from typing import Callable, List, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional
 
-from playwright.async_api import Page
+if TYPE_CHECKING:
+    from playwright.async_api import Page
 
 from run_summary import RestyleRunSummary
 
@@ -37,6 +40,8 @@ class PageAutomator:
         sso_email: str = "",
         sso_password: str = "",
         move_unit_content: bool = True,
+        stop_event=None,
+        on_page_result: Callable = None,
     ):
         self.url = url
         self.log = log
@@ -45,15 +50,18 @@ class PageAutomator:
         self.claude_model = claude_model
         self.style_reference_html = style_reference_html
         self.theme_name = theme_name
-        self.on_pages_found = on_pages_found  # fn(pages) -> (start_idx, count)
+        self.on_pages_found = on_pages_found  # fn(pages) -> list of checked indices
         self.bs_username = bs_username
         self.bs_password = bs_password
         self.sso_email = sso_email
         self.sso_password = sso_password
         self.move_unit_content = move_unit_content
+        self.stop_event = stop_event
+        self.on_page_result = on_page_result
         self._clipboard_lock = asyncio.Lock()  # one tab touches clipboard at a time
         self._token_usage = {"input_tokens": 0, "output_tokens": 0, "cost_cad": 0.0}
         self._run_summary = RestyleRunSummary()
+        self._completion_sent = False
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -187,7 +195,7 @@ class PageAutomator:
         SKIP_TYPES = ['quiz', 'dropbox', 'link', 'video', 'youtube',
                       'discussion', 'survey', 'assignment', 'checklist', 'lti']
 
-        _JS = """([baseUrl, lessonId, skipTypes]) => {
+        _JS = r"""([baseUrl, lessonId, skipTypes]) => {
             function iconHint(el) {
                 // icon attribute on d2l-icon children
                 for (const ic of el.querySelectorAll('d2l-icon, d2l-icon-custom')) {
@@ -226,7 +234,9 @@ class PageAutomator:
                 for (const el of root.querySelectorAll('d2l-list-item-nav')) {
                     const href = el.getAttribute('action-href') || '';
                     const key  = el.getAttribute('key') || '';
-                    if (key === lessonId || href.includes('/' + lessonId)) return el;
+                    if (!href.includes('/topics/') &&
+                        (href.includes('/units/') || href.includes('/lessons/')) &&
+                        (key === lessonId || href.split(/[?#]/)[0].replace(/\/$/, '').endsWith('/' + lessonId))) return el;
                 }
                 for (const child of root.querySelectorAll('*')) {
                     if (child.shadowRoot) {
@@ -242,7 +252,8 @@ class PageAutomator:
                 const topics = topicsIn(unitEl);
                 if (topics.length > 0) return topics;
             }
-            return topicsIn(document);
+            // Never fall back to the entire course sidebar for a missing unit.
+            return [];
         }"""
 
         # Poll for topics — smart-curriculum SPA can take 5-15s to populate
@@ -494,6 +505,58 @@ class PageAutomator:
 
     # ── Main run ──────────────────────────────────────────────────────────────
 
+    async def _choose_pages(self, pages: list[dict]) -> list[dict]:
+        from restyle_selection import selected_pages
+        indices = list(range(len(pages)))
+        if self.on_pages_found:
+            indices = await asyncio.to_thread(self.on_pages_found, pages)
+        return selected_pages(pages, indices)
+
+    def _stopped(self) -> bool:
+        return self.stop_event is not None and self.stop_event.is_set()
+
+    def _complete(self):
+        if not self._completion_sent:
+            self._completion_sent = True
+            if self.on_complete:
+                self.on_complete()
+
+    async def _run_selected(self, context, selected: list[dict]) -> None:
+        """Isolate each page failure; Stop prevents queued pages from starting."""
+        sem = asyncio.Semaphore(5)
+
+        async def process_one(topic: dict, index: int):
+            async with sem:
+                state = "skipped"
+                tab = None
+                attempted = False
+                try:
+                    if self._stopped():
+                        self.log(f"Skipped: {topic['label']} (stopped)", "warning")
+                        return
+                    state = "failed"
+                    tab = await context.new_page()
+                    self.log(f"[{index + 1}/{len(selected)}] {topic['label']}", "step")
+                    attempted = True
+                    success = await self._process_topic(tab, topic["url"], topic["label"])
+                    state = "changed" if success else "failed"
+                    self.log(f"{'Saved' if success else 'Needs review'}: {topic['label']}",
+                             "success" if success else "error")
+                except Exception as exc:
+                    if not attempted:
+                        self._run_summary.record_page(False)
+                    self.log(f"Failed: {topic['label']} — {exc}", "error")
+                finally:
+                    if self.on_page_result:
+                        self.on_page_result(index, topic, state)
+                    if tab is not None:
+                        try:
+                            await tab.close()
+                        except Exception:
+                            pass
+
+        await asyncio.gather(*(process_one(topic, i) for i, topic in enumerate(selected)))
+
     async def run(self) -> None:
         from browser import launch_browser, wait_for_login
 
@@ -509,8 +572,28 @@ class PageAutomator:
                 pass
             self.log("✓ Page loaded", "success")
 
+            is_section = "/topics/" not in self.url
+            move_overview = self.move_unit_content and re.search(r"/units/\d+(?:/|$)", self.url)
+            selected = []
+            if is_section:
+                pages = await self.scrape_section_pages(page)
+                if move_overview:
+                    pages.insert(0, {"label": "Unit description → Overview page (move and restyle)",
+                                     "url": self.url, "kind": "unit_overview"})
+                if not pages:
+                    self.log("No HTML pages found in this section. No changes made.", "warning")
+                    return
+                selected = await self._choose_pages(pages)
+                if not selected or self._stopped():
+                    self.log("Restyle cancelled. No changes made.", "info")
+                    return
+                # Moving a unit description is a separate, explicitly checked item.
+                move_overview = any(item.get("kind") == "unit_overview" for item in selected)
+                selected = [item for item in selected if item.get("kind") != "unit_overview"]
+                self._run_summary.pages_selected = len(selected) + int(bool(move_overview))
+
             completed_overview_url = ""
-            if self.move_unit_content and re.search(r"/units/\d+(?:/|$)", self.url):
+            if move_overview:
                 self.log("Checking the unit description for transferable content…", "info")
 
                 async def restyle_overview(source_html: str):
@@ -530,14 +613,22 @@ class PageAutomator:
                 transfer = await move_unit_url_to_overview(
                     page, self.url, restyle_overview, self.log
                 )
+                if self.on_page_result:
+                    self.on_page_result(-1, {"label": "Unit description → Overview page", "url": self.url},
+                                        "changed" if transfer.ok and transfer.status != "no-content"
+                                        else "skipped" if transfer.ok else "failed")
                 if not transfer.ok:
+                    self._run_summary.record_page(False)
+                    for i, topic in enumerate(selected):
+                        if self.on_page_result:
+                            self.on_page_result(i, topic, "skipped")
                     self.log(f"✗ Unit Overview transfer failed: {transfer.reason}", "error")
-                    if self.on_complete:
-                        self.on_complete()
+                    self._complete()
                     return
                 if transfer.status == "no-content":
                     self.log("○ Unit description has no editable content to move", "dim")
                 else:
+                    self._run_summary.record_page(True)
                     completed_overview_url = transfer.topic_url.rstrip("/")
                     self.log(
                         f"✓ Unit description moved safely to {transfer.topic_url}", "success"
@@ -547,62 +638,36 @@ class PageAutomator:
                         self._token_usage["output_tokens"] += transfer.usage["output_tokens"]
                         self._token_usage["cost_cad"] += transfer.usage["cost_cad"]
 
-            if "/topics/" not in self.url:
-                # Section URL: scrape all topic pages and let user pick
-                pages = await self.scrape_section_pages(page)
+            if is_section:
                 if completed_overview_url:
-                    pages = [
-                        item for item in pages
+                    for i, item in enumerate(selected):
+                        if item["url"].rstrip("/") == completed_overview_url and self.on_page_result:
+                            self.on_page_result(i, item, "changed")
+                    selected = [
+                        item for item in selected
                         if item["url"].rstrip("/") != completed_overview_url
                     ]
-                if not pages:
-                    if completed_overview_url:
-                        self.log("○ Overview was the only page requiring work", "dim")
-                    else:
-                        self.log("✗ No topic pages found in this section", "error")
-                    if self.on_complete:
-                        self.on_complete()
-                    while browser.is_connected():
-                        await asyncio.sleep(0.5)
-                    return
-
-                start_idx, count = 0, len(pages)
-                if self.on_pages_found:
-                    start_idx, count = await asyncio.to_thread(self.on_pages_found, pages)
-
-                selected = pages[start_idx: start_idx + count]
-                self._run_summary.pages_selected = len(selected)
                 self.log(f"Processing {len(selected)} page(s) — up to 5 at a time", "info")
-
-                sem = asyncio.Semaphore(5)
-
-                async def process_one(topic: dict, idx: int) -> None:
-                    async with sem:
-                        tab = await context.new_page()
-                        self.log(f"[{idx + 1}/{len(selected)}] {topic['label']}", "step")
-                        await self._process_topic(tab, topic["url"], topic["label"])
-
-                await asyncio.gather(*[process_one(t, i) for i, t in enumerate(selected)])
+                await self._run_selected(context, selected)
             else:
                 # Single topic URL
                 self._run_summary.pages_selected = 1
-                await self._process_topic(page, self.url)
+                await self._run_selected(context, [{"label": "", "url": self.url}])
 
             self.log("─" * 52, "dim")
             self._run_summary.log(self.log, self._token_usage)
-            self.log("✓  All done! Close the browser when finished.", "success")
-            if self.on_complete:
-                self.on_complete()
+            self.log("Batch finished. Close the browser when finished.", "info")
+            self._complete()
 
             while browser.is_connected():
                 await asyncio.sleep(0.5)
             self.log("Browser closed.", "dim")
 
         except Exception:
-            if self.on_complete:
-                self.on_complete()
+            self._complete()
             raise
         finally:
+            self._complete()
             if browser.is_connected():
                 await browser.close()
             await p.stop()
@@ -622,6 +687,8 @@ async def run(
     sso_email: str = "",
     sso_password: str = "",
     move_unit_content: bool = True,
+    stop_event=None,
+    on_page_result: Callable = None,
 ) -> None:
     await PageAutomator(
         url=url,
@@ -637,4 +704,6 @@ async def run(
         sso_email=sso_email,
         sso_password=sso_password,
         move_unit_content=move_unit_content,
+        stop_event=stop_event,
+        on_page_result=on_page_result,
     ).run()

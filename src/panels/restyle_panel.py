@@ -4,7 +4,7 @@ import threading
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit, QCheckBox,
+    QPushButton, QLineEdit, QCheckBox, QProgressBar,
 )
 from PySide6.QtCore import Signal, QTimer
 
@@ -26,6 +26,9 @@ class RestylePanel(QWidget):
         self._response_queue: queue.Queue = queue.Queue()
         self._swatch_frames: dict = {}
         self._selected_theme: list = ["lake"]
+        self._busy = False
+        self._stop_event = threading.Event()
+        self._results = {}
         self._build()
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_log)
@@ -37,7 +40,7 @@ class RestylePanel(QWidget):
         layout.setSpacing(0)
 
         layout.addWidget(_section_header("Restyle"))
-        sub = QLabel("Pick an OC brand colour theme, paste a Brightspace page or section URL, and let Claude restyle it.")
+        sub = QLabel("Choose a theme and design, then restyle one page or pick specific pages from a section.")
         sub.setProperty("role", "dim"); sub.setWordWrap(True)
         layout.addWidget(sub)
         layout.addSpacing(20)
@@ -59,7 +62,7 @@ class RestylePanel(QWidget):
         layout.addWidget(self._style_preset)
         layout.addSpacing(14)
 
-        layout.addWidget(_form_label("BRIGHTSPACE PAGE URL"))
+        layout.addWidget(_form_label("BRIGHTSPACE PAGE OR SECTION URL"))
         layout.addSpacing(4)
 
         url_row = QHBoxLayout(); url_row.setSpacing(8)
@@ -72,7 +75,7 @@ class RestylePanel(QWidget):
         )
         url_row.addWidget(self._url_entry, 1)
 
-        self._run_btn = QPushButton("Start")
+        self._run_btn = QPushButton("Start restyle")
         self._run_btn.setFixedSize(110, 42)
         self._run_btn.setToolTip(
             "Opens a browser, extracts the page HTML, sends it to Claude AI for restyling,\n"
@@ -81,6 +84,11 @@ class RestylePanel(QWidget):
         self._run_btn.clicked.connect(self._start_run)
         url_row.addWidget(self._run_btn)
         layout.addLayout(url_row)
+        self._stop_btn = QPushButton("Stop after active pages")
+        self._stop_btn.setProperty("variant", "secondary")
+        self._stop_btn.clicked.connect(self._stop)
+        self._stop_btn.hide()
+        layout.addWidget(self._stop_btn)
 
         url_hint = QLabel("Paste a section URL to restyle multiple pages at once — you'll pick which ones to include.")
         url_hint.setProperty("role", "dim")
@@ -90,12 +98,22 @@ class RestylePanel(QWidget):
         layout.addSpacing(12)
 
         self._move_unit_content_chk = QCheckBox("Move unit content into an Overview page")
-        self._move_unit_content_chk.setChecked(True)
+        self._move_unit_content_chk.setChecked(False)
         self._move_unit_content_chk.setToolTip(
-            "When the URL is a unit, safely transfers its description into a normal "
-            "first child page before restyling. The unit title is never changed."
+            "Add the unit description to the checklist as a separate item. "
+            "It is moved only if you check it when choosing pages."
         )
         layout.addWidget(self._move_unit_content_chk)
+        layout.addSpacing(12)
+        self._status = QLabel("Ready. Section URLs open a page checklist before any changes.")
+        self._status.setWordWrap(True)
+        self._status.setProperty("role", "dim")
+        layout.addWidget(self._status)
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 1)
+        self._progress.setValue(0)
+        self._progress.hide()
+        layout.addWidget(self._progress)
         layout.addSpacing(12)
 
         layout.addWidget(_form_label("LOG"))
@@ -107,7 +125,7 @@ class RestylePanel(QWidget):
         cfg = self._mw.load_config() if hasattr(self._mw, "load_config") else {}
         if cfg.get("automator_url"):
             self._url_entry.setText(cfg["automator_url"])
-        self._move_unit_content_chk.setChecked(cfg.get("restyle_move_unit_content", True))
+        self._move_unit_content_chk.setChecked(cfg.get("restyle_move_unit_content", False))
         preset = cfg.get("restyle_style_preset", "calm")
         index = self._style_preset.findData(preset)
         self._style_preset.setCurrentIndex(max(index, 0))
@@ -122,23 +140,55 @@ class RestylePanel(QWidget):
         })
 
     def _start_run(self):
+        if self._busy:
+            return
         if not self._mw.chromium_ready:
             self._log.append_log("Browser engine still installing — please wait.", "warning"); return
         url = self._url_entry.text().strip()
         if not url:
             self._log.append_log("Paste a Brightspace URL first.", "warning"); return
 
-        style_reference_html = load_style_reference(self._style_preset.currentData())
+        try:
+            style_reference_html = load_style_reference(self._style_preset.currentData())
+        except OSError:
+            self._log.append_log(
+                "The selected page design could not be loaded. Restore the app's templates or reinstall it, then try again.",
+                "error",
+            )
+            return
+        # Capture all inputs on the GUI thread before starting the worker.
+        options = dict(
+            claude_api_key=self._mw.claude_api_key, claude_model=self._mw.claude_model,
+            style_reference_html=style_reference_html, theme_name=self._selected_theme[0],
+            bs_username=self._mw.bs_username, bs_password=self._mw.bs_password,
+            sso_email=self._mw.sso_email, sso_password=self._mw.sso_password,
+            move_unit_content=self._move_unit_content_chk.isChecked(),
+        )
+        self._busy = True
+        self._stop_event.clear()
+        self._results = {}
+        self._set_inputs_enabled(False)
+        self._stop_btn.setEnabled(True)
+        self._stop_btn.show()
+        self._progress.hide()
+        self._status.setText("Opening Brightspace and finding pages…")
 
         self._run_btn.setText("Running…"); self._run_btn.setEnabled(False)
         self._log.clear_log()
 
         q  = self._log_queue
         rq = self._response_queue
+        while not rq.empty():
+            rq.get_nowait()
 
         def on_pages_found(pages):
             q.put(("__PAGES__", pages))
-            return rq.get(timeout=300)
+            while not self._stop_event.is_set():
+                try:
+                    return rq.get(timeout=0.2)
+                except queue.Empty:
+                    pass
+            return []
 
         def worker():
             done_sent = [False]
@@ -154,16 +204,10 @@ class RestylePanel(QWidget):
                     url=url,
                     log=lambda msg, tag="info": q.put((msg, tag)),
                     on_complete=on_done,
-                    claude_api_key=self._mw.claude_api_key,
-                    claude_model=self._mw.claude_model,
-                    style_reference_html=style_reference_html,
-                    theme_name=self._selected_theme[0],
+                    **options,
                     on_pages_found=on_pages_found,
-                    bs_username=self._mw.bs_username,
-                    bs_password=self._mw.bs_password,
-                    sso_email=self._mw.sso_email,
-                    sso_password=self._mw.sso_password,
-                    move_unit_content=self._move_unit_content_chk.isChecked(),
+                    stop_event=self._stop_event,
+                    on_page_result=lambda index, page, state: q.put(("__RESULT__", (page, state))),
                 ))
             except Exception as e:
                 msg, detail = friendly_error(e)
@@ -175,20 +219,58 @@ class RestylePanel(QWidget):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _set_inputs_enabled(self, enabled):
+        for control in (self._url_entry, self._style_preset, self._move_unit_content_chk,
+                        *self._swatch_frames.values()):
+            control.setEnabled(enabled)
+
+    def _stop(self):
+        self._stop_event.set()
+        self._stop_btn.setEnabled(False)
+        self._status.setText("Stopping. Active pages will finish; queued pages will be skipped.")
+
+    def _update_results(self):
+        states = list(self._results.values())
+        completed = sum(state != "pending" for state in states)
+        self._progress.setRange(0, max(len(states), 1))
+        self._progress.setValue(completed)
+        self._progress.show()
+        self._status.setText(
+            f"{completed} of {len(states)} finished · "
+            f"{states.count('changed')} saved · {states.count('failed')} failed · "
+            f"{states.count('skipped')} skipped"
+        )
+
     def _poll_log(self):
         try:
             while True:
                 msg, tag = self._log_queue.get_nowait()
                 if msg == "__DONE__":
-                    self._run_btn.setText("Start"); self._run_btn.setEnabled(True)
+                    self._busy = False
+                    self._run_btn.setText("Start restyle"); self._run_btn.setEnabled(True)
+                    self._set_inputs_enabled(True)
+                    self._stop_btn.hide()
+                    if self._status.text().startswith("Opening Brightspace"):
+                        self._status.setText("Run finished. See the log for details.")
                     self.save_state()
                 elif msg == "__PAGES__":
                     from gui_dialogs import PagesDialog
+                    if self._stop_event.is_set():
+                        self._response_queue.put([])
+                        continue
                     dlg = PagesDialog(tag, self)
                     if dlg.exec():
-                        self._response_queue.put(dlg.result_value())
+                        chosen = dlg.result_value()
+                        self._results = {tag[i]["url"]: "pending" for i in chosen}
+                        self._update_results()
+                        self._response_queue.put(chosen)
                     else:
-                        self._response_queue.put((0, len(tag)))
+                        self._status.setText("Cancelled. No pages changed.")
+                        self._response_queue.put([])
+                elif msg == "__RESULT__":
+                    page, state = tag
+                    self._results[page["url"]] = state
+                    self._update_results()
                 else:
                     self._log.append_log(msg, tag)
         except queue.Empty:

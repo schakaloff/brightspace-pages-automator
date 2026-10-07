@@ -11,17 +11,18 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QStackedWidget,
-    QMessageBox, QSplashScreen,
+    QMessageBox,
 )
 from PySide6.QtCore import Qt, QTimer, QEventLoop
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QPainterPath
+from PySide6.QtGui import QIcon, QPixmap
 
-MIN_SPLASH_MS = 5000
+MIN_SPLASH_MS = 600
 
 import gui_styles
 from gui_sidebar import Sidebar, StepButton
 from gui_icons import make_icon
 from app_version import APP_VERSION
+from gui_splash import StartupSplash
 
 VERSION = APP_VERSION
 _CONFIG_PATH = Path(__file__).parent / "user_config.json"
@@ -37,82 +38,13 @@ def _load_saved_theme() -> str:
         return json.loads(_CONFIG_PATH.read_text(encoding="utf-8")).get("theme", "dark")
     except Exception:
         return "dark"
-
-
-def _splash_icon_pixmap() -> QPixmap | None:
-    try:
-        from icon_art import draw_app_icon
-        from PIL.ImageQt import ImageQt
-        return QPixmap.fromImage(ImageQt(draw_app_icon(64)))
-    except Exception:
-        return None
-
-
-_SPLASH_ICON = None  # decoded once, reused across every progress-bar frame
-
-
-def _build_splash_pixmap(progress: float = 0.0) -> QPixmap:
-    """Themed loading card — icon, title, and a progress bar that fills as
-    the app finishes loading (see MIN_SPLASH_MS in __main__)."""
-    global _SPLASH_ICON
-    if _SPLASH_ICON is None:
-        _SPLASH_ICON = _splash_icon_pixmap()
-
-    c = gui_styles.current
-    w, h = 360, 240
-    pm = QPixmap(w, h)
-    pm.fill(Qt.GlobalColor.transparent)
-
-    painter = QPainter(pm)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-    # Card
-    painter.setPen(QColor(c["BORDER_ACT"]))
-    painter.setBrush(QColor(c["PANEL"]))
-    painter.drawRoundedRect(1, 1, w - 2, h - 2, 16, 16)
-
-    # Brand accent stripe along the top, clipped to the card's rounded top
-    clip = QPainterPath()
-    clip.addRoundedRect(1, 1, w - 2, h - 2, 16, 16)
-    painter.save()
-    painter.setClipPath(clip)
-    painter.fillRect(1, 1, w - 2, 5, QColor(c["OC_TEAL"]))
-    painter.restore()
-
-    if _SPLASH_ICON is not None:
-        painter.drawPixmap((w - 64) // 2, 26, _SPLASH_ICON)
-
-    painter.setPen(QColor(c["TEXT_PRI"]))
-    title_font = QFont("Segoe UI", 12)
-    title_font.setBold(True)
-    painter.setFont(title_font)
-    painter.drawText(0, 100, w, 24, Qt.AlignmentFlag.AlignHCenter, "Brightspace Pages Automator")
-
-    painter.setPen(QColor(c["TEXT_SEC"]))
-    ver_font = QFont("Segoe UI", 9)
-    painter.setFont(ver_font)
-    painter.drawText(0, 124, w, 18, Qt.AlignmentFlag.AlignHCenter, f"v{VERSION}")
-
-    # Progress bar
-    bar_x, bar_y, bar_w, bar_h = 40, 156, w - 80, 5
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor(c["BORDER"]))
-    painter.drawRoundedRect(bar_x, bar_y, bar_w, bar_h, 2.5, 2.5)
-    fill_w = max(bar_h, bar_w * min(max(progress, 0.0), 1.0))
-    painter.setBrush(QColor(c["OC_TEAL"]))
-    painter.drawRoundedRect(bar_x, bar_y, fill_w, bar_h, 2.5, 2.5)
-
-    painter.end()
-    return pm
-
-
 class MainWindow(QMainWindow):
-    def __init__(self, splash: QSplashScreen | None = None):
+    def __init__(self, splash: StartupSplash | None = None):
         super().__init__()
         self._splash = splash
         self.setWindowTitle("Brightspace Pages Automator")
         self.setMinimumSize(720, 560)
-        self.resize(860, 640)
+        self.resize(1120, 800)
         self._claude_key   = ""
         self._claude_model = ""
         self._chromium_ready = False
@@ -130,11 +62,9 @@ class MainWindow(QMainWindow):
     def _report_progress(self, message: str):
         if self._splash is None:
             return
-        self._splash.showMessage(
-            message,
-            Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
-            QColor(gui_styles.current["TEXT_SEC"]),
-        )
+        stages = {"Loading interface…": 0.15, "Loading panels…": 0.4,
+                  "Loading credentials…": 0.8, "Ready": 1.0}
+        self._splash.set_stage(message, stages.get(message, self._splash.progress))
         QApplication.instance().processEvents()
 
     # ── Window icon (PIL → QPixmap) ──────────────────────────
@@ -161,13 +91,12 @@ class MainWindow(QMainWindow):
         root.setSpacing(0)
 
         self._sidebar = Sidebar([
-            (1, "checker", "Checker"),
-            (4, "kaltura", "Kaltura"),
-            (2, "collect", "Collect"),
-            (None, None, "Optional"),
-            (3, "restyle", "Restyle"),
-            (5, "h5p", "H5P"),
+            (1, "checker", "Check & fix"),
+            (6, "kaltura", "Media"),
+            (7, "restyle", "Build & style"),
         ])
+        for button in self._sidebar._step_buttons.values():
+            button.set_show_dot(False)
         self._sidebar.step_clicked.connect(self._on_step)
         self._sidebar.settings_clicked.connect(self._on_settings)
         root.addWidget(self._sidebar)
@@ -191,28 +120,49 @@ class MainWindow(QMainWindow):
         from panels.settings_panel import SettingsPanel
         from panels.kaltura_panel import KalturaPanel
         from panels.h5p_panel import H5PPanel
+        from panels.cleanup_panel import CleanupPanel
+        from panels.page_creator_panel import PageCreatorPanel
+        from panels.workflow_hub import WorkflowHub
 
         self._checker   = CheckerPanel(self)
         self._collector = CollectorPanel(self)
         self._restyle   = RestylePanel(self)
         self._kaltura   = KalturaPanel(self)
         self._h5p       = H5PPanel(self)
+        self._cleanup   = CleanupPanel(self)
+        self._page_creator = PageCreatorPanel(self)
         self._settings  = SettingsPanel(self)
+        # The sidebar holds three stable areas. New tools become a card in a
+        # hub instead of another sidebar entry, so the sidebar never grows.
+        self._media_hub = WorkflowHub(
+            "Media",
+            "Move interactive and video content from Moodle into Brightspace. "
+            "Both tools use the course URLs from Check & fix.",
+            [
+                ("h5p", "H5P activities", "Download H5P activities from Moodle and place them in the matching Brightspace units."),
+                ("kaltura", "Kaltura videos", "Find Moodle's Kaltura videos and create matching Brightspace pages."),
+            ],
+        )
+        from panels.workflow_hub import BuildStyleHub
+        self._build_hub = BuildStyleHub()
 
-        for panel in (self._checker, self._collector, self._restyle, self._kaltura, self._h5p, self._settings):
-            self._stack.addWidget(panel)  # indices 0-5
+        for panel in (self._checker, self._collector, self._restyle,
+                      self._kaltura, self._h5p, self._settings,
+                      self._build_hub, self._media_hub, self._cleanup,
+                      self._page_creator):
+            self._stack.addWidget(panel)  # indices 0-9
 
-        # All steps start unlocked — users can navigate freely
-        for n in (1, 2, 3, 4, 5):
+        for n in (1, 6, 7):
             self._sidebar.set_step_state(n, StepButton.PENDING)
 
         # Cross-panel wiring
-        self._checker.step_success.connect(lambda: self._sidebar.set_step_state(1, StepButton.DONE))
         self._checker.continue_next.connect(lambda: self._on_step(2))
-        self._collector.step_success.connect(lambda: self._sidebar.set_step_state(2, StepButton.DONE))
         self._collector.continue_next.connect(lambda: self._on_step(3))
         self._settings.api_key_changed.connect(self._set_api_key)
         self._settings.model_changed.connect(self._set_model)
+        self._checker.open_tool.connect(self._open_tool)
+        self._build_hub.tool_selected.connect(self._open_tool)
+        self._media_hub.tool_selected.connect(self._open_tool)
 
         self._on_step(1)
         self._show_welcome_if_needed()
@@ -297,14 +247,44 @@ class MainWindow(QMainWindow):
         v.addLayout(btn_row)
         dlg.exec()
 
+    # Page number -> (stack index, sidebar area it belongs to).
+    #   1 Check & fix   2 Collect   3 Restyle   4 Kaltura   5 H5P
+    #   6 Media hub     7 Build & style hub   8 Cleanup   9 Create pages
+    _PAGES = {1: (0, 1), 2: (1, 7), 3: (2, 7), 4: (3, 6), 5: (4, 6),
+              6: (7, 6), 7: (6, 7), 8: (8, 7), 9: (9, 7)}
+
     def _on_step(self, n: int):
-        idx = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4}.get(n)
-        if idx is not None:
+        page = self._PAGES.get(n)
+        if page is not None:
+            idx, area = page
             self._stack.setCurrentIndex(idx)
-            self._sidebar.set_active(n)
+            self._sidebar.set_active(area)
+            if n in (4, 5):
+                self._carry_course_urls(n)
             # Pull over URLs saved by the Checker tab when Collector is shown.
             if n == 2 and hasattr(self._collector, "refresh_carryover"):
                 self._collector.refresh_carryover()
+            if n == 8 and not self._cleanup._url.text().strip():
+                self._cleanup._url.setText(self._checker._bs_entry.text().strip())
+            if n == 9 and not self._page_creator._url.text().strip():
+                self._page_creator._url.setText(self._checker._bs_entry.text().strip())
+
+    def _open_tool(self, name: str):
+        target = {"collect": 2, "restyle": 3, "kaltura": 4,
+                  "h5p": 5, "cleanup": 8, "create_pages": 9}.get(name)
+        if target is not None:
+            self._on_step(target)
+
+    def _carry_course_urls(self, step: int):
+        bs = self._checker._bs_entry.text().strip()
+        moodle = self._checker._moodle_entry.text().strip()
+        panel = self._kaltura if step == 4 else self._h5p
+        bs_field = getattr(panel, "_bs_url", None) if step == 4 else panel._bs_entry
+        moodle_field = getattr(panel, "_moodle_url", None) if step == 4 else panel._moodle_entry
+        if bs and bs_field is not None:
+            bs_field.setText(bs)
+        if moodle and moodle_field is not None:
+            moodle_field.setText(moodle)
 
     def _on_settings(self):
         self._stack.setCurrentIndex(5)
@@ -318,8 +298,12 @@ class MainWindow(QMainWindow):
         self._sidebar.refresh_theme()
         self._update_badge.refresh_theme()
         self._settings.mark_active_theme(name)
+        self._page_creator.refresh_theme()
+        self._checker.refresh_theme()
+        self._build_hub.refresh_theme()
         # Refresh log widgets in each panel
-        for panel in (self._checker, self._collector, self._restyle, self._kaltura, self._h5p):
+        for panel in (self._checker, self._collector, self._restyle,
+                      self._kaltura, self._h5p, self._cleanup):
             for log in panel.findChildren(type(self._checker)):
                 pass  # panels refresh via stylesheet
         from gui_log import LogWidget
@@ -608,12 +592,24 @@ class MainWindow(QMainWindow):
             badge.reposition()
 
     def closeEvent(self, event):
+        if self._restyle._busy:
+            QMessageBox.information(self, "Pages are being restyled",
+                "Use Stop after active pages in Restyle and wait for the current pages to finish before closing the app.")
+            event.ignore()
+            return
+        if self._page_creator._creating:
+            QMessageBox.information(self, "Pages are being created",
+                "Use Stop in Create pages in bulk and wait for the current request to finish before closing the app.")
+            event.ignore()
+            return
         for panel in (
             self._checker,
             self._collector,
             self._restyle,
             self._kaltura,
             self._h5p,
+            self._cleanup,
+            self._page_creator,
         ):
             try:
                 panel.save_state()
@@ -652,6 +648,7 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8")
 
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
 
     # HiDPI fix: detect DPR/logical-DPI mismatch and re-launch with correct scale
     if "QT_SCALE_FACTOR" not in os.environ:
@@ -683,18 +680,10 @@ if __name__ == "__main__":
     gui_styles.set_theme(_load_saved_theme())
     app.setStyleSheet(gui_styles.get_stylesheet())
 
-    splash = QSplashScreen(_build_splash_pixmap(progress=0.0))
+    splash = StartupSplash()
     splash.show()
     app.processEvents()
     _splash_shown_at = time.monotonic()
-
-    def _tick_splash_progress():
-        elapsed_ms = (time.monotonic() - _splash_shown_at) * 1000
-        splash.setPixmap(_build_splash_pixmap(progress=elapsed_ms / MIN_SPLASH_MS))
-
-    _progress_timer = QTimer()
-    _progress_timer.timeout.connect(_tick_splash_progress)
-    _progress_timer.start(30)
 
     win = MainWindow(splash=splash)
 
@@ -704,8 +693,7 @@ if __name__ == "__main__":
         QTimer.singleShot(int(remaining_ms), _wait_loop.quit)
         _wait_loop.exec()
 
-    _progress_timer.stop()
-    splash.setPixmap(_build_splash_pixmap(progress=1.0))
+    splash.set_stage("Ready", 1.0)
     win.show()
     splash.finish(win)
     sys.exit(app.exec())

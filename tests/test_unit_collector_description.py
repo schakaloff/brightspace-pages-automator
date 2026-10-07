@@ -239,7 +239,7 @@ def test_run_passes_section_text_into_styling_before_clearing_it(monkeypatch):
         return [{"topic_id": "8", "label": "Lesson",
                  "url": "https://learn.test/d2l/le/lessons/42/topics/8"}]
 
-    async def hidden(_page):
+    async def hidden(_page, _topics):
         return set()
 
     async def no_op():

@@ -8,6 +8,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('src', 'src'),
+        ('assets', 'assets'),
         ('.env', '.'),
     ],
     hiddenimports=[

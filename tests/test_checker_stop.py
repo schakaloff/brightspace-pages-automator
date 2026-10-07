@@ -46,15 +46,16 @@ def test_checker_stop_cancels_worker_and_restores_button(
     panel = CheckerPanel(mw)
     qtbot.addWidget(panel)
     panel._bs_entry.setText("https://example.org/d2l/le/content/123/home")
+    panel._moodle_entry.setText("https://example.org/course/view.php?id=123")
     panel._start_run()
 
     qtbot.waitUntil(started.is_set, timeout=3000)
     if mode != "browser_wait":
         qtbot.waitUntil(lambda: bool(panel._active_dialogs), timeout=3000)
-        assert panel._run_btn.isEnabled()
+        assert panel._stop_btn.isEnabled()
 
-    panel._run_btn.click()
+    panel._stop_btn.click()
     qtbot.waitUntil(cancelled.is_set, timeout=3000)
-    qtbot.waitUntil(lambda: panel._run_btn.text() == "Run Check", timeout=3000)
+    qtbot.waitUntil(lambda: panel._run_btn.isEnabled(), timeout=3000)
     assert not panel._active_dialogs
     qtbot.waitUntil(lambda: not panel._worker_thread.is_alive(), timeout=3000)

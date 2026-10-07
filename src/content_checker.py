@@ -437,6 +437,9 @@ _JS_BROKEN_FILE_LINKS = r"""async (courseId) => {
 
 
 class ContentChecker:
+    def _allows(self, operation: str) -> bool:
+        return self.operations is None or bool(self.operations.get(operation, False))
+
     def __init__(
         self,
         bs_url:              str,
@@ -463,6 +466,9 @@ class ContentChecker:
         verbose:              bool              = False,
         full_run:             bool              = False,
         keep_browser_open:    bool              = True,
+        scan_only:            bool              = False,
+        on_report:            Optional[Callable] = None,
+        operations:           Optional[dict]    = None,
     ):
         self.bs_url                 = bs_url.strip()
         self.moodle_url             = moodle_url.strip()
@@ -470,6 +476,9 @@ class ContentChecker:
         # A normal Checker run is read-only.  Only the explicit Full Run may
         # attach an already-existing activity to Content.
         self.full_run               = full_run
+        self.scan_only              = scan_only
+        self.on_report              = on_report
+        self.operations             = operations
         self.order_only             = False
         self.books_only             = False
         self.keep_browser_open      = keep_browser_open
@@ -3298,9 +3307,11 @@ class ContentChecker:
                 and i.get("href")
             ]
             h5p_cached, h5p_missing = self._h5p.local_download_status(items)
-            if self.order_only:
+            if self.order_only or self.scan_only or (
+                self.operations is not None and not self.operations.get("h5p", False)
+            ):
                 await tab.close()
-                self.log("↕ Order-only run: Moodle H5P downloads skipped.", "dim")
+                self.log("H5P downloads skipped for this operation.", "dim")
                 return items
             if h5p_activities:
                 self.log("", "dim")
@@ -4651,7 +4662,8 @@ class ContentChecker:
                 if r.get("type") == "SECTION" and r["status"] == "missing"
                 and valid_section_name(r.get("name"))
             ]
-            if missing_secs and self.full_run and not self.link_repair_only:
+            if (missing_secs and self.full_run and not self.link_repair_only
+                    and self._allows("content")):
                 self.log("─" * 52, "dim")
                 self.log(f"📦 {len(missing_secs)} Moodle section(s) have no Brightspace unit", "step")
                 for n in missing_secs:
@@ -4729,16 +4741,43 @@ class ContentChecker:
             except Exception as exc:
                 broken_links = []
                 self.log(f"  Could not check Brightspace file links: {str(exc).splitlines()[0]}", "warning")
-            # A broken file link is always worth fixing, so this is offered on an
-            # ordinary Checker run too. Nothing is written until the user agrees.
-            if broken_links:
+            self._summary["broken_links_found"] = len(broken_links)
+            if self.on_report:
+                self.on_report({
+                    "missing": sum(r.get("status") == "missing" for r in results),
+                    "books": sum(r.get("hint") == "modtype_book" for r in results),
+                    "files": sum(r.get("type") == "FILE" and r.get("status") in
+                                 {"missing", "fuzzy"} for r in results),
+                    "h5p": sum(r.get("type") == "EXTERNAL" and
+                               ("hvp" in r.get("hint", "") or "h5p" in r.get("hint", ""))
+                               for r in results),
+                    "broken_links": len(broken_links),
+                    "activities": len(activity_plan),
+                    "moodle_links": len(moodle_links),
+                    "findings": [
+                        {"name": str(r.get("name") or ""),
+                         "section": str(r.get("section") or ""),
+                         "type": str(r.get("type") or ""),
+                         "status": str(r.get("status") or "")}
+                        for r in results if r.get("status") in {"missing", "fuzzy"}
+                    ],
+                    "broken_pages": sorted({str(link.get("topic_title") or "")
+                                             for link in broken_links}),
+                })
+            if self.scan_only:
+                self.log("✓ Scan complete. Review findings before choosing any changes.", "success")
+                if self.on_complete:
+                    self.on_complete()
+                if browser.is_connected():
+                    await browser.close()
+                return
+            if broken_links and self._allows("repair_files"):
                 repaired = await self._repair_broken_file_links(
                     context, page, course_id, results, broken_links, bs_flat
                 )
                 self._summary["broken_links_repaired"] = repaired
-            self._summary["broken_links_found"] = len(broken_links)
 
-            if self.full_run and not self.link_repair_only:
+            if self.full_run and not self.link_repair_only and self._allows("content"):
                 created_urls = await self._create_missing_url_topics(page, course_id, results, bs_flat)
                 created_pages = await self._create_missing_page_topics(context, page, course_id, results, bs_flat)
                 if created_urls or created_pages:
@@ -4751,7 +4790,7 @@ class ContentChecker:
             missing_files = [r for r in results if r.get("status") == "missing" and r.get("type") == "FILE"]
             self.log(f"DEBUG: {len(moodle_files)} FILE items in results, {len(missing_files)} marked missing", "dim")
 
-            if self.full_run and self.on_file_checklist:
+            if self.full_run and self.on_file_checklist and self._allows("files"):
                 t0 = time.time()
                 await self._offer_missing_file_download(context, page, course_id, results, bs_flat)
                 self._summary["timings"]["File download + upload"] = time.time() - t0
@@ -4767,7 +4806,7 @@ class ContentChecker:
             # The preview and confirmation live inside Full Run.  A standard
             # Checker run has already reported the same classifications above,
             # but cannot reach this write path.
-            if activity_plan and self.full_run:
+            if activity_plan and self.full_run and self._allows("activities"):
                 self._log_activity_link_report(activity_plan, preview=True)
                 preview_lines = [
                     f"• {item['activity_label']}: {item['name']} → {item['target_module_title']}"
@@ -4804,10 +4843,10 @@ class ContentChecker:
                     self.log("↷ Existing activity links were not attached.", "dim")
 
             if (self.full_run and not self.stop_flag[0] and not self.link_repair_only
-                    and not getattr(self, "do_h5p_embed", False)):
+                    and not getattr(self, "do_h5p_embed", False) and self._allows("order")):
                 await self._order_units_like_moodle(page, course_id, results)
 
-            if moodle_links and getattr(self, "do_relink", False):
+            if moodle_links and getattr(self, "do_relink", False) and self._allows("relink"):
                 t0 = time.time()
                 await self._relink_moodle_files(context, page, course_id, moodle_links)
                 self._summary["timings"]["Moodle link re-link"] = time.time() - t0
@@ -4836,13 +4875,14 @@ class ContentChecker:
                     import traceback
                     self.log(f"  Traceback: {traceback.format_exc()}", "dim")
                 self._summary["timings"]["H5P embed (Phase B)"] = time.time() - t0
-                if not self.stop_flag[0]:
+                if not self.stop_flag[0] and self._allows("order"):
                     await self._order_units_like_moodle(page, course_id, results)
 
             # A Moodle Book is one course activity containing multiple chapters.
             # Handle it after ordinary activities so chapter links can target
             # already-created Brightspace assignments and H5P content.
-            if self.full_run and not self.link_repair_only and not self.stop_flag[0]:
+            if (self.full_run and not self.link_repair_only and not self.stop_flag[0]
+                    and self._allows("books")):
                 books = [r for r in results if r.get("hint") == "modtype_book"
                          and r.get("href") and not r.get("embedded")]
                 if books:

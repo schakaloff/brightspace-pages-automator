@@ -102,9 +102,10 @@ def test_checker_panel_builds(qtbot):
     mw.save_config.return_value = None
     panel = CheckerPanel(mw)
     qtbot.addWidget(panel)
-    assert panel._run_btn.text() == "Run Check"
-    assert panel._gradebook_cb.text() == "Add H5P activities to gradebook"
-    assert panel._gradebook_cb.isChecked() is False
+    assert panel._run_btn.text() == "Scan course"
+    assert panel._apply_btn.text() == "Preview selected changes"
+    assert panel._apply_btn.isEnabled() is False
+    assert panel._stop_btn.isHidden()
     # assert panel._continue_btn.isHidden()
 
 
@@ -174,8 +175,8 @@ def test_restyle_panel_builds(qtbot):
     from gui_panels import RestylePanel
     mw = MagicMock(); mw.chromium_ready = False; mw.load_config.return_value = {}
     panel = RestylePanel(mw); qtbot.addWidget(panel)
-    assert panel._run_btn.text() == "Start"
-    assert panel._move_unit_content_chk.isChecked() is True
+    assert panel._run_btn.text() == "Start restyle"
+    assert panel._move_unit_content_chk.isChecked() is False
 
 
 def test_restyle_unit_content_option_can_be_disabled_and_saved(qtbot):
@@ -246,3 +247,48 @@ def test_col_confirm_message_shows_dialog_and_sets_event(qtbot, monkeypatch):
 
     assert event.is_set()
     assert result_ref[0] is True
+
+
+def test_workflow_hub_cards_open_their_tool(qtbot):
+    from panels.workflow_hub import WorkflowHub
+
+    hub = WorkflowHub("Media", "Move media.", [
+        ("h5p", "H5P activities", "Download H5P."),
+        ("kaltura", "Kaltura videos", "Find videos."),
+    ])
+    qtbot.addWidget(hub)
+    opened = []
+    hub.tool_selected.connect(opened.append)
+
+    hub.buttons["kaltura"].click()
+    hub.buttons["h5p"].click()
+
+    assert opened == ["kaltura", "h5p"]
+
+
+def test_checker_fix_tab_needs_a_scan_and_a_choice(qtbot):
+    from unittest.mock import MagicMock
+    from gui_panels import CheckerPanel
+
+    mw = MagicMock()
+    mw.chromium_ready = False
+    mw.load_config.return_value = {}
+    panel = CheckerPanel(mw)
+    qtbot.addWidget(panel)
+    panel._bs_entry.setText("https://learn.test/d2l/home/42")
+    panel._moodle_entry.setText("https://moodle.test/course/view.php?id=7")
+
+    assert [panel._tabs.tabText(i) for i in range(panel._tabs.count())] == ["1 · Scan", "2 · Fix"]
+    panel._fix_boxes["order"].setChecked(True)
+    assert not panel._apply_btn.isEnabled()  # no scan yet
+
+    urls = (panel._bs_entry.text(), panel._moodle_entry.text())
+    panel._show_scan_report({
+        "missing": 0, "books": 0, "files": 0, "h5p": 0, "broken_links": 0,
+        "activities": 0, "moodle_links": 0, "findings": [], "broken_pages": [],
+    }, urls)
+    assert panel._apply_btn.isEnabled()
+    assert not panel._fix_boxes["books"].isEnabled()  # nothing to split
+
+    panel._moodle_entry.setText("https://moodle.test/course/view.php?id=8")
+    assert not panel._apply_btn.isEnabled()  # a different course needs a new scan

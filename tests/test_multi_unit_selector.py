@@ -99,9 +99,10 @@ def test_manual_collector_url_does_not_apply_template_filter(monkeypatch):
         def __init__(self, **kwargs):
             captured["unit_url"] = kwargs["unit_url"]
 
-        async def run(self, *, context=None, page=None):
+        async def run(self, *, context=None, page=None, cleanup_only=False):
             captured["context"] = context
             captured["page"] = page
+            captured["cleanup_only"] = cleanup_only
             return True
 
     monkeypatch.setattr(unit_collector, "UnitCollector", _ManualCollector)
@@ -120,6 +121,7 @@ def test_manual_collector_url_does_not_apply_template_filter(monkeypatch):
         "unit_url": manual_url,
         "context": "manual-context",
         "page": "manual-page",
+        "cleanup_only": False,
     }
 
 

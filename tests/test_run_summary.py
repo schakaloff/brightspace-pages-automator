@@ -36,6 +36,6 @@ def test_summary_records_pages_accessibility_and_usage():
 
     assert "Pages selected:       2" in text
     assert "Pages changed:        1" in text
-    assert "Pages not changed:    1" in text
+    assert "Pages needing review: 1" in text
     assert "1 violation(s)" in text
     assert "Estimated AI cost:    $0.0400 CAD" in text

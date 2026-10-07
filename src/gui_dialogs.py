@@ -387,19 +387,18 @@ class FileChecklistDialog(QDialog):
 # ── PagesDialog ───────────────────────────────────────────────────────────────
 
 class PagesDialog(QDialog):
-    """Shows pages found in a section; user picks start index and count.
-
-    After exec(), call result_value() → (start_0indexed, count).
-    If the dialog is rejected (X button), result_value() returns (0, len(pages)).
-    """
+    """An explicit, searchable checklist. Rejection always selects nothing."""
 
     def __init__(self, pages: list, parent=None):
         super().__init__(parent)
         self._pages = pages
-        self._result = (0, len(pages))
+        self._result = []
+        self._checks = []
+        self.setProperty("design", "modern")
 
-        self.setWindowTitle("Pages Found")
-        self.setFixedSize(480, 460)
+        self.setWindowTitle("Choose pages to restyle")
+        self.setMinimumSize(500, 400)
+        self.resize(660, 580)
         self.setModal(True)
         self._build()
 
@@ -408,15 +407,30 @@ class PagesDialog(QDialog):
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(10)
 
-        title = QLabel(f"Found {len(self._pages)} pages in this section")
+        title = QLabel("Choose pages to restyle")
         title.setStyleSheet("font-size:16px; font-weight:bold;")
         layout.addWidget(title)
+        hint = QLabel("Only checked items will change. All pages use the theme and design you chose.")
+        hint.setWordWrap(True)
+        hint.setProperty("role", "dim")
+        layout.addWidget(hint)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Find a page by title…")
+        self._search.textChanged.connect(self._filter)
+        layout.addWidget(self._search)
+        select_row = QHBoxLayout()
+        for label, checked in (("Select visible", True), ("Clear selection", False)):
+            button = QPushButton(label)
+            button.setProperty("variant", "secondary")
+            button.clicked.connect(lambda _=False, value=checked: self._select(value))
+            select_row.addWidget(button)
+        select_row.addStretch()
+        layout.addLayout(select_row)
 
         # Page list
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setMaximumHeight(200)
         inner = QWidget()
         inner_layout = QVBoxLayout(inner)
         inner_layout.setContentsMargins(4, 4, 4, 4)
@@ -424,48 +438,52 @@ class PagesDialog(QDialog):
         inner_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         scroll.setWidget(inner)
         for i, p in enumerate(self._pages, 1):
-            lbl = QLabel(f"{i}.  {p.get('label', p.get('title', ''))}")
-            lbl.setProperty("role", "dim")
-            inner_layout.addWidget(lbl)
-        layout.addWidget(scroll)
+            check = QCheckBox(f"{i}.  {p.get('label', p.get('title', 'Untitled'))}")
+            check.setMinimumHeight(38)
+            check.setToolTip(p.get("url", ""))
+            check.toggled.connect(self._update_count)
+            self._checks.append(check)
+            inner_layout.addWidget(check)
+        layout.addWidget(scroll, 1)
+        self._count_label = QLabel()
+        layout.addWidget(self._count_label)
+        actions = QHBoxLayout()
+        cancel = QPushButton("Cancel")
+        cancel.setProperty("variant", "secondary")
+        cancel.clicked.connect(self.reject)
+        actions.addWidget(cancel)
+        self._run_btn = QPushButton()
+        self._run_btn.clicked.connect(self._on_run)
+        actions.addWidget(self._run_btn, 1)
+        layout.addLayout(actions)
+        self._update_count()
 
-        # Start / count fields
-        fields_row = QHBoxLayout()
-        fields_row.setSpacing(16)
+    def _filter(self, text):
+        for check in self._checks:
+            check.setVisible(text.casefold() in check.text().casefold())
+        self._update_count()
 
-        fields_row.addWidget(QLabel("Start from page:"))
-        self._start_spin = QSpinBox()
-        self._start_spin.setRange(1, max(1, len(self._pages)))
-        self._start_spin.setValue(1)
-        self._start_spin.setFixedWidth(70)
-        self._start_spin.setFixedHeight(36)
-        fields_row.addWidget(self._start_spin)
+    def _select(self, checked):
+        for check in self._checks:
+            if not checked or not check.isHidden():
+                check.setChecked(checked)
 
-        fields_row.addWidget(QLabel("How many:"))
-        self._count_spin = QSpinBox()
-        self._count_spin.setRange(1, max(1, len(self._pages)))
-        self._count_spin.setValue(len(self._pages))
-        self._count_spin.setFixedWidth(70)
-        self._count_spin.setFixedHeight(36)
-        fields_row.addWidget(self._count_spin)
-        fields_row.addStretch()
-        layout.addLayout(fields_row)
-
-        layout.addStretch()
-
-        run_btn = QPushButton("▶  Run")
-        run_btn.setFixedHeight(42)
-        run_btn.clicked.connect(self._on_run)
-        layout.addWidget(run_btn)
+    def _update_count(self):
+        count = sum(check.isChecked() for check in self._checks)
+        hidden = sum(check.isChecked() and check.isHidden() for check in self._checks)
+        suffix = f" ({hidden} hidden by search)" if hidden else ""
+        self._count_label.setText(f"{count} of {len(self._pages)} selected{suffix}")
+        self._run_btn.setText(f"Restyle {count} selected item(s)")
+        self._run_btn.setEnabled(count > 0)
 
     def _on_run(self):
-        start = self._start_spin.value() - 1  # 0-indexed
-        count = self._count_spin.value()
-        self._result = (start, count)
+        self._result = [i for i, check in enumerate(self._checks) if check.isChecked()]
+        if not self._result:
+            return
         self.accept()
 
-    def result_value(self) -> tuple[int, int]:
-        return self._result
+    def result_value(self) -> list[int]:
+        return list(self._result) if self.result() == QDialog.DialogCode.Accepted else []
 
 
 # ── UpdateDialog ──────────────────────────────────────────────────────────────
