@@ -69,6 +69,16 @@ def test_stop_allows_active_pages_to_finish_and_skips_queued_pages():
     assert results.count("skipped") == 20 - len(active)
 
 
+def test_blank_encoded_page_title_logs_the_url_for_review():
+    messages = []
+    runner = PageAutomator(PAGES[0]["url"], lambda message, level: messages.append(message))
+    runner._process_topic_impl = AsyncMock(return_value=False)
+    context = SimpleNamespace(new_page=AsyncMock(return_value=SimpleNamespace(close=AsyncMock())))
+    asyncio.run(runner._run_selected(context, [dict(label="&#x20;", url=PAGES[0]["url"])]))
+    assert f"Needs review: {PAGES[0]['url']}" in messages
+    assert not any("&#x20;" in message for message in messages)
+
+
 def install_browser(monkeypatch, completed=None):
     browser = SimpleNamespace(is_connected=lambda: not completed, close=AsyncMock())
     page = SimpleNamespace(goto=AsyncMock())

@@ -6,6 +6,10 @@ The matching section is pulled into the GitHub Release notes automatically,
 and shown to users in the in-app "Update available" dialog.
 
 ## 0.8.10
+- Restyle checks unusually short AI results for preserved text and resource
+  destinations instead of rejecting them by HTML size alone. Missing content
+  gets one repair attempt from the original page before the result is rejected.
+  Review logs now explain unusable results and identify pages with blank titles.
 - Create batches of named pages in a chosen section, edit each page's content,
   preview the draft, and clear the local list with one action. Creation tracks
   verified results and stops on uncertain requests instead of retrying them.

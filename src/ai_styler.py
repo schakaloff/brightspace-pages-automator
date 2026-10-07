@@ -345,10 +345,14 @@ async def apply_style(
         )
 
     client = anthropic.AsyncAnthropic(api_key=api_key)
+    content_retry_used = False
+    usage = {"input_tokens": 0, "output_tokens": 0}
 
-    for attempt in range(1, _MAX_RETRIES + 1):
+    # One content-repair request is independent of the network retry budget.
+    for attempt in range(1, _MAX_RETRIES + 2):
         try:
-            log(f"🤖 {model} — attempt {attempt}/{_MAX_RETRIES} (theme: {theme_name})", "info")
+            purpose = "; content repair" if content_retry_used else ""
+            log(f"🤖 {model} — attempt {attempt} (theme: {theme_name}{purpose})", "info")
             async with client.messages.stream(
                 model=model,
                 max_tokens=_MAX_TOKENS,
@@ -425,6 +429,13 @@ async def apply_style(
                 end   = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
                 result = "\n".join(lines[start:end]).strip()
 
+            if not result:
+                log("❌ Claude returned empty HTML. Leaving existing content untouched.", "error")
+                return None, None
+
+            usage["input_tokens"] += response.usage.input_tokens
+            usage["output_tokens"] += response.usage.output_tokens
+
             result = _restore_kaltura_sizing(cleaned_html, result, log=log)
             result = _keep_page_container_wide(result)
             # The API can vary its link target from page to page. Keep the
@@ -433,19 +444,36 @@ async def apply_style(
             from link_behavior import open_page_links_in_new_window
             result = open_page_links_in_new_window(result)
 
-            if len(result) < len(cleaned_html) * 0.5:
-                log(
-                    f"❌ Styled result ({len(result):,} chars) is suspiciously short "
-                    f"compared to the source ({len(cleaned_html):,} chars) — refusing to "
-                    "overwrite existing content.",
-                    "error",
-                )
-                return None, None
+            # Imported pages can be mostly presentation markup. A shorter
+            # rewrite is valid when its authored content is still present.
+            # Always validate the repair response, even if it becomes longer.
+            if content_retry_used or len(result) < len(cleaned_html) * 0.5:
+                from content_preservation import content_is_preserved
 
-            usage = {
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
-            }
+                preserved, reason = content_is_preserved(
+                    cleaned_html, result, allow_label_colons=True
+                )
+                if not preserved:
+                    if not content_retry_used:
+                        log(
+                            f"⚠ Styled result is missing content ({reason}). "
+                            "Retrying once from the original page.", "warning",
+                        )
+                        content_retry_used = True
+                        prompt += (
+                            "\n\nCONTENT REPAIR: Your previous result was incomplete: "
+                            f"{reason}. Regenerate the complete styled page from SOURCE HTML. "
+                            "Keep every authored passage, file link, image and media destination. "
+                            "Formatting and wrapper markup may be shorter. Return the complete HTML."
+                        )
+                        continue
+                    log(
+                        f"❌ Styled result still has missing content ({reason}). "
+                        "Leaving existing content untouched.", "error",
+                    )
+                    return None, None
+                log(f"✓ Styled content verified ({len(cleaned_html):,} → {len(result):,} chars).", "info")
+
             usage["cost_cad"] = _cost_cad(model, usage["input_tokens"], usage["output_tokens"])
 
             log(f"✅ Done ({len(result):,} chars)", "success")
@@ -457,7 +485,7 @@ async def apply_style(
             return result, usage
 
         except anthropic.APIStatusError as e:
-            if e.status_code in (429, 529) and attempt < _MAX_RETRIES:
+            if e.status_code in (429, 529) and attempt - int(content_retry_used) < _MAX_RETRIES:
                 log(f"⚠ Server busy ({e.status_code}) — retrying in {_RETRY_DELAY}s...", "warning")
                 await asyncio.sleep(_RETRY_DELAY)
             else:
@@ -473,7 +501,7 @@ async def apply_style(
         # reached the retry above — a single blip used to abandon the whole
         # page. Covers APITimeoutError too, which subclasses this.
         except anthropic.APIConnectionError as e:
-            if attempt < _MAX_RETRIES:
+            if attempt - int(content_retry_used) < _MAX_RETRIES:
                 log(f"⚠ Connection error — retrying in {_RETRY_DELAY}s...", "warning")
                 await asyncio.sleep(_RETRY_DELAY)
             else:

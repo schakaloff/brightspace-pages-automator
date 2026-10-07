@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import re
 from typing import TYPE_CHECKING, Callable, List, Optional
 
@@ -456,7 +457,7 @@ class PageAutomator:
         # "card" around. A lone page's raw source has no such heading, so the prompt
         # (which assumes card-per-section layout) has nothing to hang the design on.
         # Mirror that scaffold here for single-page restyles.
-        heading = label
+        heading = html.unescape(label or "").strip()
         if not heading:
             try:
                 heading = await page.evaluate("() => document.title || ''")
@@ -478,7 +479,7 @@ class PageAutomator:
         )
 
         if not styled_html:
-            self.log("✗ AI returned nothing — skipping", "error")
+            self.log("✗ No usable styled result — see the reason above. Page left unchanged.", "error")
             return False
 
         if "BPA: CLASSIC" not in self.style_reference_html:
@@ -527,25 +528,26 @@ class PageAutomator:
 
         async def process_one(topic: dict, index: int):
             async with sem:
+                display_label = html.unescape(topic["label"]).strip() or topic["url"]
                 state = "skipped"
                 tab = None
                 attempted = False
                 try:
                     if self._stopped():
-                        self.log(f"Skipped: {topic['label']} (stopped)", "warning")
+                        self.log(f"Skipped: {display_label} (stopped)", "warning")
                         return
                     state = "failed"
                     tab = await context.new_page()
-                    self.log(f"[{index + 1}/{len(selected)}] {topic['label']}", "step")
+                    self.log(f"[{index + 1}/{len(selected)}] {display_label}", "step")
                     attempted = True
                     success = await self._process_topic(tab, topic["url"], topic["label"])
                     state = "changed" if success else "failed"
-                    self.log(f"{'Saved' if success else 'Needs review'}: {topic['label']}",
+                    self.log(f"{'Saved' if success else 'Needs review'}: {display_label}",
                              "success" if success else "error")
                 except Exception as exc:
                     if not attempted:
                         self._run_summary.record_page(False)
-                    self.log(f"Failed: {topic['label']} — {exc}", "error")
+                    self.log(f"Failed: {display_label} — {exc}", "error")
                 finally:
                     if self.on_page_result:
                         self.on_page_result(index, topic, state)

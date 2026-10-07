@@ -298,3 +298,112 @@ async def test_default_model_refusal_does_not_retry_or_save(monkeypatch):
     assert messages.calls == 1
     assert result is None and usage is None
     assert any("refused this formatting request" in message for message in logs)
+
+
+CONTENT_BLOCKS = [
+    "<h2>Weekly resources</h2>",
+    "<p>Bring your course notes to class on Monday. Read the assigned chapter before the practice activity.</p>",
+    '<p><a href="/notes.pdf">Download the lecture notes</a></p>',
+    '<img src="/diagram.png" alt="Course diagram">',
+    '<iframe src="https://example.test/practice/embed"></iframe>',
+]
+COMPACT_HTML = "".join(CONTENT_BLOCKS)
+# Styling can eliminate thousands of characters of redundant wrapper markup.
+BLOATED_HTML = "".join(
+    f'<div class="{"legacy-formatting-" * 500}">{block}</div>'
+    for block in CONTENT_BLOCKS
+)
+
+
+def sequence_client(monkeypatch, responses):
+    class Messages:
+        def __init__(self):
+            self.prompts = []
+
+        def stream(self, **kwargs):
+            self.prompts.append(kwargs["messages"][0]["content"])
+            response = responses[len(self.prompts) - 1]
+            if isinstance(response, Exception):
+                raise response
+            return _AsyncStreamContextManager(_Stream(response))
+
+    client = type("C", (), {"messages": Messages()})()
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", lambda **kwargs: client)
+    return client.messages
+
+
+async def run_compact(logs):
+    return await ai_styler.apply_style(
+        BLOATED_HTML, "", "lake", "test-key", log_callback=lambda message, level: logs.append(message)
+    )
+
+
+@pytest.mark.asyncio
+async def test_short_complete_output_is_accepted_without_another_request(monkeypatch):
+    messages = sequence_client(monkeypatch, [COMPACT_HTML])
+    logs = []
+    result, usage = await run_compact(logs)
+    assert len(result) < len(ai_styler._clean_html(BLOATED_HTML)) * 0.5
+    assert "lecture notes" in result
+    assert len(messages.prompts) == 1
+    assert usage["input_tokens"] == 100
+    assert any("Styled content verified" in message for message in logs)
+    assert not any("suspiciously short" in message for message in logs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", CONTENT_BLOCKS[1:])
+async def test_short_missing_content_retries_from_original_and_accepts_repair(monkeypatch, missing):
+    incomplete = COMPACT_HTML.replace(missing, "")
+    messages = sequence_client(monkeypatch, [incomplete, COMPACT_HTML])
+    result, usage = await run_compact([])
+    assert result
+    assert len(messages.prompts) == 2
+    assert ai_styler._clean_html(BLOATED_HTML) in messages.prompts[1]
+    assert "CONTENT REPAIR" in messages.prompts[1]
+    assert usage["input_tokens"] == 200
+    assert usage["output_tokens"] == 400
+    assert usage["cost_cad"] == ai_styler._cost_cad(ai_styler.DEFAULT_MODEL, 200, 400)
+
+
+@pytest.mark.asyncio
+async def test_incomplete_repair_is_rejected_even_if_it_has_more_markup(monkeypatch):
+    incomplete = COMPACT_HTML.replace(CONTENT_BLOCKS[1], "")
+    padded = "<style>/*" + "padding " * 8000 + "*/</style>" + incomplete
+    assert len(padded) > len(ai_styler._clean_html(BLOATED_HTML)) * 0.5
+    messages = sequence_client(monkeypatch, [incomplete, padded])
+    logs = []
+    assert await run_compact(logs) == (None, None)
+    assert len(messages.prompts) == 2
+    assert any("still has missing content" in message and "Bring your course notes" in message for message in logs)
+
+
+@pytest.mark.asyncio
+async def test_content_retry_is_available_after_network_retries(monkeypatch):
+    failure = anthropic.APIConnectionError(
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    )
+    incomplete = COMPACT_HTML.replace(CONTENT_BLOCKS[2], "")
+    messages = sequence_client(monkeypatch, [failure, failure, incomplete, COMPACT_HTML])
+    result, usage = await run_compact([])
+    assert result
+    assert len(messages.prompts) == 4
+    assert usage["input_tokens"] == 200
+
+
+@pytest.mark.asyncio
+async def test_content_retry_does_not_create_an_unbounded_network_retry(monkeypatch):
+    failure = anthropic.APIConnectionError(
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    )
+    incomplete = COMPACT_HTML.replace(CONTENT_BLOCKS[2], "")
+    messages = sequence_client(monkeypatch, [incomplete, failure, failure, failure])
+    assert await run_compact([]) == (None, None)
+    assert len(messages.prompts) == 4
+
+
+@pytest.mark.asyncio
+async def test_empty_code_fence_is_not_a_usable_result(monkeypatch):
+    messages = sequence_client(monkeypatch, ["```html\n```"])
+    assert await run_compact([]) == (None, None)
+    assert len(messages.prompts) == 1
