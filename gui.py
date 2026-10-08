@@ -42,7 +42,7 @@ class MainWindow(QMainWindow):
     def __init__(self, splash: StartupSplash | None = None):
         super().__init__()
         self._splash = splash
-        self.setWindowTitle("Brightspace Pages Automator")
+        self.setWindowTitle("MTB Writer")
         self.setMinimumSize(720, 560)
         self.resize(1120, 800)
         self._claude_key   = ""
@@ -180,7 +180,7 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(32, 28, 32, 24)
         v.setSpacing(0)
 
-        title = QLabel("Welcome to Brightspace Pages Automator")
+        title = QLabel("Welcome to MTB Writer")
         title.setProperty("role", "header")
         title.setWordWrap(True)
         v.addWidget(title)
@@ -671,8 +671,8 @@ if __name__ == "__main__":
         # the session file and the browser.
         QMessageBox.information(
             None,
-            "Brightspace Pages Automator",
-            "Brightspace Pages Automator is already running.\n\n"
+            "MTB Writer",
+            "MTB Writer is already running.\n\n"
             "Switch to the open window instead of starting a second copy.",
         )
         sys.exit(0)

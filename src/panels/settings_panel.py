@@ -393,7 +393,7 @@ class SettingsPanel(QWidget):
             footer_version = current_build_label()
         except Exception:
             footer_version = "unknown build"
-        ver = QLabel(f"Brightspace Pages Automator  {footer_version}")
+        ver = QLabel(f"MTB Writer  {footer_version}")
         ver.setProperty("role", "dim")
         ver.setStyleSheet("font-size:11px;")
         layout.addWidget(ver)

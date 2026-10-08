@@ -45,8 +45,7 @@ def build_splash_pixmap(progress=0.0, message="Starting…") -> QPixmap:
         painter.drawText(QRectF(x, y, w, h), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, value)
 
     painter.drawPixmap(32, 34, _brand_icon())
-    text("Brightspace", 116, 34, 370, 24, 16, colors["muted"], True)
-    text("Pages Automator", 116, 61, 370, 38, 28, colors["text"], True)
+    text("MTB Writer", 116, 48, 370, 38, 28, colors["text"], True)
     text("Build, style, and organize your course content.", 32, 122, 456, 24, 14, colors["muted"])
     text(message, 32, 174, 456, 22, 13, colors["text"])
 
