@@ -286,6 +286,7 @@ class UnitCollector:
         self.moodle_password = moodle_password
         self._name_matcher = lambda label: None
         self._topic_metadata: dict[str, dict] = {}
+        self._folder_metadata: dict[str, dict] = {}
         self._clipboard_lock = asyncio.Lock()
         self._link_lock = asyncio.Lock()
         self._dl_dir = Path(tempfile.gettempdir()) / "brightspace_collector"
@@ -677,11 +678,15 @@ class UnitCollector:
         if not isinstance(items, list):
             self.log("  ✗ Visibility check failed: D2L refused the structure request", "error")
             return None
-        self._topic_metadata = {
-            str(item.get("Id") or item.get("TopicId")): item
-            for item in items
-            if isinstance(item, dict) and (item.get("Id") or item.get("TopicId"))
-        }
+        from collector_structure import read_topic_tree
+
+        self._topic_metadata = {}
+        self._folder_metadata = {}
+        try:
+            metadata, folders = await read_topic_tree(page, course_id, module_id, items)
+        except Exception as exc:
+            self.log(f"  ✗ Could not read the unit's folders safely: {exc}", "error")
+            return None
         from unit_overview import BrowserContentAPI
 
         api = BrowserContentAPI(page, course_id, module_id)
@@ -694,12 +699,15 @@ class UnitCollector:
         selected_ids = list(dict.fromkeys(
             str(topic.get("topic_id")) for topic in topics if topic.get("topic_id")
         ))
-        missing_ids = [topic_id for topic_id in selected_ids if topic_id not in self._topic_metadata]
+        missing_ids = [topic_id for topic_id in selected_ids if topic_id not in metadata]
         if missing_ids:
             self.log(
                 f"  ✗ {len(missing_ids)} topic(s) are missing from Brightspace's "
-                "structure response", "error",
+                "unit/folder structure; collection stopped", "error",
             )
+            for topic in topics:
+                if str(topic.get("topic_id")) in missing_ids:
+                    self.log(f"    • {topic.get('label', 'Untitled')} (ID {topic['topic_id']})", "detail")
             return None
         details = await asyncio.gather(
             *(read_topic(topic_id) for topic_id in selected_ids),
@@ -720,7 +728,27 @@ class UnitCollector:
                     "error",
                 )
                 return None
-            self._topic_metadata[topic_id]["Description"] = detail.get("Description")
+            item = metadata[topic_id]
+            if str(detail.get("Id")) != topic_id:
+                self.log(f"  ✗ Topic {topic_id} returned a different or missing ID", "error")
+                return None
+            if (detail.get("ParentModuleId") is not None
+                    and str(detail["ParentModuleId"]) != str(item["ParentModuleId"])):
+                self.log(f"  ✗ Topic {topic_id} moved to a different folder during collection", "error")
+                return None
+            hidden = detail.get("IsHidden", item.get("IsHidden"))
+            if not isinstance(hidden, bool):
+                self.log(f"  ✗ Topic {topic_id} returned no usable visibility", "error")
+                return None
+            metadata[topic_id] = {
+                **item, **detail,
+                "IsHidden": item["_ParentHidden"] or hidden,
+            }
+        self._topic_metadata = metadata
+        self._folder_metadata = folders
+        topics.sort(key=lambda topic: metadata.get(
+            str(topic.get("topic_id")), {}
+        ).get("_Order", len(metadata)))
         description_count = sum(
             bool(topic_description_html(self._topic_metadata[topic_id]))
             for topic_id in selected_ids
@@ -1702,7 +1730,17 @@ class UnitCollector:
         source_url = str(self._topic_metadata.get(str(topic.get("topic_id")), {}).get("Url") or "")
         result: dict = {"topic": topic, "html": None, "link_url": None, "file": None}
 
-        from collector_file_validation import direct_slide_url, external_topic_url
+        from collector_file_validation import direct_course_document_url, direct_slide_url, external_topic_url
+
+        # Folder documents already live in course files. Link them in place
+        # under the folder heading rather than uploading them to generic Files.
+        if self._topic_metadata.get(str(topic.get("topic_id")), {}).get("_FolderPath"):
+            document_url = direct_course_document_url(topic["url"], source_url)
+            if document_url:
+                result["link_url"] = document_url
+                result["folder_document"] = True
+                self.log(f"  ✓ Kept folder document in course files: {label}", "success")
+                return result
 
         external_url = external_topic_url(topic["url"], source_url)
         if external_url:
@@ -1876,7 +1914,7 @@ class UnitCollector:
             if moved:
                 self.log(
                     f"✗ Styling moved {len(moved)} resource(s) out of their "
-                    "Lecture Slides/Recordings section. The assembled page was kept.",
+                    "folder or source section. The assembled page was kept.",
                     "error",
                 )
                 for item in moved[:5]:
@@ -2085,6 +2123,8 @@ class UnitCollector:
         required_section_links: list[tuple[str, str]] = []
         required_descriptions: list[str] = []
         current_resource_heading = ""
+        current_folder_path: tuple = ()
+        described_folders: set = set()
 
         # Insert Stuff uses the original filename in course Manage Files. Two
         # different topics with that name would overwrite each other, so keep
@@ -2097,6 +2137,57 @@ class UnitCollector:
 
         from content_preservation import add_generated_heading
         from youtube_embed import parse_youtube_url
+
+        def append_section(markup: str) -> None:
+            if current_folder_path:
+                from bs4 import BeautifulSoup
+
+                soup = BeautifulSoup(markup, "html.parser")
+                for heading in soup.find_all(re.compile(r"^h[1-6]$")):
+                    level = max(
+                        len(current_folder_path) + 2,
+                        int(heading.name[1]) + len(current_folder_path),
+                    )
+                    heading.name = f"h{min(6, level)}"
+                markup = str(soup)
+            sections.append(markup)
+
+        def begin_folder(topic: dict) -> None:
+            nonlocal current_folder_path, current_resource_heading
+            path = self._topic_metadata.get(str(topic.get("topic_id")), {}).get("_FolderPath", ())
+            if path == current_folder_path:
+                return
+            common = 0
+            for old, new in zip(current_folder_path, path):
+                if old != new:
+                    break
+                common += 1
+            for _ in current_folder_path[common:]:
+                sections.append("</section>\n")
+            current_folder_path = path
+            current_resource_heading = ""
+            for depth in range(common, len(path)):
+                folder_id = path[depth]
+                folder = self._folder_metadata[folder_id]
+                level = min(6, depth + 2)
+                sections.append(
+                    f'<section class="bpa-folder" data-folder-id="{html.escape(folder_id, quote=True)}">\n'
+                    f'<h{level}>{html.escape(folder.get("Title") or "Folder")}</h{level}>\n'
+                )
+                if folder_id not in described_folders:
+                    description = topic_description_html(folder)
+                    if description:
+                        linked = link_known_topic_references(description, topics)
+                        required_descriptions.append(linked)
+                        append_section(linked)
+                    described_folders.add(folder_id)
+
+        def require_grouped_link(url: str) -> None:
+            if current_resource_heading:
+                required_section_links.append((current_resource_heading, url))
+            for folder_id in current_folder_path:
+                title = self._folder_metadata[folder_id].get("Title") or "Folder"
+                required_section_links.append((title, url))
 
         def description_for(topic: dict) -> str:
             metadata = self._topic_metadata.get(str(topic.get("topic_id") or ""), {})
@@ -2115,16 +2206,16 @@ class UnitCollector:
             self.log("  + Unit description (Overview)", "dim")
 
         for i, result in enumerate(results):
+            begin_folder(topics[i])
             if isinstance(result, Exception):
                 self.log(f"✗ Topic {i + 1} scrape failed: {result}", "error")
                 topic = topics[i]
                 safe_url = html.escape(topic["url"], quote=True)
-                sections.append(
+                append_section(
                     f'<p><a href="{safe_url}">{html.escape(topic["label"])}</a></p>\n'
                 )
-                sections.append(description_for(topic))
-                if current_resource_heading:
-                    required_section_links.append((current_resource_heading, topic["url"]))
+                append_section(description_for(topic))
+                require_grouped_link(topic["url"])
                 link_count += 1
                 unresolved_count += 1
                 continue
@@ -2151,50 +2242,47 @@ class UnitCollector:
                     or parsed.get_text(" ", strip=True)
                     or parsed.find(["a", "img", "iframe", "video", "audio", "object", "embed", "script"])
                 )
-                sections.append(f"{section}\n" + ("<hr/>\n" if has_authored_content else ""))
+                append_section(f"{section}\n" + ("<hr/>\n" if has_authored_content else ""))
                 html_count += 1
             elif result["link_url"]:
                 corrected = self._name_matcher(topic["label"])
                 link_label = html.escape(corrected or topic["label"])
                 video = parse_youtube_url(result["link_url"])
-                if result.get("slide_topic"):
+                if result.get("slide_topic") or result.get("folder_document"):
                     safe_url = html.escape(result["link_url"], quote=True)
-                    sections.append(f'<p><a href="{safe_url}">{link_label}</a></p>\n')
+                    append_section(f'<p><a href="{safe_url}">{link_label}</a></p>\n')
                 elif video:
                     url = html.escape(result["link_url"], quote=True)
-                    sections.append(
+                    append_section(
                         f'<h2>{link_label}</h2>\n'
                         f'<p><a href="{url}">{url}</a></p>\n<hr/>\n'
                     )
                 else:
                     safe_url = html.escape(result["link_url"], quote=True)
-                    sections.append(
+                    append_section(
                         f'<p><strong>{link_label}:</strong> '
                         f'<a href="{safe_url}">{safe_url}</a></p>\n'
                     )
-                sections.append(description_block)
-                if current_resource_heading:
-                    required_section_links.append((current_resource_heading, result["link_url"]))
+                append_section(description_block)
+                require_grouped_link(result["link_url"])
                 link_count += 1
             elif result["file"]:
                 # Keep both fallback link targets for when Insert Stuff can't
                 # embed the file: direct_url (permanent Manage Files address,
                 # set during download) and topic_url (dies if topic deleted).
                 fi = result["file"]
-                if re.search(r"\bslides?\b", current_resource_heading, re.I) or not fi.get("path"):
-                    # A slide already hosted in this Brightspace course should
-                    # stay under Lecture Slides. Re-uploading moves it to the
-                    # generic Files area and risks filename collisions.
+                if current_folder_path or re.search(r"\bslides?\b", current_resource_heading, re.I) or not fi.get("path"):
+                    # Keep folder files and slides in their source section.
+                    # Re-uploading moves them to the generic Files area.
                     slide_url = fi.get("direct_url") or topic["url"]
-                    sections.append(
+                    append_section(
                         f'<p><a href="{html.escape(slide_url, quote=True)}">'
                         f'{html.escape(topic["label"])}</a></p>\n'
                     )
-                    sections.append(description_block)
-                    if current_resource_heading:
-                        required_section_links.append((current_resource_heading, slide_url))
+                    append_section(description_block)
+                    require_grouped_link(slide_url)
                     link_count += 1
-                    self.log(f"  ↳ Kept slide link in place: {topic['label']}", "info")
+                    self.log(f"  ↳ Kept resource link in place: {topic['label']}", "info")
                     continue
                 if file_name_counts[fi["filename"].casefold()] > 1:
                     self.log(
@@ -2203,10 +2291,9 @@ class UnitCollector:
                         "warning",
                     )
                     safe_url = html.escape(topic["url"], quote=True)
-                    sections.append(f'<p><a href="{safe_url}">{html.escape(topic["label"])}</a></p>\n')
-                    sections.append(description_block)
-                    if current_resource_heading:
-                        required_section_links.append((current_resource_heading, topic["url"]))
+                    append_section(f'<p><a href="{safe_url}">{html.escape(topic["label"])}</a></p>\n')
+                    append_section(description_block)
+                    require_grouped_link(topic["url"])
                     link_count += 1
                     unresolved_count += 1
                     continue
@@ -2224,12 +2311,11 @@ class UnitCollector:
                     "warning",
                 )
                 safe_url = html.escape(topic["url"], quote=True)
-                sections.append(
+                append_section(
                     f'<p><a href="{safe_url}">{safe}</a></p>\n'
                 )
-                sections.append(description_block)
-                if current_resource_heading:
-                    required_section_links.append((current_resource_heading, topic["url"]))
+                append_section(description_block)
+                require_grouped_link(topic["url"])
                 link_count += 1
                 unresolved_count += 1
 
@@ -2238,6 +2324,7 @@ class UnitCollector:
         # the blank creation stub. Text and links do not need the visual editor,
         # so write them directly and prove they survived before doing anything
         # else. The editor is opened only when files need Insert Stuff.
+        sections.extend("</section>\n" for _ in current_folder_path)
         assembled_html = "".join(sections)
         if file_items:
             assembled_html += "<h2>Files</h2>\n<p></p>\n"
@@ -2673,7 +2760,8 @@ class UnitCollector:
             if hidden_ids is None:
                 self.log(
                     "✗ Stopping this unit: Brightspace could not provide complete "
-                    "topic visibility and descriptions. Re-run once it responds; "
+                    "topic visibility, folder membership and descriptions. "
+                    "Check the specific errors above; "
                     "the combined page was not assembled from incomplete metadata.",
                     "error",
                 )

@@ -7,6 +7,22 @@ from urllib.parse import unquote, urljoin, urlparse
 
 _WEB_ASSET_EXTENSIONS = {".css", ".js", ".map"}
 _SLIDE_EXTENSIONS = {".pdf", ".ppt", ".pptx", ".odp", ".key", ".zip"}
+_DOCUMENT_EXTENSIONS = {
+    ".pdf", ".doc", ".docx", ".odt", ".rtf", ".txt", ".ppt", ".pptx",
+    ".odp", ".xls", ".xlsx", ".ods", ".csv",
+}
+
+
+def direct_course_document_url(topic_url: str, source_url: str) -> str:
+    """Keep authored folder documents at their existing course-file address."""
+    resolved = urljoin(topic_url, source_url or "")
+    parsed = urlparse(resolved)
+    if (parsed.scheme not in {"http", "https"}
+            or parsed.netloc.casefold() != urlparse(topic_url).netloc.casefold()):
+        return ""
+    if not parsed.path.startswith("/content/enforced/"):
+        return ""
+    return resolved if Path(parsed.path).suffix.lower() in _DOCUMENT_EXTENSIONS else ""
 
 
 def validate_topic_download(label: str, filename: str, source_url: str = "") -> tuple[bool, str]:

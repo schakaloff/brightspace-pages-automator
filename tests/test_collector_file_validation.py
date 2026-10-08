@@ -4,7 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from collector_file_validation import (
-    direct_slide_url, external_topic_url, matching_direct_file_url, validate_topic_download,
+    direct_course_document_url, direct_slide_url, external_topic_url, matching_direct_file_url, validate_topic_download,
 )
 
 
@@ -71,3 +71,12 @@ def test_zoom_topic_metadata_is_kept_as_a_link_not_downloaded():
     zoom = "https://ca01web.zoom.us/rec/share/meeting-token"
     assert external_topic_url(topic, zoom) == zoom
     assert not external_topic_url(topic, "https://learn.test/content/enforced/42/layout.css")
+
+
+def test_folder_documents_use_only_existing_same_host_course_files():
+    topic = "https://learn.test/d2l/le/lessons/42/topics/7"
+    assert direct_course_document_url(topic, "/content/enforced/42/form.docx") == "https://learn.test/content/enforced/42/form.docx"
+    assert not direct_course_document_url(topic, "https://other.test/content/enforced/42/form.docx")
+    assert not direct_course_document_url(topic, "/content/enforced/42/lesson.html")
+    assert not direct_course_document_url(topic, "/content/enforced/42/layout.css")
+    assert not direct_course_document_url(topic, "/other/form.docx")

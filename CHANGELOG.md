@@ -5,6 +5,14 @@ Add a new `## X.Y.Z` section here whenever you bump `APP_VERSION` in
 The matching section is pulled into the GitHub Release notes automatically,
 and shown to users in the in-app "Update available" dialog.
 
+## 0.8.11
+- Collect topics inside nested folders without falsely reporting them as missing.
+  Folder descriptions and document links stay grouped in Brightspace order.
+  Folder documents already hosted in course files are linked in place.
+- Hidden folders keep all their topics on the hidden instructor page, including
+  topics inside visible subfolders. Unreadable visibility, descriptions or
+  changed folder membership stop collection with a specific diagnostic.
+
 ## 0.8.10
 - Restyle checks unusually short AI results for preserved text and resource
   destinations instead of rejecting them by HTML size alone. Missing content
