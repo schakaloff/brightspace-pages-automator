@@ -152,15 +152,26 @@ async def launch_browser(log_fn=None):
         log("Brightspace: launching without saved session")
 
     p = await async_playwright().start()
-    browser = await p.chromium.launch(
-        headless=False,
-        slow_mo=80,
-        args=["--start-maximized"],
-    )
-    context = await browser.new_context(
-        storage_state=SESSION_FILE if session_exists else None,
-        no_viewport=True,
-        permissions=["clipboard-read", "clipboard-write"],
-    )
-    page = await context.new_page()
-    return p, browser, context, page
+    browser = None
+    try:
+        browser = await p.chromium.launch(
+            headless=False,
+            slow_mo=80,
+            args=["--start-maximized"],
+        )
+        context = await browser.new_context(
+            storage_state=SESSION_FILE if session_exists else None,
+            no_viewport=True,
+            permissions=["clipboard-read", "clipboard-write"],
+        )
+        page = await context.new_page()
+        return p, browser, context, page
+    except BaseException:
+        # Cancellation can arrive before the caller receives the browser.
+        # Release resources here as well as in the caller's normal cleanup.
+        try:
+            if browser is not None and browser.is_connected():
+                await browser.close()
+        finally:
+            await p.stop()
+        raise

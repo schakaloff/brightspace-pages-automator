@@ -66,6 +66,7 @@ async def run_h5p_only(
     sso_password: str = "",
     moodle_username: str = "",
     moodle_password: str = "",
+    stop_flag: Optional[list] = None,
 ) -> None:
     from browser import launch_browser, wait_for_login
 
@@ -89,6 +90,13 @@ async def run_h5p_only(
         moodle_password=moodle_password,
     )
     checker.h5p_skip_flag = h5p_skip_flag or [False]
+    if stop_flag is not None:
+        checker.stop_flag = stop_flag
+
+    def check_stopped():
+        if checker.stop_flag[0]:
+            raise asyncio.CancelledError()
+
     checker.do_h5p_embed = True
     checker._summary = {
         "h5p_inserted": [], "h5p_failed": [], "h5p_graded": [],
@@ -102,12 +110,12 @@ async def run_h5p_only(
     course_id = _extract_course_id(bs_url)
     if not course_id:
         log(f"✗ Could not extract course ID from: {bs_url}", "error")
-        if on_complete:
-            on_complete()
         return
 
+    check_stopped()
     p, browser, context, page = await launch_browser()
     try:
+        check_stopped()
         await wait_for_login(
             page, context,
             bs_username or None, bs_password or None,
@@ -115,32 +123,31 @@ async def run_h5p_only(
         )
 
         log("─" * 52, "dim")
+        check_stopped()
         bs_flat = await checker._fetch_bs_toc(page, course_id)
         if not bs_flat:
-            if on_complete:
-                on_complete()
             return
 
         log("─" * 52, "dim")
+        check_stopped()
         moodle_items = await checker._scrape_moodle(context)
         if not moodle_items:
-            if on_complete:
-                on_complete()
             return
 
+        check_stopped()
         parsed = urlparse(bs_url)
         bs_base = f"{parsed.scheme}://{parsed.netloc}"
         bs_flat = await checker._ensure_h5p_destination_units(
             context, page, bs_base, course_id, moodle_items, bs_flat
         )
         if bs_flat is None:
-            if on_complete:
-                on_complete()
             return
+        check_stopped()
         await checker._h5p.embed_in_brightspace(
             context, page, moodle_items, bs_flat, bs_base, course_id
         )
 
+        check_stopped()
         log("─" * 52, "dim")
         inserted = checker._summary.get("h5p_inserted", [])
         failed = checker._summary.get("h5p_failed", [])
@@ -164,10 +171,10 @@ async def run_h5p_only(
 
     except Exception as e:
         log(f"✗ Unexpected error: {e}", "error")
-        if on_complete:
-            on_complete()
         raise
     finally:
-        if browser.is_connected():
-            await browser.close()
-        await p.stop()
+        try:
+            if browser.is_connected():
+                await browser.close()
+        finally:
+            await p.stop()
