@@ -496,6 +496,7 @@ class PageAutomator:
             self._token_usage["input_tokens"] += usage["input_tokens"]
             self._token_usage["output_tokens"] += usage["output_tokens"]
             self._token_usage["cost_cad"] += usage["cost_cad"]
+            self._run_summary.record_usage(usage)
 
         await self._check_accessibility(page, styled_html, label)
 
@@ -639,6 +640,7 @@ class PageAutomator:
                         self._token_usage["input_tokens"] += transfer.usage["input_tokens"]
                         self._token_usage["output_tokens"] += transfer.usage["output_tokens"]
                         self._token_usage["cost_cad"] += transfer.usage["cost_cad"]
+                        self._run_summary.record_usage(transfer.usage)
 
             if is_section:
                 if completed_overview_url:
