@@ -474,6 +474,7 @@ async def apply_style(
                     return None, None
                 log(f"✓ Styled content verified ({len(cleaned_html):,} → {len(result):,} chars).", "info")
 
+            usage["content_retry"] = content_retry_used
             usage["cost_cad"] = _cost_cad(model, usage["input_tokens"], usage["output_tokens"])
 
             log(f"✅ Done ({len(result):,} chars)", "success")

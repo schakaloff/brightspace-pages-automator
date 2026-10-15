@@ -30,6 +30,7 @@ class RestyleRunSummary:
     accessibility_affected_elements: int = 0
     accessibility_needs_review: int = 0
     accessibility_checks_unavailable: int = 0
+    content_repairs: int = 0
 
     def record_page(self, success: bool) -> None:
         self.pages_attempted += 1
@@ -37,6 +38,10 @@ class RestyleRunSummary:
             self.pages_changed += 1
         else:
             self.pages_failed += 1
+
+    def record_usage(self, usage: dict | None) -> None:
+        if usage and usage.get("content_retry"):
+            self.content_repairs += 1
 
     def record_accessibility(self, report) -> None:
         self.accessibility_pages_checked += 1
@@ -75,6 +80,11 @@ class RestyleRunSummary:
         if self.accessibility_checks_unavailable:
             logger(
                 f"Accessibility skipped: {self.accessibility_checks_unavailable} page(s)",
+                "warning",
+            )
+        if self.content_repairs:
+            logger(
+                f"Content repair retries: {self.content_repairs} of {self.pages_attempted} page(s)",
                 "warning",
             )
         if token_usage and (token_usage.get("input_tokens") or token_usage.get("output_tokens")):
