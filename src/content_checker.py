@@ -477,6 +477,7 @@ class ContentChecker:
         # attach an already-existing activity to Content.
         self.full_run               = full_run
         self.scan_only              = scan_only
+        self.run_finished           = False
         self.on_report              = on_report
         self.operations             = operations
         self.order_only             = False
@@ -847,27 +848,28 @@ class ContentChecker:
         return catalogues
 
     async def _activity_is_in_module(
-        self, page: Page, course_id: str, module_id, activity_type: int, activity_id
+        self, page: Page, course_id: str, module_id, activity_type: int, activity_id, title: str = ""
     ) -> bool:
-        """Check by Brightspace activity ID immediately before an attachment."""
+        """Check by Brightspace activity ID (or, when a tool has no ID API, exact title)."""
         try:
-            present = await page.evaluate("""async ([courseId, moduleId, activityType, activityId]) => {
+            present = await page.evaluate("""async ([courseId, moduleId, activityType, activityId, title]) => {
                 const response = await fetch(
-                    `/d2l/api/le/1.0/${courseId}/content/modules/${moduleId}/structure/`,
+                    `/d2l/api/le/1.82/${courseId}/content/modules/${moduleId}/structure/`,
                     { credentials: 'include', headers: { 'Accept': 'application/json' } },
                 );
                 if (!response.ok) return false;
                 const wantedId = String(activityId);
                 return (await response.json()).some(topic =>
                     Number(topic.ActivityType ?? topic.activityType) === Number(activityType)
-                    && String(topic.ToolItemId ?? topic.toolItemId) === wantedId
+                    && (wantedId ? String(topic.ToolItemId ?? topic.toolItemId) === wantedId
+                                 : String(topic.Title ?? topic.title).trim() === title.trim())
                 );
-            }""", [str(course_id), str(module_id), activity_type, str(activity_id)])
+            }""", [str(course_id), str(module_id), activity_type, str(activity_id or ""), title or ""])
             return bool(present)
         except Exception:
             return False
 
-    async def _click_visible_exact_text(self, tab, text: str) -> bool:
+    async def _click_visible_exact_text(self, tab, text: str, frame_url_part: str = "") -> bool:
         """Click exactly one visible control with ``text`` across Lessons frames.
 
         This intentionally refuses an ambiguous UI result rather than choosing
@@ -875,6 +877,7 @@ class ContentChecker:
         """
         wanted = text.strip()
         for frame in tab.frames:
+            if frame_url_part and frame_url_part not in frame.url: continue
             try:
                 controls = frame.get_by_text(wanted, exact=True)
                 count = await controls.count()
@@ -882,6 +885,11 @@ class ContentChecker:
                 for index in range(count):
                     candidate = controls.nth(index)
                     if await candidate.is_visible():
+                        # Brightspace duplicates picker titles in clipped
+                        # accessibility links. Playwright still considers
+                        # their one-pixel boxes visible; they are not rows.
+                        offscreen = await candidate.evaluate("el => !!el.closest('.d2l-offscreen, [aria-hidden=\"true\"]')")
+                        if offscreen: continue
                         visible.append(candidate)
                 # Nested elements can expose the same visible text. Prefer the
                 # smallest set of actual clickable controls, but never pick from
@@ -911,7 +919,10 @@ class ContentChecker:
         module_id = item["target_module_id"]
         activity_id = item["activity_id"]
         kind = item["activity_kind"]
-        activity_type = ACTIVITY_TYPES[kind]["content_activity_type"]
+        # Callers may name other tools (discussions, surveys) without widening
+        # the Moodle activity types the Checker plans for.
+        activity_type = item.get("content_activity_type") or ACTIVITY_TYPES[kind]["content_activity_type"]
+        title = "" if activity_id else item["name"]
         tab = await context.new_page()
         try:
             await tab.goto(
@@ -920,32 +931,85 @@ class ContentChecker:
             )
             await tab.wait_for_timeout(1500)
             if await self._activity_is_in_module(page=tab, course_id=course_id, module_id=module_id,
-                                                 activity_type=activity_type, activity_id=activity_id):
+                                                 activity_type=activity_type, activity_id=activity_id, title=title):
                 return True, "already linked"
             add_button = None
-            for frame in tab.frames:
-                locator = frame.locator('d2l-button[aria-label="Add Existing"], d2l-button.add-existing-btn')
-                try:
-                    if await locator.count() and await locator.first.is_visible():
-                        add_button = locator.first
-                        break
-                except Exception:
-                    pass
+            # Lessons renders inside a frame after a cold navigation. Wait for
+            # its actual control rather than assuming it loads in 1.5 seconds.
+            for _ in range(15):
+                for frame in tab.frames:
+                    locator = frame.locator('d2l-button[aria-label="Add Existing"], d2l-button.add-existing-btn')
+                    try:
+                        if await locator.count() and await locator.first.is_visible():
+                            add_button = locator.first
+                            break
+                    except Exception:
+                        pass
+                if add_button: break
+                await tab.wait_for_timeout(1000)
             if not add_button:
                 return False, "Add Existing control was not available"
             await add_button.click(timeout=5000)
             await tab.wait_for_timeout(800)
 
-            tool_name = "Assignments" if kind == "ASSIGN" else "Quizzes"
-            if not await self._click_visible_exact_text(tab, tool_name):
+            if kind == "SURVEY":
+                # Lessons puts Surveys under More. Restrict this click to the
+                # Lessons frame so the course navbar's More menu cannot win.
+                more_clicked = False
+                for attempt in range(10):
+                    if await self._click_visible_exact_text(tab, "More", "/smart-curriculum/"):
+                        more_clicked = True; break
+                    if attempt in (2, 5, 8):
+                        try: await add_button.click(timeout=1500)
+                        except Exception: pass
+                    await tab.wait_for_timeout(1000)
+                if not more_clicked: return False, "Surveys option was not available"
+                await tab.wait_for_timeout(800)
+
+            tool_name = item.get("tool_name") or ("Assignments" if kind == "ASSIGN" else "Quizzes")
+            singular = item.get("tool_singular") or ("Assignment" if kind == "ASSIGN" else "Quiz")
+            tool_clicked = False
+            tool_frame = "/quicklinks/manage/" if kind == "SURVEY" else "/smart-curriculum/"
+            for _ in range(10):
+                if await self._click_visible_exact_text(tab, singular, tool_frame) or await self._click_visible_exact_text(tab, tool_name, tool_frame):
+                    tool_clicked = True
+                    break
+                if _ in (2, 5, 8):
+                    # On cold loads the toolbar can appear before Lessons
+                    # binds its click handler. Reopen only the non-mutating
+                    # chooser; ordinary clicks refuse a blocking dialog.
+                    try:
+                        await add_button.click(timeout=1500)
+                    except Exception:
+                        pass
+                await tab.wait_for_timeout(1000)
+            if not tool_clicked:
                 return False, f"{tool_name} option was not available"
-            await tab.wait_for_timeout(1000)
-            if not await self._click_visible_exact_text(tab, item["name"]):
-                return False, "exact activity selection was unavailable or ambiguous"
             await tab.wait_for_timeout(1500)
-            if not await self._activity_is_in_module(tab, course_id, module_id, activity_type, activity_id):
-                return False, "Content link could not be verified after Add Existing"
-            return True, None
+            if kind == "DISCUSS" and item.get("forum_name"):
+                # The discussion picker first lists forums, then their topics.
+                opened = False
+                for _ in range(10):
+                    if await self._click_visible_exact_text(tab, item["forum_name"], "/quicklinks/manage/"):
+                        opened = True; break
+                    await tab.wait_for_timeout(500)
+                if not opened: return False, "exact activity selection was unavailable or ambiguous"
+                # QuickLink renders the topic text before binding its row
+                # handler during the forum transition on a cold load.
+                await tab.wait_for_timeout(1500)
+            activity_clicked = False
+            for _ in range(10):
+                if await self._click_visible_exact_text(tab, item["name"], "/quicklinks/manage/"):
+                    activity_clicked = True
+                    break
+                await tab.wait_for_timeout(1000)
+            if not activity_clicked:
+                return False, "exact activity selection was unavailable or ambiguous"
+            for _ in range(15):
+                await tab.wait_for_timeout(500)
+                if await self._activity_is_in_module(tab, course_id, module_id, activity_type, activity_id, title):
+                    return True, None
+            return False, "Content link could not be verified after Add Existing"
         except Exception as exc:
             return False, str(exc).splitlines()[0]
         finally:
@@ -2954,7 +3018,7 @@ class ContentChecker:
             return { sections: sections.length, activities: activities.length };
         }""")
 
-    async def _scrape_moodle(self, context: BrowserContext) -> Optional[list]:
+    async def _scrape_moodle(self, context: BrowserContext, *, inventory_only=False) -> Optional[list]:
         self.log("Opening Moodle in new tab…", "info")
         tab = await context.new_page()
         try:
@@ -3221,9 +3285,10 @@ class ContentChecker:
                 await tab.close()
                 return None
 
-            if self.books_only:
+            if self.books_only or inventory_only:
                 await tab.close()
-                self.log("📘 Book-only run: Moodle page, folder and H5P scans skipped.", "dim")
+                self.log("Moodle inventory complete; page, folder and H5P downloads skipped." if inventory_only
+                         else "📘 Book-only run: Moodle page, folder and H5P scans skipped.", "dim")
                 return items
 
             # Deep scan: (1) scan label bodies on the course page itself,
@@ -4477,6 +4542,7 @@ class ContentChecker:
 
     async def run(self) -> None:
         from browser import launch_browser, wait_for_login
+        self.run_finished = False
 
         bs_only     = bool(self.bs_url)     and not self.moodle_url
         moodle_only = bool(self.moodle_url) and not self.bs_url
@@ -4567,6 +4633,7 @@ class ContentChecker:
                     page, course_id, _compare_items(moodle_items, bs_flat)
                 )
                 self.log("✓ Ordering pass finished.", "success")
+                self.run_finished = True
                 if self.on_complete:
                     self.on_complete()
                 if self.keep_browser_open:
@@ -4609,6 +4676,7 @@ class ContentChecker:
                     except Exception as exc:
                         self.log(f"  ✗ Book {book.get('name')}: {str(exc).splitlines()[0]}", "error")
                 self.log("✓ Book split finished.", "success")
+                self.run_finished = True
                 if self.on_complete:
                     self.on_complete()
                 if self.keep_browser_open:
@@ -4736,12 +4804,15 @@ class ContentChecker:
 
             if self.link_repair_only and self.full_run:
                 self.log("Repair-only run: only broken file links will be fixed", "step")
+            file_link_check = "complete"
             try:
                 broken_links = await self._scan_broken_file_links(page, course_id)
             except Exception as exc:
                 broken_links = []
+                file_link_check = "failed"
                 self.log(f"  Could not check Brightspace file links: {str(exc).splitlines()[0]}", "warning")
             self._summary["broken_links_found"] = len(broken_links)
+            self._summary["file_link_check"] = file_link_check
             if self.on_report:
                 self.on_report({
                     "missing": sum(r.get("status") == "missing" for r in results),
@@ -4752,6 +4823,7 @@ class ContentChecker:
                                ("hvp" in r.get("hint", "") or "h5p" in r.get("hint", ""))
                                for r in results),
                     "broken_links": len(broken_links),
+                    "file_link_check": file_link_check,
                     "activities": len(activity_plan),
                     "moodle_links": len(moodle_links),
                     "findings": [
@@ -4763,9 +4835,13 @@ class ContentChecker:
                     ],
                     "broken_pages": sorted({str(link.get("topic_title") or "")
                                              for link in broken_links}),
+                    "book_findings": [{"name": str(r.get("name") or ""),
+                                       "section": str(r.get("section") or "")}
+                                      for r in results if r.get("hint") == "modtype_book"],
                 })
             if self.scan_only:
                 self.log("✓ Scan complete. Review findings before choosing any changes.", "success")
+                self.run_finished = True
                 if self.on_complete:
                     self.on_complete()
                 if browser.is_connected():
@@ -4916,8 +4992,12 @@ class ContentChecker:
             # await self._prompt_clear_downloads(course_id)
 
             self.log("", "dim")
-            self.log("✓ Check complete — browsers kept open for your comparison", "success")
-            self.log("  Close the browser windows when done.", "dim")
+            if self.keep_browser_open:
+                self.log("✓ Check complete — browsers kept open for your comparison", "success")
+                self.log("  Close the browser windows when done.", "dim")
+            else:
+                self.log("✓ Selected operations finished. Review the outcomes and scan again to verify.", "success")
+            self.run_finished = True
 
             if self.on_complete:
                 self.on_complete()

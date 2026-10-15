@@ -1,0 +1,194 @@
+{
+  "schema": 2,
+  "name": "Workshop transfer",
+  "unit_label": "Workshop",
+  "sections": [
+    {
+      "title": "Online Classroom",
+      "kind": "placeholder",
+      "key": "classroom",
+      "message": "The instructor will add the online classroom link before publication."
+    },
+    {
+      "title": "Module Introduction",
+      "kind": "introduction"
+    },
+    {
+      "title": "Before Class",
+      "kind": "folder",
+      "keywords": [
+        "pre reading",
+        "preparation",
+        "read before class",
+        "watch before class"
+      ],
+      "aliases": [
+        "Pre-Class",
+        "Preparation",
+        "Before the Workshop"
+      ]
+    },
+    {
+      "title": "Class Materials",
+      "kind": "folder",
+      "session_overview": true,
+      "default": true,
+      "keywords": [
+        "slides",
+        "handout",
+        "presentation",
+        "instructor resources",
+        "session materials"
+      ],
+      "aliases": [
+        "Session Materials",
+        "Workshop Materials"
+      ]
+    },
+    {
+      "title": "After Class",
+      "kind": "folder",
+      "assignments": true,
+      "keywords": [
+        "assignment",
+        "reflection",
+        "post workshop",
+        "after class"
+      ],
+      "aliases": [
+        "Post-Class",
+        "After the Workshop"
+      ]
+    }
+  ],
+  "templates": {
+    "introduction_title": "Module Introduction template",
+    "session_title": "Session Overview template"
+  },
+  "remove_introduction_sections": [
+    "In this module you will explore"
+  ],
+  "remove_session_sections": [
+    "Completion Check",
+    "Engagement Activities"
+  ],
+  "review_assignment_keywords": [
+    "optional",
+    "alternate",
+    "agreement",
+    "photo id",
+    "preferences"
+  ],
+  "gradebook": {
+    "enabled": true,
+    "categories": [
+      {
+        "name": "Assignments",
+        "weight": 70,
+        "role": "assignments"
+      },
+      {
+        "name": "Attendance and Participation",
+        "label": "Attendance/Participation",
+        "weight": 30,
+        "role": "attendance"
+      }
+    ],
+    "assignment_distribution": 1,
+    "attendance_items": []
+  },
+  "workshops": [
+    {
+      "title": "Orientation and Successful Online Learning",
+      "hours": 6,
+      "source_titles": [
+        "Orientation",
+        "Successful Online Learning"
+      ],
+      "introduction": "",
+      "outcomes": [],
+      "session": ""
+    },
+    {
+      "title": "Reconciliation through Indigenous Education",
+      "hours": 18,
+      "source_titles": [
+        "Reconciliation Through Indigenous Education"
+      ],
+      "introduction": "",
+      "outcomes": [],
+      "session": ""
+    },
+    {
+      "title": "Observation Day",
+      "hours": 6,
+      "source_titles": [
+        "Observation Day"
+      ],
+      "introduction": "",
+      "outcomes": [],
+      "session": ""
+    },
+    {
+      "title": "Physical Health and Safety",
+      "hours": 6,
+      "source_titles": [
+        "Physical Health and Safety"
+      ],
+      "introduction": "",
+      "outcomes": [],
+      "session": ""
+    },
+    {
+      "title": "Sexuality and Exceptionalities",
+      "hours": 6,
+      "source_titles": [
+        "Sexuality and Exceptionalities"
+      ],
+      "introduction": "",
+      "outcomes": [],
+      "session": ""
+    },
+    {
+      "title": "Anxiety in the Workplace",
+      "hours": 6,
+      "source_titles": [
+        "Anxiety in the Workplace"
+      ],
+      "introduction": "",
+      "outcomes": [],
+      "session": ""
+    },
+    {
+      "title": "Mental Health and Self-Care",
+      "hours": 6,
+      "source_titles": [
+        "Mental Health and Self Care"
+      ],
+      "introduction": "",
+      "outcomes": [],
+      "session": ""
+    },
+    {
+      "title": "Supports in Schools",
+      "hours": 6,
+      "source_titles": [
+        "Supports in Schools"
+      ],
+      "introduction": "",
+      "outcomes": [],
+      "session": ""
+    },
+    {
+      "title": "Employment Readiness",
+      "hours": 6,
+      "source_titles": [
+        "Resumes and Cover Letters",
+        "Interview Skills and Job Applications"
+      ],
+      "introduction": "",
+      "outcomes": [],
+      "session": ""
+    }
+  ]
+}

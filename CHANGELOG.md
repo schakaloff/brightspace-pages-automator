@@ -6,6 +6,20 @@ The matching section is pulled into the GitHub Release notes automatically,
 and shown to users in the in-app "Update available" dialog.
 
 ## 0.8.11
+- Added Transfer Studio for reviewing, arranging, styling and copying course
+  content, with saved drafts, Stop/Resume and verified transfer reports.
+- Added reviewed content duplication, course activity link reuse and structured
+  transfer layouts, with checks before creating destination content.
+- Refreshed Checker and Settings layouts and added a link-review preview.
+- Added a separate Media tool for downloading original Moodle SCORM packages,
+  reviewing destination units and transferring packages with saved progress.
+- H5P runs now keep course-specific downloads and insertion checkpoints. Fixed
+  cloud navigation, insertion dialog controls and save-completion verification.
+- Kaltura scans load the full Moodle course, preserve subsection destinations
+  and inspect instructional media in Kaltura assignments. Embedded YouTube
+  videos are identified separately from Kaltura library results.
+- Collector styling now carries course context and supports saved styling
+  preferences. Added desktop packaging fixes for Transfer Studio dependencies.
 - Collect topics inside nested folders without falsely reporting them as missing.
   Folder descriptions and document links stay grouped in Brightspace order.
   Folder documents already hosted in course files are linked in place.

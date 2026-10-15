@@ -1,6 +1,7 @@
 # PyInstaller spec — Windows onedir build.
 # Build with: pyinstaller installer/brightspace_automator.spec --noconfirm
 from pathlib import Path
+import os
 
 from PyInstaller.utils.hooks import collect_all
 
@@ -71,6 +72,13 @@ a = Analysis(
 
 a.datas += Tree(str(ROOT / "assets"), prefix="assets")
 
+# Windows Qt uses the OS's unversioned ICU API. An unrelated ICU (for example
+# Poppler on PATH) exports versioned symbols and breaks QtWidgets on startup.
+# Leave these Windows system libraries to the OS instead of collecting a DLL
+# with the same filename from another tool's directory.
+a.binaries = [entry for entry in a.binaries
+              if Path(entry[0]).name.casefold() not in {"icuuc.dll", "icuin.dll", "icudt.dll"}]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -82,7 +90,7 @@ exe = EXE(
     debug=False,
     strip=False,
     upx=False,
-    console=False,
+    console=os.environ.get("BPA_STUDIO_BUILD_CONSOLE") == "1",  # Diagnostics only; releases have no console.
     icon=str(ROOT / "assets" / "icon.ico"),
 )
 

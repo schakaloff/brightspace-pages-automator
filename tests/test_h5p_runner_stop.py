@@ -9,6 +9,12 @@ import pytest
 sys.path.insert(0, "src")
 
 
+@pytest.fixture(autouse=True)
+def isolated_saved_runs(tmp_path, monkeypatch):
+    import h5p_progress
+    monkeypatch.setattr(h5p_progress, 'RUNS_DIR', tmp_path / 'h5p-runs')
+
+
 @pytest.mark.parametrize("phase", ["login", "toc", "moodle", "units", "embed"])
 def test_cancel_h5p_pipeline_closes_browser(monkeypatch, phase):
     import browser as browser_module
@@ -118,3 +124,30 @@ def test_driver_stops_even_if_browser_cleanup_fails(monkeypatch):
             "https://example.org/course/view.php?id=123", MagicMock(),
         ))
     driver.stop.assert_awaited_once()
+
+
+def test_h5p_early_failure_is_not_reported_as_success(monkeypatch):
+    import browser as browser_module
+    import h5p_runner
+
+    browser = MagicMock()
+    browser.is_connected.return_value = False
+    driver = MagicMock(stop=AsyncMock())
+    checker = MagicMock()
+    checker.stop_flag = [False]
+    checker._fetch_bs_toc = AsyncMock(return_value=[{'id': 2}])
+    checker._scrape_moodle = AsyncMock(return_value=[{'name': 'Practice'}])
+    checker._ensure_h5p_destination_units = AsyncMock(return_value=[{'id': 2}])
+    async def failed_embed(*args):
+        checker._summary['h5p_failed'] = [(f'Practice {i}', 'Practice') for i in range(4)]
+    checker._h5p.embed_in_brightspace = failed_embed
+    monkeypatch.setattr(h5p_runner, 'ContentChecker', lambda **kwargs: checker)
+    monkeypatch.setattr(browser_module, 'launch_browser', AsyncMock(return_value=(driver, browser, object(), object())))
+    monkeypatch.setattr(browser_module, 'wait_for_login', AsyncMock())
+    messages = []
+    asyncio.run(h5p_runner.run_h5p_only(
+        'https://example.org/d2l/le/lessons/1/units/2', 'https://example.org/course/view.php?id=3',
+        lambda text, level: messages.append((text, level)),
+    ))
+    assert any('H5P incomplete' in text and '4 failed' in text and level == 'warning' for text, level in messages)
+    assert not any('H5P done' in text for text, _ in messages)

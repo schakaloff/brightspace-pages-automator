@@ -4,12 +4,13 @@ import threading
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit, QCheckBox,
+    QPushButton, QLineEdit, QCheckBox, QComboBox,
 )
 from PySide6.QtCore import Signal, QTimer
 
 from gui_log import LogWidget
 from panels._shared import _form_label, _section_header, friendly_error
+from h5p_progress import H5PRun, saved_runs
 
 
 class H5PPanel(QWidget):
@@ -27,6 +28,7 @@ class H5PPanel(QWidget):
         self._worker_loop = None
         self._worker_task = None
         self._active_dialogs = []
+        self._progress_directory = None
         self._build()
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_log)
@@ -46,6 +48,23 @@ class H5PPanel(QWidget):
         sub.setWordWrap(True)
         layout.addWidget(sub)
         layout.addSpacing(20)
+
+        layout.addWidget(_form_label('RESUME SAVED COURSE'))
+        saved_row = QHBoxLayout()
+        saved_row.setSpacing(8)
+        self._saved_courses = QComboBox()
+        self._saved_courses.setMinimumWidth(0)
+        self._saved_courses.setFixedHeight(40)
+        self._saved_courses.setMinimumContentsLength(24)
+        self._saved_courses.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._resume_btn = QPushButton('Resume saved course…')
+        self._resume_btn.setFixedHeight(40)
+        self._resume_btn.setProperty('variant', 'secondary')
+        self._resume_btn.clicked.connect(self._resume_run)
+        saved_row.addWidget(self._saved_courses, 1)
+        saved_row.addWidget(self._resume_btn)
+        layout.addLayout(saved_row)
+        layout.addSpacing(12)
 
         layout.addWidget(_form_label("BRIGHTSPACE COURSE URL"))
         layout.addSpacing(4)
@@ -127,6 +146,30 @@ class H5PPanel(QWidget):
             self._bs_entry.setText(cfg["h5p_bs_url"])
         if cfg.get("h5p_moodle_url"):
             self._moodle_entry.setText(cfg["h5p_moodle_url"])
+        self._refresh_saved_runs()
+
+    def _refresh_saved_runs(self):
+        selected = self._saved_courses.currentData()
+        self._saved_courses.clear()
+        runs = saved_runs(self._progress_directory)
+        for run in runs: self._saved_courses.addItem(run.label(), run.data['id'])
+        if not runs: self._saved_courses.addItem('No saved H5P courses yet', None)
+        index = self._saved_courses.findData(selected)
+        if index >= 0: self._saved_courses.setCurrentIndex(index)
+        self._resume_btn.setEnabled(bool(runs) and not self._task_active)
+
+    def _resume_run(self):
+        if self._task_active: return
+        try:
+            run = H5PRun.load(self._saved_courses.currentData(), self._progress_directory)
+        except (OSError, ValueError) as exc:
+            self._log.append_log(str(exc), 'warning')
+            self._refresh_saved_runs()
+            return
+        self._bs_entry.setText(run.data['bs_url'])
+        self._moodle_entry.setText(run.data['moodle_url'])
+        self._gradebook_cb.setChecked(run.data['grade_all'])
+        self._start_run(run.data['id'])
 
     def save_state(self):
         if not hasattr(self._mw, "save_config"):
@@ -136,7 +179,7 @@ class H5PPanel(QWidget):
             "h5p_moodle_url": self._moodle_entry.text().strip(),
         })
 
-    def _start_run(self):
+    def _start_run(self, resume_id=None):
         if self._task_active:
             return
         if not self._mw.chromium_ready:
@@ -161,6 +204,9 @@ class H5PPanel(QWidget):
         stop_flag = [False]
         self._stop_flag = stop_flag
         self._task_active = True
+        self._resume_btn.setEnabled(False)
+        self._saved_courses.setEnabled(False)
+        for field in (self._bs_entry, self._moodle_entry, self._gradebook_cb): field.setEnabled(False)
 
         self._ready_btn.hide()
         self._h5p_ready_btn.hide()
@@ -225,6 +271,8 @@ class H5PPanel(QWidget):
                     sso_password=self._mw.sso_password,
                     moodle_username=self._mw.moodle_username,
                     moodle_password=self._mw.moodle_password,
+                    resume_id=resume_id or None,
+                    progress_directory=self._progress_directory,
                 )
 
             try:
@@ -298,6 +346,9 @@ class H5PPanel(QWidget):
                     for dialog in list(self._active_dialogs):
                         dialog.close()
                     self._task_active = False
+                    self._saved_courses.setEnabled(True)
+                    for field in (self._bs_entry, self._moodle_entry, self._gradebook_cb): field.setEnabled(True)
+                    self._refresh_saved_runs()
                     self._run_btn.setText("Run H5P")
                     self._run_btn.setEnabled(True)
                     self._stop_btn.hide()

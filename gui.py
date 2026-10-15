@@ -120,26 +120,36 @@ class MainWindow(QMainWindow):
         from panels.settings_panel import SettingsPanel
         from panels.kaltura_panel import KalturaPanel
         from panels.h5p_panel import H5PPanel
+        from panels.scorm_panel import SCORMPanel
         from panels.cleanup_panel import CleanupPanel
         from panels.page_creator_panel import PageCreatorPanel
         from panels.workflow_hub import WorkflowHub
+        from panels.link_review_panel import LinkReviewPanel
+        from panels.transfer_panel import TransferPanel
+        from panels.duplicate_panel import DuplicatePanel
 
         self._checker   = CheckerPanel(self)
         self._collector = CollectorPanel(self)
         self._restyle   = RestylePanel(self)
         self._kaltura   = KalturaPanel(self)
         self._h5p       = H5PPanel(self)
+        self._scorm     = SCORMPanel(self)
         self._cleanup   = CleanupPanel(self)
         self._page_creator = PageCreatorPanel(self)
         self._settings  = SettingsPanel(self)
+        self._link_review = LinkReviewPanel()
+        self._transfer = TransferPanel(self)
+        self._duplicate = DuplicatePanel(self)
+        self._link_review.open_checker.connect(lambda: self._on_step(1))
         # The sidebar holds three stable areas. New tools become a card in a
         # hub instead of another sidebar entry, so the sidebar never grows.
         self._media_hub = WorkflowHub(
             "Media",
             "Move interactive and video content from Moodle into Brightspace. "
-            "Both tools use the course URLs from Check & fix.",
+            "These tools use the course URLs from Check & fix.",
             [
                 ("h5p", "H5P activities", "Download H5P activities from Moodle and place them in the matching Brightspace units."),
+                ("scorm", "SCORM packages", "Download original Moodle SCORM ZIPs, review their destination units, and transfer them to Brightspace."),
                 ("kaltura", "Kaltura videos", "Find Moodle's Kaltura videos and create matching Brightspace pages."),
             ],
         )
@@ -149,8 +159,8 @@ class MainWindow(QMainWindow):
         for panel in (self._checker, self._collector, self._restyle,
                       self._kaltura, self._h5p, self._settings,
                       self._build_hub, self._media_hub, self._cleanup,
-                      self._page_creator):
-            self._stack.addWidget(panel)  # indices 0-9
+                      self._page_creator, self._link_review, self._transfer, self._duplicate, self._scorm):
+            self._stack.addWidget(panel)  # indices 0-13
 
         for n in (1, 6, 7):
             self._sidebar.set_step_state(n, StepButton.PENDING)
@@ -251,7 +261,7 @@ class MainWindow(QMainWindow):
     #   1 Check & fix   2 Collect   3 Restyle   4 Kaltura   5 H5P
     #   6 Media hub     7 Build & style hub   8 Cleanup   9 Create pages
     _PAGES = {1: (0, 1), 2: (1, 7), 3: (2, 7), 4: (3, 6), 5: (4, 6),
-              6: (7, 6), 7: (6, 7), 8: (8, 7), 9: (9, 7)}
+              6: (7, 6), 7: (6, 7), 8: (8, 7), 9: (9, 7), 10: (10, 1), 11: (11, 7), 12: (12, 7), 13: (13, 6)}
 
     def _on_step(self, n: int):
         page = self._PAGES.get(n)
@@ -259,7 +269,7 @@ class MainWindow(QMainWindow):
             idx, area = page
             self._stack.setCurrentIndex(idx)
             self._sidebar.set_active(area)
-            if n in (4, 5):
+            if n in (4, 5, 13):
                 self._carry_course_urls(n)
             # Pull over URLs saved by the Checker tab when Collector is shown.
             if n == 2 and hasattr(self._collector, "refresh_carryover"):
@@ -268,17 +278,29 @@ class MainWindow(QMainWindow):
                 self._cleanup._url.setText(self._checker._bs_entry.text().strip())
             if n == 9 and not self._page_creator._url.text().strip():
                 self._page_creator._url.setText(self._checker._bs_entry.text().strip())
+            if n == 12 and not self._duplicate._url.text().strip():
+                self._duplicate._url.setText(self._checker._bs_entry.text().strip())
 
     def _open_tool(self, name: str):
+        if name == "structured_transfer":
+            self._transfer.open_studio()
+            return
+        if name == "structured_transfer_qt":
+            self._transfer.open_studio_in_app()
+            self._on_step(11)
+            return
         target = {"collect": 2, "restyle": 3, "kaltura": 4,
-                  "h5p": 5, "cleanup": 8, "create_pages": 9}.get(name)
+                  "h5p": 5, "scorm": 13, "cleanup": 8, "create_pages": 9,
+                  "link_review_preview": 10, "structured_transfer": 11, "duplicate_content": 12}.get(name)
         if target is not None:
             self._on_step(target)
 
     def _carry_course_urls(self, step: int):
         bs = self._checker._bs_entry.text().strip()
         moodle = self._checker._moodle_entry.text().strip()
-        panel = self._kaltura if step == 4 else self._h5p
+        panel = self._kaltura if step == 4 else self._scorm if step == 13 else self._h5p
+        if step == 13 and panel._busy:
+            return
         bs_field = getattr(panel, "_bs_url", None) if step == 4 else panel._bs_entry
         moodle_field = getattr(panel, "_moodle_url", None) if step == 4 else panel._moodle_entry
         if bs and bs_field is not None:
@@ -298,7 +320,10 @@ class MainWindow(QMainWindow):
         self._sidebar.refresh_theme()
         self._update_badge.refresh_theme()
         self._settings.mark_active_theme(name)
+        self._collector.refresh_theme()
         self._page_creator.refresh_theme()
+        self._transfer.refresh_theme()
+        self._duplicate.refresh_theme()
         self._checker.refresh_theme()
         self._build_hub.refresh_theme()
         # Refresh log widgets in each panel
@@ -592,6 +617,21 @@ class MainWindow(QMainWindow):
             badge.reposition()
 
     def closeEvent(self, event):
+        if self._scorm._busy:
+            QMessageBox.information(self, "SCORM transfer is running",
+                "Use Stop in SCORM packages and wait for the browser to close before closing the app.")
+            event.ignore()
+            return
+        if self._duplicate._busy:
+            QMessageBox.information(self, "Content copying is running",
+                "Use Stop after current request in Duplicate content and wait before closing the app.")
+            event.ignore()
+            return
+        if self._transfer._busy:
+            QMessageBox.information(self, "Transfer is running",
+                "Use Stop in Transfer Studio or the in-app planner, and wait for the current request before closing the app.")
+            event.ignore()
+            return
         if self._restyle._busy:
             QMessageBox.information(self, "Pages are being restyled",
                 "Use Stop after active pages in Restyle and wait for the current pages to finish before closing the app.")
@@ -608,8 +648,11 @@ class MainWindow(QMainWindow):
             self._restyle,
             self._kaltura,
             self._h5p,
+            self._scorm,
             self._cleanup,
             self._page_creator,
+            self._transfer,
+            self._duplicate,
         ):
             try:
                 panel.save_state()
@@ -618,6 +661,7 @@ class MainWindow(QMainWindow):
         self.save_config({
             "claude_model": self._claude_model,
         })
+        self._transfer.close_studio()
 
         import keyring
         if self._claude_key:
@@ -644,6 +688,9 @@ def _claim_app_mutex():
 
 
 if __name__ == "__main__":
+    if "--studio-smoke" in sys.argv:
+        from transfer_studio_smoke import main as studio_smoke
+        sys.exit(studio_smoke())
     if sys.platform == "win32" and sys.stdout is not None:
         sys.stdout.reconfigure(encoding="utf-8")
 

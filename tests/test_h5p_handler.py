@@ -459,12 +459,13 @@ def test_chooser_open_reports_tiles_not_clicks():
     handler = _handler()
     seen = {}
 
-    async def fake_eval(tab, js):
+    async def fake_eval(js):
         seen["js"] = js
-        return "add-material-tile" in js
+        return {'href': '/loadActivity/file/2'} if "add-material-tile" in js else None
 
-    handler._eval_in_any_frame = fake_eval
-    assert asyncio.run(handler._tile_chooser_open(object())) is True
+    from types import SimpleNamespace
+    tab = SimpleNamespace(frames=[SimpleNamespace(evaluate=fake_eval)])
+    assert asyncio.run(handler._tile_chooser_open(tab)) is True
     assert "loadActivity/file/" in seen["js"]
 
 
@@ -768,6 +769,36 @@ def test_phase_a_reuses_one_cloud_scan_and_tracks_new_uploads(tmp_path, monkeypa
 
     assert len(scans) == 1
     assert upload_snapshots == [["Older H5P"], ["Older H5P", "New A"]]
+
+
+def test_phase_a_editor_failure_records_all_four_activities_and_keeps_cached_files(tmp_path, monkeypatch):
+    import h5p_handler as mod
+    from unittest.mock import AsyncMock
+
+    folder = tmp_path / 'downloads' / 'h5p'
+    folder.mkdir(parents=True)
+    files = [folder / f'Practice {i}.h5p' for i in range(4)]
+    for file in files: file.write_bytes(b'cached package')
+    monkeypatch.setattr(mod, '__file__', str(tmp_path / 'src' / 'h5p_handler.py'))
+    handler = _handler()
+    handler._build_assignments = lambda *args: [
+        {'belongs_to_course': True, 'bs_module_id': '2', 'bs_module_title': 'Practice',
+         'moodle_section': 'Practice', 'name': file.stem} for file in files
+    ]
+    handler.open_editor_and_get_frame = AsyncMock(return_value=None)
+    handler.upload_one = AsyncMock()
+    handler.insert_from_list = AsyncMock()
+    page = SimpleNamespace(close=AsyncMock())
+    context = SimpleNamespace(new_page=AsyncMock(return_value=page))
+
+    asyncio.run(handler.embed_in_brightspace(context, object(), [], [], 'https://bs', '1'))
+
+    assert handler._summary['h5p_failed'] == [(file.stem, 'Practice') for file in files]
+    assert not handler._summary['h5p_inserted']
+    handler.upload_one.assert_not_awaited()
+    handler.insert_from_list.assert_not_awaited()
+    page.close.assert_awaited_once()
+    assert all(file.read_bytes() == b'cached package' for file in files)
 
 
 def _run_embed(tmp_path, monkeypatch, decline_upload=True):

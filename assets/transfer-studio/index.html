@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Transfer Studio</title>
+  <link rel="stylesheet" href="/studio.css">
+  <script src="/studio.js" defer></script>
+  <script src="/studio-workflow.js" defer></script>
+</head>
+<body>
+  <header>
+    <a class="brand" href="/" aria-label="Transfer Studio home"><span aria-hidden="true">⇄</span> Transfer Studio</a>
+    <div id="course-pair" class="course-pair"></div>
+    <nav aria-label="Transfer steps">
+      <button id="connect-step" aria-current="step"><span>1</span> Connect</button>
+      <button id="arrange-step" disabled><span>2</span> Arrange</button>
+      <button id="styling-step" disabled><span>3</span> Styling</button>
+      <button id="review-step" disabled><span>4</span> Review</button>
+      <button id="create-step" disabled><span>5</span> Create</button>
+    </nav>
+  </header>
+  <div id="error" role="alert" hidden></div>
+  <main id="connect" class="connect">
+      <div class="connect-title"><h1>Start a transfer</h1><button id="open-saved">Open saved transfer…</button></div>
+    <p class="intro">Scan both courses to see how your transfer would look. Scanning only reads; nothing changes in Brightspace.</p>
+    <form id="connect-form">
+      <div class="course-inputs">
+        <label class="surface">Copy from
+          <span class="hint">The course whose content you want to reuse. Only read.</span>
+          <input id="source-url" type="url" required placeholder="Paste a Brightspace course link" autocomplete="off">
+          <span id="source-url-error" class="field-error" hidden></span>
+        </label>
+        <label class="surface">Copy into
+          <span class="hint">The course you want to add content to.</span>
+          <input id="target-url" type="url" required placeholder="Paste a Brightspace course link" autocomplete="off">
+          <span id="target-url-error" class="field-error" hidden></span>
+        </label>
+      </div>
+      <fieldset id="starts">
+        <legend>How should the destination be organized to begin with?</legend>
+        <p class="hint">Choose a starting outline for your draft.</p>
+        <div class="start-grid">
+          <label class="start-card surface"><div><strong><input type="radio" name="start" value="mirror" checked> Same as the source</strong><p>Keep every module and folder, in the same order.</p><p class="hint"><b>Best when</b> the course is already organized the way you want.</p></div><div class="mini" aria-hidden="true">DESTINATION OUTLINE<br>▱ Module 1<br>　▱ Readings<br>　　▤ Page<br>▱ Module 2</div></label>
+          <label class="start-card surface"><div><strong><input type="radio" name="start" value="pattern"> Use a pattern</strong><p>Give each source module a consistent set of sections.</p><p class="hint"><b>Best when</b> every module should follow the same layout.</p></div><div class="mini" aria-hidden="true">DESTINATION OUTLINE<br>▱ Module 1<br>　▤ Introduction<br>　▱ Content<br>　▱ Assessment</div></label>
+          <label class="start-card surface"><div><strong><input type="radio" name="start" value="destination"> The destination's modules</strong><p>Begin with the modules already in the destination.</p><p class="hint"><b>Best when</b> you're adding content into an existing course shell.</p></div><div class="mini" aria-hidden="true">DESTINATION OUTLINE<br>▱ Existing module<br>　+ Matching content<br>▱ Existing module<br>　+ Matching content</div></label>
+          <label class="start-card surface"><div><strong><input type="radio" name="start" value="empty"> Start empty</strong><p>Begin with a blank outline.</p><p class="hint"><b>Best when</b> you want to build a different structure in the in-app planner.</p></div><div class="mini" aria-hidden="true">DESTINATION OUTLINE<br><br>＋ A fresh start</div></label>
+        </div>
+      </fieldset>
+      <label id="pattern-field" class="pattern-field" hidden>Pattern <select id="pattern"></select><span id="pattern-detail" class="hint"></span></label>
+      <div class="scan-action"><span class="hint">Read only. A full course can take a few minutes.</span><button id="scan" class="primary" type="submit">Scan both courses</button></div>
+    </form>
+    <section id="progress" class="surface progress" role="status" aria-live="polite" hidden><strong>Scanning both courses…</strong><p id="progress-text"></p><p class="hint">If a login window appears, sign in there. Keep the desktop app open.</p></section>
+  </main>
+  <main id="arrange" class="arrange" hidden>
+    <div class="arrange-heading"><div><h1>Your transfer outline</h1><p class="hint">Select a folder or items to work with. Right-click for options, or drag a selection into a destination folder.</p></div><span id="edit-badge" class="badge">Editing draft</span></div>
+    <div class="edit-toolbar" role="toolbar" aria-label="Outline editing">
+      <div class="toolbar-group"><button id="undo" disabled title="Undo (Ctrl+Z)">↶ Undo</button><button id="redo" disabled title="Redo (Ctrl+Y)">↷ Redo</button><button id="add-module">＋ Module</button><button id="accept-suggestions" hidden>Accept suggestions</button></div>
+      <div class="toolbar-group"><button id="area-select" aria-pressed="false">Select an area</button><span id="selection-count" role="status">No items selected</span><button id="selection-actions" disabled>Selection options ⋯</button><button id="clear-selection" disabled>Clear</button></div>
+    </div>
+    <p id="selection-help" class="hint selection-help">Click to select · Ctrl/Cmd-click to add · Shift-click for a range · Delete to remove from the outline</p>
+    <div class="arrange-grid">
+      <section class="surface course-tree" aria-labelledby="source-title"><div class="tree-heading"><div><span class="eyebrow">From</span><h2 id="source-title"></h2></div><button id="waiting-filter" aria-pressed="false">Only unplaced</button></div><div id="source-tree" class="tree"></div></section>
+      <section class="surface course-tree" aria-labelledby="target-title"><div class="tree-heading"><div><span class="eyebrow">Into</span><h2 id="target-title"></h2></div><span class="badge">Draft outline</span></div><p id="existing-note" class="hint tree-note" hidden>Existing destination content stays. This outline shows the modules that will receive content.</p><div id="destination-tree" class="tree"></div></section>
+      <aside aria-label="Transfer summary" tabindex="0"><section class="surface summary"><h2>What will happen</h2><dl id="counts"></dl><p class="hint">New modules, pages and Content links start hidden. Activities keep their tool availability settings.</p></section><section class="issues"><h2>Things to know</h2><div id="issues"></div></section></aside>
+    </div>
+  </main>
+  <main id="styling" class="workflow-page" hidden>
+    <h1>Choose how the pages look</h1><p class="intro">Keep the existing look, or clean it up before applying a consistent style. Every changed page is checked to protect its content.</p>
+    <fieldset id="styling-modes"><legend>Existing page styling</legend><div class="mode-grid">
+      <label class="surface mode-card"><strong><input type="radio" name="style-mode" value="preserve"> Preserve existing styling</strong><p class="hint">Copy the page as it is. Best when the course already has the look you want.</p></label>
+      <label class="surface mode-card"><strong><input type="radio" name="style-mode" value="strip_bpa"> Strip Page Automator styling</strong><p class="hint">Remove the styling Page Automator added. Keep the author's own formatting.</p></label>
+      <label class="surface mode-card"><strong><input type="radio" name="style-mode" value="strip_all"> Strip all custom styling</strong><p class="hint">Remove custom CSS and layout wrappers. Keep the content, structure and accessibility.</p></label>
+    </div></fieldset>
+    <div class="look-picker surface"><label><input id="apply-look" type="checkbox"> Then apply this look</label><select id="look" aria-label="Look to apply"></select></div>
+    <div class="styling-grid"><section class="surface page-picker" aria-label="Pages to style"><h2 id="page-count">Pages</h2><div id="style-pages"></div></section><section class="surface preview-pane" aria-label="Page preview"><div class="preview-heading"><h2 id="preview-title">Select a page</h2><label>This page <select id="page-override"><option value="">Use the transfer setting</option><option value="preserve">Preserve existing styling</option><option value="strip_bpa">Strip Page Automator styling</option><option value="strip_all">Strip all custom styling</option></select></label></div><p id="preview-summary" role="status"></p><div class="preview-grid"><div><h3>Before</h3><iframe id="before-preview" title="Page before styling" sandbox referrerpolicy="no-referrer"></iframe></div><div><h3>After</h3><iframe id="after-preview" title="Page after styling" sandbox referrerpolicy="no-referrer"></iframe></div></div><p class="hint preview-note">External media, scripts and linked stylesheets are disabled in this preview. They are kept in the transferred page according to the styling mode.</p><div class="changes-grid"><section><h3>Removed or changed</h3><ul id="removed-list"></ul></section><section><h3>Kept</h3><ul id="kept-list"></ul></section></div></section></div>
+  </main>
+  <main id="review" class="workflow-page review-page" hidden>
+    <h1>Review your transfer</h1><p class="intro">Fix the blocking issues below, review the notes, and confirm the destination. Informational notes do not block Create.</p>
+    <p id="review-status" role="status" class="review-status"></p>
+    <label class="confirmation surface"><input id="confirm-create" type="checkbox"><span id="confirm-label">I have reviewed this plan and confirm the destination.</span></label>
+    <div class="review-grid"><section class="surface review-summary"><h2>What will happen, in order</h2><ol id="review-steps"></ol><h3>Activities to copy</h3><ul id="review-activities" tabindex="0"></ul><h3>Left out of this transfer</h3><ul id="review-skipped" tabindex="0"></ul></section><section><div class="surface review-settings"><h2>Grade categories</h2><select id="grade-categories" aria-label="Grade category handling"><option value="merge">Add grades into matching destination categories</option><option value="keep">Keep the copied source categories</option></select><p class="hint">Matching categories prevent duplicate names. Existing grade weights are kept.</p></div><h2 class="review-issues-title">Blocking issues</h2><div id="review-issues"></div><div class="issue"><strong>After copying · Release conditions</strong><p>Review activity release conditions after copying. Prerequisites outside this transfer are not verified by the app. This note does not block Create.</p></div><div class="surface review-settings"><h2>Copied separately in Brightspace</h2><p class="hint">Announcements, groups, glossary, appearance, navigation and external tools can be copied separately in Brightspace. This transfer copies the content and activities listed here.</p></div></section></div>
+    <details id="review-notes" class="surface review-notes"><summary id="review-notes-summary">Informational notes · Do not block Create</summary><div id="review-note-list"></div></details>
+  </main>
+  <main id="create" class="workflow-page run-page" hidden>
+    <h1 id="run-title">Create your transfer</h1><p id="run-description" class="intro"></p>
+    <div class="run-grid"><section class="surface run-progress"><h2>Progress</h2><ol id="run-phases"></ol><button id="stop-create" hidden>Stop after the current request</button></section><section class="surface run-log-pane"><h2>Activity log</h2><div id="run-log" role="log" aria-live="polite" aria-relevant="additions" tabindex="0"></div></section></div>
+    <section id="report-section" class="surface report-section" hidden><div class="report-heading"><h2>Transfer report</h2><div><a class="link-button" href="/api/report" download="structured-transfer-report.txt">Export report</a><a id="open-destination" class="link-button" target="_blank" rel="noopener noreferrer">Open destination in Brightspace</a></div></div><p class="hint">These checks cover the listed content and settings. Review activity release conditions and any manual items listed in Review.</p><div id="validation-results" tabindex="0"></div><pre id="transfer-report" tabindex="0"></pre></section>
+    <div id="resume-section" class="surface resume-section" hidden><h2>Continue this saved transfer</h2><p class="hint">Resume the same plan. The engine checks the saved journal and reuses what it already created.</p><label><input id="confirm-resume" type="checkbox"><span id="resume-label"></span></label><button id="resume-create" class="primary" disabled>Resume transfer</button></div>
+  </main>
+  <footer><span id="footer-status" role="status">Connecting to the desktop app…</span><div class="footer-actions"><span id="create-blockers" role="status" hidden></span><button id="back" hidden>Back to Connect</button><button id="workflow-next" class="primary" aria-describedby="create-blockers" hidden>Continue to styling</button></div></footer>
+  <div id="context-menu" class="context-menu" role="menu" aria-label="Selection options" hidden></div>
+  <div id="selection-box" class="selection-box" hidden></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden><span id="toast-message"></span><button id="toast-undo">Undo</button><button id="toast-dismiss" aria-label="Dismiss notification">×</button></div>
+  <dialog id="edit-dialog" aria-labelledby="dialog-title"><form id="edit-form"><h2 id="dialog-title"></h2><p id="dialog-note" class="hint"></p><label id="dialog-text-label">Name<input id="dialog-text" maxlength="150" autocomplete="off"></label><label id="dialog-place-label" hidden><span id="dialog-place-caption">Destination folder</span><select id="dialog-place"></select></label><div class="dialog-actions"><button id="dialog-cancel" type="button">Cancel</button><button class="primary" type="submit">Save</button></div></form></dialog>
+  <dialog id="sections-dialog" aria-labelledby="sections-title"><h2 id="sections-title">Edit sections</h2><p class="hint">Folders define the sections in this module. Removing one returns its contents to the unplaced list.</p><div id="sections-list"></div><div class="dialog-actions"><button id="sections-add">＋ Section</button><button id="sections-apply">Apply layout…</button><button id="sections-save">Save layout…</button><button id="sections-close">Done</button></div></dialog>
+  <dialog id="content-dialog" aria-labelledby="content-title"><form id="content-form"><h2 id="content-title">Write page text</h2><label id="intro-text-label">Introduction<textarea id="intro-text" rows="5"></textarea></label><label id="outcomes-text-label">Learning outcomes (one per line)<textarea id="outcomes-text" rows="4"></textarea></label><label id="session-text-label">Session overview<textarea id="session-text" rows="6"></textarea></label><div class="dialog-actions"><button id="content-cancel" type="button">Cancel</button><button type="submit" class="primary">Save text</button></div></form></dialog>
+  <dialog id="skip-unit-dialog" aria-labelledby="skip-unit-title"><h2 id="skip-unit-title">Skip this unit and its draft module?</h2><p>The linked draft module contains pages or edits you added. Skipping the unit will also remove these from the draft:</p><ul id="skip-unit-details" tabindex="0"></ul><p class="hint">Content moved in from another unit will return to unplaced. Your existing Brightspace course is unchanged. Ctrl+Z restores the whole change.</p><div class="dialog-actions"><button id="skip-unit-cancel" type="button">Cancel</button><button id="skip-unit-confirm" type="button" class="primary">Skip unit and remove draft module</button></div></dialog>
+</body>
+</html>

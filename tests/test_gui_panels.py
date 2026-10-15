@@ -102,8 +102,8 @@ def test_checker_panel_builds(qtbot):
     mw.save_config.return_value = None
     panel = CheckerPanel(mw)
     qtbot.addWidget(panel)
-    assert panel._run_btn.text() == "Scan course"
-    assert panel._apply_btn.text() == "Preview selected changes"
+    assert panel._run_btn.text() == "Scan courses"
+    assert panel._apply_btn.text() == "Review selected fixes"
     assert panel._apply_btn.isEnabled() is False
     assert panel._stop_btn.isHidden()
     # assert panel._continue_btn.isHidden()
@@ -278,8 +278,8 @@ def test_checker_fix_tab_needs_a_scan_and_a_choice(qtbot):
     panel._bs_entry.setText("https://learn.test/d2l/home/42")
     panel._moodle_entry.setText("https://moodle.test/course/view.php?id=7")
 
-    assert [panel._tabs.tabText(i) for i in range(panel._tabs.count())] == ["1 · Scan", "2 · Fix"]
-    panel._fix_boxes["order"].setChecked(True)
+    panel.show_transfer()
+    assert panel._view == "overview"  # cannot choose fixes before scanning
     assert not panel._apply_btn.isEnabled()  # no scan yet
 
     urls = (panel._bs_entry.text(), panel._moodle_entry.text())
@@ -287,6 +287,8 @@ def test_checker_fix_tab_needs_a_scan_and_a_choice(qtbot):
         "missing": 0, "books": 0, "files": 0, "h5p": 0, "broken_links": 0,
         "activities": 0, "moodle_links": 0, "findings": [], "broken_pages": [],
     }, urls)
+    panel._open_group("other")
+    panel._fix_boxes["order"].setChecked(True)
     assert panel._apply_btn.isEnabled()
     assert not panel._fix_boxes["books"].isEnabled()  # nothing to split
 

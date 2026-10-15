@@ -1,0 +1,1094 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Transfer Studio</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#0B6B66}a:hover{color:#074B48}
+button{font-family:inherit}
+input,select{font-family:inherit}
+</style>
+</helmet>
+<div tabIndex="-1" onKeyDown="{{onKey}}" style="min-height: 100vh; background: #F4F5F2; font-family: 'Hanken Grotesk', system-ui, sans-serif; color: #17212B; font-size: 15px; display: flex; flex-direction: column; outline: none">
+
+<header style="display: flex; flex-wrap: wrap; align-items: center; gap: 16px 28px; padding: 16px 28px; background: #FFFFFF; border-bottom: 1px solid #E2E5E0">
+  <div style="display: flex; align-items: center; gap: 10px">
+    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#0B6B66" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h11M4 7l3-3M4 7l3 3M20 17H9M20 17l-3-3M20 17l-3 3"></path></svg>
+    <div style="font-weight: 700; font-size: 18px; letter-spacing: -0.01em">Transfer Studio</div>
+  </div>
+  <div style="display: flex; align-items: center; gap: 8px; font-size: 14px; color: #5B6672; flex-wrap: wrap">
+    <span style="padding: 5px 10px; background: #F4F5F2; border-radius: 999px; color: #17212B">EA-113 Sandbox</span>
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#5B6672" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"></path></svg>
+    <span style="padding: 5px 10px; background: #E3F1EF; border-radius: 999px; color: #074B48">EA105 Sandbox</span>
+  </div>
+  <nav aria-label="Steps" style="margin-left: auto; display: flex; gap: 4px; flex-wrap: wrap">
+    <sc-for list="{{steps}}" as="s" hint-placeholder-count="5">
+      <button type="button" onClick="{{s.go}}" disabled="{{s.locked}}" style="border: none; background: transparent; padding: 8px 10px; border-radius: 8px; font-size: 14px; display: flex; align-items: center; gap: 8px; cursor: pointer; {{s.style}}">
+        <span style="width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; {{s.dotStyle}}">{{s.mark}}</span>{{s.label}}
+      </button>
+    </sc-for>
+  </nav>
+</header>
+
+<sc-if value="{{isConnect}}" hint-placeholder-val="{{ true }}">
+<main style="flex: 1; padding: 48px 28px; display: flex; justify-content: center">
+  <div style="width: 100%; max-width: 920px; display: flex; flex-direction: column; gap: 28px">
+    <div>
+      <h1 style="margin: 0 0 8px; font-size: 34px; letter-spacing: -0.02em">Start a transfer</h1>
+      <p style="margin: 0; color: #5B6672; font-size: 16px; line-height: 1.5">Scanning only reads both courses. Nothing changes until you press Create, and you'll see exactly what will happen first.</p>
+    </div>
+    <div style="display: flex; flex-wrap: wrap; gap: 16px">
+      <label style="flex: 1 1 320px; display: flex; flex-direction: column; gap: 8px; background: #FFFFFF; border: 1px solid #E2E5E0; border-radius: 14px; padding: 18px">
+        <span style="font-weight: 600">Copy from</span>
+        <span style="color: #5B6672; font-size: 14px">The course whose content you want to reuse. Only read.</span>
+        <input value="{{sourceUrl}}" onChange="{{onSource}}" style="border: 1px solid #D5DAD4; border-radius: 10px; padding: 12px 14px; font-size: 15px; color: #17212B; background: #FBFBFA">
+      </label>
+      <label style="flex: 1 1 320px; display: flex; flex-direction: column; gap: 8px; background: #FFFFFF; border: 1px solid #E2E5E0; border-radius: 14px; padding: 18px">
+        <span style="font-weight: 600">Copy into</span>
+        <span style="color: #5B6672; font-size: 14px">The destination. Only this course is changed.</span>
+        <input value="{{targetUrl}}" onChange="{{onTarget}}" style="border: 1px solid #D5DAD4; border-radius: 10px; padding: 12px 14px; font-size: 15px; color: #17212B; background: #FBFBFA">
+      </label>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 12px">
+      <div>
+        <div style="font-weight: 600; font-size: 17px">How should EA105 be organized to begin with?</div>
+        <div style="color: #5B6672; font-size: 14px; margin-top: 4px; line-height: 1.5">This only sets up a first draft. In the next step you can move, rename, add or remove anything, and undo it all.</div>
+      </div>
+      <div role="radiogroup" aria-label="Starting outline" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 12px">
+        <sc-for list="{{starts}}" as="st" hint-placeholder-count="4">
+          <button type="button" role="radio" aria-checked="{{st.on}}" onClick="{{st.pick}}" style="text-align: left; background: #FFFFFF; border-radius: 14px; padding: 16px; cursor: pointer; display: flex; gap: 16px; align-items: stretch; {{st.style}}">
+            <span style="flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 6px">
+              <span style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+                <span style="flex: none; width: 18px; height: 18px; border-radius: 50%; box-sizing: border-box; {{st.radioStyle}}"></span>
+                <span style="font-weight: 600; font-size: 15px; color: #17212B">{{st.title}}</span>
+                <sc-if value="{{st.suggested}}" hint-placeholder-val="{{ false }}">
+                  <span style="font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #E3F1EF; color: #074B48">Suggested</span>
+                </sc-if>
+              </span>
+              <span style="color: #3B4652; font-size: 14px; line-height: 1.45">{{st.text}}</span>
+              <span style="color: #5B6672; font-size: 13px; line-height: 1.45"><strong style="font-weight: 600">Best when</strong> {{st.best}}</span>
+            </span>
+            <span aria-hidden="true" style="flex: 0 0 170px; background: #F7F8F6; border: 1px solid #E8EBE6; border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: #3B4652">
+              <span style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: #8A939C; font-weight: 600; margin-bottom: 2px">EA105 would start as</span>
+              <sc-for list="{{st.preview}}" as="row" hint-placeholder-count="5">
+                <span style="display: flex; align-items: center; gap: 5px; white-space: nowrap; overflow: hidden; {{row.style}}">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" style="flex: none"><path d="{{row.icon}}"></path></svg>
+                  <span style="overflow: hidden; text-overflow: ellipsis">{{row.label}}</span>
+                </span>
+              </sc-for>
+            </span>
+          </button>
+        </sc-for>
+      </div>
+    </div>
+    <div style="display: flex; align-items: center; justify-content: flex-end; gap: 16px; flex-wrap: wrap">
+      <span style="color: #5B6672; font-size: 14px">{{scanText}}</span>
+      <button type="button" onClick="{{scan}}" style="border: none; background: #0B6B66; color: #FFFFFF; font-weight: 600; font-size: 15px; padding: 13px 22px; border-radius: 10px; cursor: pointer; min-height: 44px">{{scanLabel}}</button>
+    </div>
+  </div>
+</main>
+</sc-if>
+
+<sc-if value="{{isArrange}}" hint-placeholder-val="{{ false }}">
+<main style="flex: 1; padding: 20px 28px 0; display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start">
+
+  <section aria-label="Source course" style="flex: 1 1 300px; min-width: 0; background: #FFFFFF; border: 1px solid #E2E5E0; border-radius: 14px; display: flex; flex-direction: column">
+    <div style="padding: 16px 18px 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; position: relative">
+      <div style="flex: 1">
+        <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: #5B6672; font-weight: 600">From</div>
+        <div style="font-weight: 600">EA-113 Sandbox</div>
+      </div>
+      <button type="button" onClick="{{toggleFilter}}" aria-pressed="{{onlyWaiting}}" style="border: 1px solid #D5DAD4; border-radius: 999px; padding: 6px 12px; font-size: 13px; cursor: pointer; {{filterStyle}}">Only unplaced · {{counts.unplaced}}</button>
+    <svg width="284" height="171" viewBox="0 0 284 171" preserveAspectRatio="none" style="position: absolute; left: 6px; top: 47px; width: 284px; height: 171px; overflow: visible; fill: none; stroke: #8a8378; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round"><path d="M5 13 C30.6 6.6 57.6 8 83.9 8 C95.4 8 107.5 7 118.9 8.2 C138.5 10.4 157.7 16.6 177.9 18 C195.4 19.2 212.3 24.2 229.8 26 C247.8 27.8 267.3 21.6 278.8 40 C285.5 50.7 283.8 77.5 283.8 89.9 C283.8 103 285.3 116.3 280.1 128.7 C276.1 138 270 144.1 262.8 150.9 C257.6 155.8 253.4 160.7 246.8 163.9 C225.3 174.5 177.1 170.9 152.9 170.9 C135.5 170.9 112.9 173.6 95.9 170.9 C91.8 170.2 88 168 83.9 166.9 C65.5 162 34 163.5 22.2 145.7 C17.7 138.8 17.4 128.6 15 120.9 C12.2 111.9 7 103.8 4 94.9 C-3.5 73.2 -5.4 13.2 18 0" vector-effect="non-scaling-stroke"></path></svg></div>
+    <div style="padding: 0 10px 10px; display: flex; flex-direction: column; gap: 2px">
+      <sc-for list="{{sourceGroups}}" as="g" hint-placeholder-count="4">
+        <button type="button" draggable="true" onDragStart="{{g.dragStart}}" onDragEnd="{{dragEnd}}" onClick="{{g.select}}" title="Drag the whole folder, or click for options" style="display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; border: 1px solid transparent; background: transparent; border-radius: 10px; padding: 9px 8px 5px; color: #3B4652; font-size: 13px; font-weight: 600; cursor: grab; {{g.rowStyle}}">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h6l2 2h10v10H3z"></path></svg>
+          <span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{g.title}}</span>
+          <span style="font-size: 12px; font-weight: 400; color: #5B6672">{{g.count}}</span>
+        </button>
+        <sc-for list="{{g.items}}" as="it" hint-placeholder-count="3">
+          <button type="button" draggable="true" onDragStart="{{it.dragStart}}" onDragEnd="{{dragEnd}}" onClick="{{it.select}}" style="display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; border: 1px solid transparent; background: transparent; border-radius: 10px; padding: 9px 10px 9px 28px; cursor: grab; color: #17212B; font-size: 14px; {{it.rowStyle}}">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none; color: #5B6672"><path d="{{it.icon}}"></path></svg>
+            <span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{it.title}}</span>
+            <span style="font-size: 12px; white-space: nowrap; {{it.statusStyle}}">{{it.status}}</span>
+          </button>
+        </sc-for>
+      </sc-for>
+      <sc-if value="{{noneWaiting}}" hint-placeholder-val="{{ false }}">
+        <p style="margin: 8px; color: #5B6672; font-size: 14px">Everything has a place or is skipped.</p>
+      </sc-if>
+    </div>
+    <sc-if value="{{hasSelection}}" hint-placeholder-val="{{ false }}">
+      <div style="border-top: 1px solid #E2E5E0; padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; background: #FBFBFA; border-radius: 0 0 14px 14px">
+        <div style="font-size: 14px"><span style="color: #5B6672">Selected</span> <strong>{{selected.title}}</strong></div>
+        <div style="font-size: 13px; color: #5B6672; line-height: 1.45">{{selected.note}}</div>
+        <sc-if value="{{selected.canMove}}" hint-placeholder-val="{{ true }}">
+          <div style="display: flex; gap: 8px; flex-wrap: wrap">
+            <label style="flex: 1 1 200px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #5B6672">{{selected.moveLabel}}
+              <select onChange="{{moveSelected}}" value="{{selected.dest}}" style="border: 1px solid #D5DAD4; border-radius: 8px; padding: 9px 10px; font-size: 14px; color: #17212B; background: #FFFFFF">
+                <option value="">Choose a place…</option>
+                <sc-for list="{{zoneOptions}}" as="z" hint-placeholder-count="6">
+                  <option value="{{z.id}}">{{z.label}}</option>
+                </sc-for>
+              </select>
+            </label>
+            <sc-if value="{{selected.isItem}}" hint-placeholder-val="{{ true }}">
+              <button type="button" onClick="{{toggleSkip}}" style="align-self: flex-end; border: 1px solid #D5DAD4; background: #FFFFFF; border-radius: 8px; padding: 9px 14px; font-size: 14px; cursor: pointer; min-height: 40px">{{selected.skipLabel}}</button>
+            </sc-if>
+          </div>
+        </sc-if>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap">
+          <sc-if value="{{selected.isFolder}}" hint-placeholder-val="{{ false }}">
+            <button type="button" onClick="{{folderToModule}}" style="border: 1px solid #0B6B66; color: #0B6B66; background: #FFFFFF; border-radius: 8px; padding: 8px 12px; font-size: 13px; font-weight: 600; cursor: pointer">Make it a new module</button>
+          </sc-if>
+          <button type="button" onClick="{{copySelected}}" style="display: flex; align-items: center; gap: 6px; border: 1px solid #D5DAD4; background: #FFFFFF; border-radius: 8px; padding: 8px 12px; font-size: 13px; cursor: pointer; color: #17212B">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 9h11v11H9zM5 15H4V4h11v1"></path></svg>Copy name
+          </button>
+        </div>
+      </div>
+    </sc-if>
+  </section>
+
+  <section aria-label="Destination outline" style="flex: 999 1 520px; min-width: 0; display: flex; flex-direction: column; gap: 14px">
+    <div style="display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap">
+      <div style="flex: 1">
+        <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: #5B6672; font-weight: 600">Into</div>
+        <div style="font-weight: 600; font-size: 20px">EA105 Sandbox</div>
+      </div>
+      <span style="color: #5B6672; font-size: 13px">Drag items onto a module or section. Everything new is created hidden.</span>
+      <div role="group" aria-label="History" style="display: flex; gap: 2px; background: #FFFFFF; border: 1px solid #E2E5E0; border-radius: 10px; padding: 3px">
+        <button type="button" onClick="{{undo}}" disabled="{{cantUndo}}" title="{{undoTitle}}" aria-label="{{undoTitle}}" style="display: flex; align-items: center; gap: 6px; border: none; background: transparent; border-radius: 7px; padding: 7px 10px; font-size: 14px; min-height: 36px; {{undoStyle}}">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11"></path></svg>Undo
+        </button>
+        <button type="button" onClick="{{redo}}" disabled="{{cantRedo}}" title="{{redoTitle}}" aria-label="{{redoTitle}}" style="display: flex; align-items: center; gap: 6px; border: none; background: transparent; border-radius: 7px; padding: 7px 10px; font-size: 14px; min-height: 36px; {{redoStyle}}">
+          Redo<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 14l5-5-5-5M20 9H9.5a5.5 5.5 0 0 0 0 11H13"></path></svg>
+        </button>
+      </div>
+    </div>
+    <sc-for list="{{destModules}}" as="m" hint-placeholder-count="4">
+      <article style="background: #FFFFFF; border: 1px solid #E2E5E0; border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; {{m.cardStyle}}">
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#17212B" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h6l2 2h10v10H3z"></path></svg>
+          <h2 style="margin: 0; font-size: 16px; font-weight: 600; flex: 1; min-width: 0">{{m.title}}</h2>
+          <button type="button" onClick="{{m.copy}}" aria-label="Copy module name" title="Copy name" style="border: none; background: transparent; color: #5B6672; border-radius: 8px; padding: 6px; cursor: pointer; display: flex">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 9h11v11H9zM5 15H4V4h11v1"></path></svg>
+          </button>
+          <span style="font-size: 12px; padding: 3px 9px; border-radius: 999px; {{m.badgeStyle}}">{{m.badge}}</span>
+          <button type="button" onClick="{{m.toggleEdit}}" aria-expanded="{{m.editing}}" style="border: 1px solid #D5DAD4; border-radius: 8px; padding: 5px 10px; font-size: 13px; cursor: pointer; {{m.editButtonStyle}}">{{m.editLabel}}</button>
+          <sc-if value="{{m.canRemove}}" hint-placeholder-val="{{ true }}">
+            <button type="button" onClick="{{m.remove}}" aria-label="Remove module" style="border: none; background: transparent; border-radius: 8px; padding: 5px 8px; font-size: 13px; color: #5B6672; cursor: pointer">Remove</button>
+          </sc-if>
+        </div>
+        <sc-if value="{{m.editing}}" hint-placeholder-val="{{ false }}">
+          <div style="background: #F7F8F6; border: 1px solid #E8EBE6; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 12px">
+            <div style="display: flex; flex-direction: column; gap: 6px">
+              <div style="font-size: 13px; font-weight: 600; color: #3B4652">Sections in this module</div>
+              <div style="font-size: 12px; color: #5B6672">Each section becomes a folder inside “{{m.title}}”. Removing one sends its items back to the left.</div>
+              <div style="display: flex; flex-wrap: wrap; gap: 6px">
+                <sc-for list="{{m.sectionEdits}}" as="se" hint-placeholder-count="3">
+                  <span style="display: flex; align-items: center; gap: 2px; background: #FFFFFF; border: 1px solid #D5DAD4; border-radius: 8px; padding: 2px 2px 2px 8px">
+                    <label style="display: flex"><span style="position: absolute; left: -9999px">Section name</span>
+                      <input value="{{se.title}}" onFocus="{{se.focus}}" onChange="{{se.rename}}" style="border: none; background: transparent; font-size: 13px; color: #17212B; padding: 5px 2px; width: 130px; outline-offset: 2px">
+                    </label>
+                    <button type="button" onClick="{{se.remove}}" aria-label="Remove section" style="border: none; background: transparent; color: #5B6672; cursor: pointer; padding: 4px 8px; font-size: 15px; line-height: 1">×</button>
+                  </span>
+                </sc-for>
+                <sc-if value="{{m.noSections}}" hint-placeholder-val="{{ false }}">
+                  <span style="font-size: 13px; color: #8A939C; padding: 6px 0">No sections yet. Items sit directly in the module.</span>
+                </sc-if>
+              </div>
+              <div style="display: flex; gap: 6px; flex-wrap: wrap">
+                <label style="flex: 1 1 200px; display: flex"><span style="position: absolute; left: -9999px">New section name</span>
+                  <input value="{{sectionDraft}}" onChange="{{onSectionDraft}}" placeholder="New section name, e.g. Readings" style="flex: 1; border: 1px solid #D5DAD4; border-radius: 8px; padding: 8px 10px; font-size: 13px; background: #FFFFFF; color: #17212B">
+                </label>
+                <button type="button" onClick="{{m.addSection}}" style="border: 1px solid #0B6B66; color: #0B6B66; background: #FFFFFF; border-radius: 8px; padding: 8px 12px; font-size: 13px; font-weight: 600; cursor: pointer">+ Add section</button>
+              </div>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 6px">
+              <div style="font-size: 13px; font-weight: 600; color: #3B4652">Use a saved layout</div>
+              <div style="display: flex; flex-wrap: wrap; gap: 6px">
+                <sc-for list="{{m.layoutButtons}}" as="lb" hint-placeholder-count="2">
+                  <button type="button" onClick="{{lb.apply}}" title="{{lb.detail}}" style="border: 1px solid #D5DAD4; background: #FFFFFF; border-radius: 999px; padding: 6px 12px; font-size: 13px; cursor: pointer; color: #17212B">{{lb.name}}</button>
+                </sc-for>
+              </div>
+            </div>
+            <div style="display: flex; gap: 6px; flex-wrap: wrap; align-items: center">
+              <label style="flex: 1 1 200px; display: flex"><span style="position: absolute; left: -9999px">Layout name</span>
+                <input value="{{layoutDraft}}" onChange="{{onLayoutDraft}}" placeholder="Name these sections as a layout" style="flex: 1; border: 1px solid #D5DAD4; border-radius: 8px; padding: 8px 10px; font-size: 13px; background: #FFFFFF; color: #17212B">
+              </label>
+              <button type="button" onClick="{{m.saveLayout}}" disabled="{{m.cantSave}}" style="border: 1px solid #D5DAD4; background: #FFFFFF; border-radius: 8px; padding: 8px 12px; font-size: 13px; cursor: pointer; {{m.saveStyle}}">Save as layout</button>
+              <button type="button" onClick="{{m.toggleEdit}}" style="border: none; background: #0B6B66; color: #FFFFFF; border-radius: 8px; padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer">Done</button>
+            </div>
+          </div>
+        </sc-if>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px">
+          <sc-for list="{{m.zones}}" as="z" hint-placeholder-count="3">
+            <div onDragOver="{{z.dragOver}}" onDragEnter="{{z.dragEnter}}" onDrop="{{z.drop}}" style="border: 1.5px dashed #D5DAD4; border-radius: 10px; padding: 8px; min-height: 64px; display: flex; flex-direction: column; gap: 6px; {{z.zoneStyle}}">
+              <sc-if value="{{z.hasTitle}}" hint-placeholder-val="{{ true }}">
+                <div style="font-size: 12px; font-weight: 600; color: #5B6672; padding: 2px 4px">{{z.title}}</div>
+              </sc-if>
+              <sc-for list="{{z.items}}" as="it" hint-placeholder-count="2">
+                <div draggable="true" onDragStart="{{it.dragStart}}" onDragEnd="{{dragEnd}}" style="display: flex; align-items: center; gap: 8px; background: #F7F8F6; border: 1px solid #E8EBE6; border-radius: 8px; padding: 7px 8px; font-size: 14px; cursor: grab">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#5B6672" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="{{it.icon}}"></path></svg>
+                  <span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{it.title}}</span>
+                  <sc-if value="{{it.isActivity}}" hint-placeholder-val="{{ false }}">
+                    <span title="Copied with Brightspace's Copy Components, then linked here" style="font-size: 11px; padding: 2px 7px; border-radius: 999px; background: #EAF0FB; color: #2D4E8A; white-space: nowrap">{{it.kindLabel}}</span>
+                  </sc-if>
+                  <button type="button" onClick="{{it.copy}}" aria-label="Copy name" title="Copy name" style="border: none; background: transparent; color: #5B6672; cursor: pointer; padding: 3px 4px; display: flex">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 9h11v11H9zM5 15H4V4h11v1"></path></svg>
+                  </button>
+                  <button type="button" onClick="{{it.takeOut}}" aria-label="Take out" title="Take out" style="border: none; background: transparent; color: #5B6672; cursor: pointer; padding: 2px 6px; font-size: 16px; line-height: 1">×</button>
+                </div>
+              </sc-for>
+              <sc-if value="{{z.empty}}" hint-placeholder-val="{{ false }}">
+                <div style="color: #8A939C; font-size: 13px; padding: 6px 4px">Drop items here</div>
+              </sc-if>
+            </div>
+          </sc-for>
+        </div>
+      </article>
+    </sc-for>
+    <div onDragOver="{{newZone.dragOver}}" onDragEnter="{{newZone.dragEnter}}" onDrop="{{newZone.drop}}" style="border: 1.5px dashed #C9CFC8; border-radius: 14px; padding: 16px; text-align: center; color: #5B6672; font-size: 14px; {{newZone.style}}">
+      Drop a folder or item here to make it a new module
+    </div>
+    <div style="display: flex; gap: 8px; flex-wrap: wrap">
+      <label style="flex: 1 1 260px; display: flex">
+        <span style="position: absolute; left: -9999px">New module name</span>
+        <input value="{{draftName}}" onChange="{{onDraft}}" placeholder="New module name" style="flex: 1; border: 1px solid #D5DAD4; border-radius: 10px; padding: 11px 14px; font-size: 15px; background: #FFFFFF; color: #17212B">
+      </label>
+      <button type="button" onClick="{{addModule}}" style="border: 1px solid #0B6B66; color: #0B6B66; background: #FFFFFF; border-radius: 10px; padding: 11px 16px; font-size: 15px; font-weight: 600; cursor: pointer; min-height: 44px">+ Add module</button>
+    </div>
+    <div style="border: 1px solid #E2E5E0; border-radius: 14px; padding: 12px 16px; background: #FAFAF8">
+      <div style="font-size: 13px; color: #5B6672; margin-bottom: 6px">Already in EA105 Sandbox · left exactly as they are</div>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap">
+        <span style="font-size: 13px; padding: 5px 10px; border: 1px solid #E2E5E0; border-radius: 999px; background: #FFFFFF">Course Resources</span>
+        <span style="font-size: 13px; padding: 5px 10px; border: 1px solid #E2E5E0; border-radius: 999px; background: #FFFFFF">Observation Day</span>
+        <span style="font-size: 13px; padding: 5px 10px; border: 1px solid #E2E5E0; border-radius: 999px; background: #FFFFFF">Development templates</span>
+      </div>
+    </div>
+  </section>
+
+  <aside aria-label="What will happen" style="flex: 1 1 300px; min-width: 0; display: flex; flex-direction: column; gap: 14px">
+    <div style="background: #FFFFFF; border: 1px solid #E2E5E0; border-radius: 14px; padding: 16px 18px">
+      <div style="font-weight: 600; margin-bottom: 12px">What will happen</div>
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px">
+        <div style="background: #F4F5F2; border-radius: 10px; padding: 10px 12px"><div style="font-size: 24px; font-weight: 600">{{counts.modules}}</div><div style="font-size: 13px; color: #5B6672">new hidden modules</div></div>
+        <div style="background: #F4F5F2; border-radius: 10px; padding: 10px 12px"><div style="font-size: 24px; font-weight: 600">{{counts.pages}}</div><div style="font-size: 13px; color: #5B6672">pages</div></div>
+        <div style="background: #F4F5F2; border-radius: 10px; padding: 10px 12px"><div style="font-size: 24px; font-weight: 600">{{counts.files}}</div><div style="font-size: 13px; color: #5B6672">files copied in</div></div>
+        <div style="background: #EAF0FB; border-radius: 10px; padding: 10px 12px"><div style="font-size: 24px; font-weight: 600; color: #2D4E8A">{{counts.activities}}</div><div style="font-size: 13px; color: #2D4E8A">activities via Copy Components</div></div>
+      </div>
+      <div style="font-size: 13px; color: #5B6672; margin-top: 10px; line-height: 1.5">{{counts.activityDetail}} · {{counts.skipped}} left out</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 10px">
+      <div style="font-weight: 600; display: flex; align-items: center; gap: 8px">Worth a look <span style="font-size: 12px; padding: 2px 8px; border-radius: 999px; background: #F4F5F2; color: #5B6672">{{warningCount}}</span></div>
+      <sc-for list="{{warnings}}" as="w" hint-placeholder-count="3">
+        <div style="border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; {{w.style}}">
+          <div style="font-weight: 600; font-size: 14px">{{w.title}}</div>
+          <div style="font-size: 13px; line-height: 1.5; color: #3B4652">{{w.body}}</div>
+          <sc-if value="{{w.hasAction}}" hint-placeholder-val="{{ true }}">
+            <button type="button" onClick="{{w.action}}" style="align-self: flex-start; border: 1px solid currentColor; background: #FFFFFF; border-radius: 8px; padding: 6px 12px; font-size: 13px; font-weight: 600; cursor: pointer; {{w.buttonStyle}}">{{w.actionLabel}}</button>
+          </sc-if>
+        </div>
+      </sc-for>
+    </div>
+  </aside>
+</main>
+<footer style="margin-top: 20px; padding: 14px 28px; background: #FFFFFF; border-top: 1px solid #E2E5E0; display: flex; align-items: center; gap: 14px; flex-wrap: wrap">
+  <sc-if value="{{hasToast}}" hint-placeholder-val="{{ false }}">
+    <div role="status" style="display: flex; align-items: center; gap: 4px; background: #17212B; color: #FFFFFF; border-radius: 10px; padding: 6px 6px 6px 14px; font-size: 14px; max-width: 520px">
+      <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 6px">{{toast}}</span>
+      <sc-if value="{{canUndo}}" hint-placeholder-val="{{ true }}">
+        <button type="button" onClick="{{undo}}" style="border: none; background: transparent; color: #8FE0D6; font-weight: 600; font-size: 14px; padding: 6px 10px; border-radius: 7px; cursor: pointer">Undo</button>
+      </sc-if>
+      <button type="button" onClick="{{dismissToast}}" aria-label="Dismiss" style="border: none; background: transparent; color: #C9D1CF; font-size: 16px; padding: 4px 8px; cursor: pointer; line-height: 1">×</button>
+    </div>
+  </sc-if>
+  <span style="flex: 1; color: #5B6672; font-size: 14px; min-width: 200px">{{arrangeStatus}} · Ctrl+Z to undo</span>
+  <sc-if value="{{hasSuggestions}}" hint-placeholder-val="{{ true }}">
+    <button type="button" onClick="{{acceptSuggestions}}" style="border: none; background: transparent; color: #0B6B66; font-weight: 600; font-size: 15px; padding: 12px 14px; border-radius: 10px; cursor: pointer">Accept {{counts.suggested}} suggestions</button>
+  </sc-if>
+  <button type="button" onClick="{{toStyling}}" style="border: none; background: #0B6B66; color: #FFFFFF; font-weight: 600; font-size: 15px; padding: 13px 22px; border-radius: 10px; cursor: pointer; min-height: 44px">Continue to styling</button>
+</footer>
+</sc-if>
+
+<sc-if value="{{isStyling}}" hint-placeholder-val="{{ false }}">
+<main style="flex: 1; padding: 24px 28px 0; display: flex; flex-direction: column; gap: 18px">
+  <div>
+    <h1 style="margin: 0 0 6px; font-size: 26px; letter-spacing: -0.01em">What happens to the pages' styling?</h1>
+    <p style="margin: 0; color: #5B6672">Content always stays: headings, text, links, images, tables, embeds, math and accessibility details. Every cleaned page is compared with the original; if anything would be lost, the original is kept.</p>
+  </div>
+  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px">
+    <sc-for list="{{modes}}" as="md" hint-placeholder-count="3">
+      <button type="button" onClick="{{md.pick}}" style="text-align: left; background: #FFFFFF; border-radius: 14px; padding: 16px; cursor: pointer; display: flex; flex-direction: column; gap: 6px; {{md.style}}">
+        <span style="font-weight: 600; color: #17212B">{{md.title}}</span>
+        <span style="color: #5B6672; font-size: 14px; line-height: 1.45">{{md.text}}</span>
+      </button>
+    </sc-for>
+  </div>
+  <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; background: #FFFFFF; border: 1px solid #E2E5E0; border-radius: 14px; padding: 12px 16px">
+    <button type="button" onClick="{{toggleLook}}" aria-pressed="{{applyLook}}" disabled="{{lookDisabled}}" style="display: flex; align-items: center; gap: 10px; border: none; background: transparent; cursor: pointer; font-size: 15px; color: #17212B; padding: 6px 0">
+      <span style="width: 38px; height: 22px; border-radius: 999px; position: relative; {{lookTrack}}"><span style="position: absolute; top: 3px; width: 16px; height: 16px; border-radius: 50%; background: #FFFFFF; {{lookKnob}}"></span></span>
+      Then apply the destination's look
+    </button>
+    <label style="display: flex; align-items: center; gap: 8px; color: #5B6672; font-size: 14px">from
+      <select onChange="{{pickLook}}" value="{{look}}" style="border: 1px solid #D5DAD4; border-radius: 8px; padding: 8px 10px; font-size: 14px; color: #17212B; background: #FFFFFF">
+        <option value="ea105">EA105 Module Introduction template</option>
+        <option value="calm">Page Automator: Calm</option>
+        <option value="classic">Page Automator: Classic</option>
+      </select>
+    </label>
+  </div>
+  <div style="display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start">
+    <div style="flex: 1 1 280px; min-width: 0; background: #FFFFFF; border: 1px solid #E2E5E0; border-radius: 14px; padding: 10px">
+      <div style="font-size: 13px; color: #5B6672; font-weight: 600; padding: 6px 8px">{{pageCountLabel}}</div>
+      <sc-for list="{{pages}}" as="p" hint-placeholder-count="5">
+        <button type="button" onClick="{{p.pick}}" style="display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; border: none; border-radius: 10px; padding: 10px; cursor: pointer; background: transparent; {{p.style}}">
+          <span style="font-size: 14px; color: #17212B">{{p.title}}</span>
+          <span style="font-size: 12px; {{p.statusStyle}}">{{p.status}}</span>
+        </button>
+      </sc-for>
+    </div>
+    <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-wrap: wrap; gap: 16px">
+      <figure style="margin: 0; flex: 1 1 300px; min-width: 0; display: flex; flex-direction: column; gap: 8px">
+        <figcaption style="font-size: 13px; font-weight: 600; color: #5B6672">Before · as it is in EA-113</figcaption>
+        <div style="background: #F8F9FA; border: 1px solid #E2E5E0; border-radius: 12px; overflow: hidden; padding: 18px">
+          <div style="background: #FFFFFF; border-radius: 10px; overflow: hidden; box-shadow: 0 6px 18px rgba(0,0,0,0.07)">
+            <div style="background: #005F63; color: #FFFFFF; padding: 22px 20px; display: flex; justify-content: space-between; align-items: flex-end"><span style="font-size: 20px; font-weight: 700">{{previewTitle}}</span><span style="font-size: 11px; letter-spacing: 0.1em; opacity: 0.85">OC</span></div>
+            <div style="padding: 16px 18px; font-size: 13px; line-height: 1.55">
+              <div style="border: 1px solid #E8EEF0; border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 8px">
+                <div style="font-weight: 700; font-size: 15px">EA113: Mental Health and EA Self Care</div>
+                <div>This three-part session explores mental health and self care for the Education Assistant.</div>
+                <div><span style="color: #FF3366">The intended outcomes are to:</span></div>
+                <ul style="margin: 0; padding-left: 18px"><li>understand mental health</li><li>recognise signs of burnout</li></ul>
+                <span style="align-self: flex-start; background: #A64800; color: #FFFFFF; padding: 7px 12px; border-radius: 6px; font-size: 12px; font-weight: 600">Open the workbook</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </figure>
+      <figure style="margin: 0; flex: 1 1 300px; min-width: 0; display: flex; flex-direction: column; gap: 8px">
+        <figcaption style="font-size: 13px; font-weight: 600; color: #0B6B66">After · in EA105</figcaption>
+        <div style="background: #F8F9FA; border: 1px solid #E2E5E0; border-radius: 12px; overflow: hidden; padding: 18px">
+          <div style="background: #FFFFFF; border-radius: 10px; overflow: hidden; box-shadow: 0 6px 18px rgba(0,0,0,0.07)">
+            <sc-if value="{{after.keepPA}}" hint-placeholder-val="{{ false }}">
+              <div style="background: #005F63; color: #FFFFFF; padding: 22px 20px; display: flex; justify-content: space-between; align-items: flex-end"><span style="font-size: 20px; font-weight: 700">{{previewTitle}}</span><span style="font-size: 11px; letter-spacing: 0.1em; opacity: 0.85">OC</span></div>
+            </sc-if>
+            <sc-if value="{{after.template}}" hint-placeholder-val="{{ false }}">
+              <div style="padding: 20px; {{after.bannerStyle}}"><div style="font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; opacity: 0.85">{{after.bannerLabel}}</div><div style="font-size: 20px; font-weight: 700">{{previewTitle}}</div></div>
+            </sc-if>
+            <div style="padding: 16px 18px; font-size: 13px; line-height: 1.55; font-family: {{after.font}}">
+              <div style="display: flex; flex-direction: column; gap: 8px; {{after.cardStyle}}">
+                <sc-if value="{{after.plainHeading}}" hint-placeholder-val="{{ true }}">
+                  <div style="font-weight: 700; font-size: 20px">{{previewTitle}}</div>
+                </sc-if>
+                <div style="font-weight: 700; font-size: 15px">EA113: Mental Health and EA Self Care</div>
+                <div>This three-part session explores mental health and self care for the Education Assistant.</div>
+                <div><span style="{{after.authorColor}}">The intended outcomes are to:</span></div>
+                <ul style="margin: 0; padding-left: 18px"><li>understand mental health</li><li>recognise signs of burnout</li></ul>
+                <span style="align-self: flex-start; {{after.buttonStyle}}">Open the workbook</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </figure>
+      <div style="flex: 1 1 100%; background: #FFFFFF; border: 1px solid #E2E5E0; border-radius: 14px; padding: 14px 16px; display: flex; flex-wrap: wrap; gap: 18px">
+        <div style="flex: 1 1 260px">
+          <div style="font-weight: 600; font-size: 14px; margin-bottom: 6px">Removed from this page</div>
+          <sc-for list="{{removedList}}" as="r" hint-placeholder-count="3">
+            <div style="font-size: 13px; color: #3B4652; padding: 2px 0">{{r}}</div>
+          </sc-for>
+        </div>
+        <div style="flex: 1 1 260px">
+          <div style="font-weight: 600; font-size: 14px; margin-bottom: 6px">Checked and kept</div>
+          <div style="font-size: 13px; color: #1E6B45">✓ 64 words in the same order · 1 link · 1 list · headings and language</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+<footer style="margin-top: 20px; padding: 14px 28px; background: #FFFFFF; border-top: 1px solid #E2E5E0; display: flex; align-items: center; gap: 14px; flex-wrap: wrap">
+  <button type="button" onClick="{{toArrange}}" style="border: none; background: transparent; color: #0B6B66; font-weight: 600; font-size: 15px; padding: 12px 14px; border-radius: 10px; cursor: pointer">Back</button>
+  <span style="flex: 1; color: #5B6672; font-size: 14px; min-width: 200px">You can change this for single pages from the list.</span>
+  <button type="button" onClick="{{toReview}}" style="border: none; background: #0B6B66; color: #FFFFFF; font-weight: 600; font-size: 15px; padding: 13px 22px; border-radius: 10px; cursor: pointer; min-height: 44px">Review the plan</button>
+</footer>
+</sc-if>
+
+<sc-if value="{{isReview}}" hint-placeholder-val="{{ false }}">
+<main style="flex: 1; padding: 28px; display: flex; justify-content: center">
+  <div style="width: 100%; max-width: 1080px; display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start">
+    <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 18px">
+      <div>
+        <h1 style="margin: 0 0 6px; font-size: 28px; letter-spacing: -0.01em">Exactly what will happen in EA105 Sandbox</h1>
+        <p style="margin: 0; color: #5B6672">In this order. EA-113 is only read. Nothing in EA105 is renamed, moved or deleted.</p>
+      </div>
+      <ol style="margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px">
+        <sc-for list="{{plan}}" as="pl" hint-placeholder-count="5">
+          <li style="background: #FFFFFF; border: 1px solid #E2E5E0; border-radius: 14px; padding: 14px 16px; display: flex; gap: 14px">
+            <span style="flex: none; width: 28px; height: 28px; border-radius: 50%; background: #E3F1EF; color: #074B48; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 14px">{{pl.n}}</span>
+            <div style="display: flex; flex-direction: column; gap: 4px; min-width: 0">
+              <div style="font-weight: 600">{{pl.title}}</div>
+              <div style="font-size: 14px; color: #5B6672; line-height: 1.5">{{pl.text}}</div>
+              <sc-if value="{{pl.hasCode}}" hint-placeholder-val="{{ false }}">
+                <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #3B4652; background: #F4F5F2; border-radius: 8px; padding: 8px 10px; margin-top: 4px; white-space: pre-line">{{pl.code}}</div>
+              </sc-if>
+            </div>
+          </li>
+        </sc-for>
+      </ol>
+    </div>
+    <div style="flex: 1 1 320px; min-width: 0; display: flex; flex-direction: column; gap: 16px">
+      <div style="background: #FFFFFF; border: 1px solid #E2E5E0; border-radius: 14px; padding: 16px 18px">
+        <div style="font-weight: 600; margin-bottom: 4px">Also copy from EA-113</div>
+        <div style="font-size: 13px; color: #5B6672; margin-bottom: 10px">Course-wide items that don't need arranging. Off unless you turn them on.</div>
+        <sc-for list="{{extras}}" as="x" hint-placeholder-count="5">
+          <button type="button" onClick="{{x.toggle}}" aria-pressed="{{x.on}}" style="display: flex; gap: 12px; align-items: flex-start; width: 100%; text-align: left; border: none; background: transparent; padding: 10px 0; border-top: 1px solid #EEF0EC; cursor: pointer; color: #17212B">
+            <span style="flex: none; margin-top: 2px; width: 18px; height: 18px; border-radius: 5px; display: flex; align-items: center; justify-content: center; color: #FFFFFF; font-size: 12px; {{x.boxStyle}}">{{x.tick}}</span>
+            <span style="flex: 1; display: flex; flex-direction: column; gap: 2px">
+              <span style="font-size: 14px; font-weight: 500">{{x.title}}</span>
+              <span style="font-size: 13px; color: #5B6672; line-height: 1.45">{{x.text}}</span>
+            </span>
+            <span style="font-size: 11px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; {{x.effectStyle}}">{{x.effect}}</span>
+          </button>
+        </sc-for>
+      </div>
+      <div style="background: #FFFFFF; border: 1px solid #E2E5E0; border-radius: 14px; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px">
+        <sc-if value="{{blocked}}" hint-placeholder-val="{{ false }}">
+          <div style="background: #FFF4E0; color: #7A4300; border-radius: 10px; padding: 10px 12px; font-size: 14px; line-height: 1.45">{{blockText}} <button type="button" onClick="{{toArrange}}" style="border: none; background: transparent; color: #7A4300; text-decoration: underline; font-weight: 600; cursor: pointer; padding: 0; font-size: 14px">Fix in Arrange</button></div>
+        </sc-if>
+        <button type="button" onClick="{{toggleConfirm}}" aria-pressed="{{confirmed}}" style="display: flex; gap: 10px; align-items: flex-start; border: none; background: transparent; text-align: left; cursor: pointer; padding: 0; color: #17212B; font-size: 14px; line-height: 1.45">
+          <span style="flex: none; margin-top: 1px; width: 18px; height: 18px; border-radius: 5px; display: flex; align-items: center; justify-content: center; color: #FFFFFF; font-size: 12px; {{confirmBox}}">{{confirmTick}}</span>
+          Add this to EA105 Sandbox (25707) as hidden content
+        </button>
+        <button type="button" onClick="{{create}}" disabled="{{createDisabled}}" style="border: none; border-radius: 10px; padding: 13px 22px; font-weight: 600; font-size: 15px; min-height: 44px; cursor: pointer; {{createStyle}}">Create transfer</button>
+        <button type="button" onClick="{{toStyling}}" style="border: none; background: transparent; color: #0B6B66; font-weight: 600; font-size: 14px; cursor: pointer; padding: 6px">Back</button>
+      </div>
+    </div>
+  </div>
+</main>
+</sc-if>
+
+<sc-if value="{{isRunning}}" hint-placeholder-val="{{ false }}">
+<main style="flex: 1; padding: 40px 28px; display: flex; justify-content: center">
+  <div style="width: 100%; max-width: 720px; display: flex; flex-direction: column; gap: 18px">
+    <h1 style="margin: 0; font-size: 28px; letter-spacing: -0.01em">{{runTitle}}</h1>
+    <p style="margin: 0; color: #5B6672">{{runText}}</p>
+    <div style="height: 6px; background: #E2E5E0; border-radius: 999px; overflow: hidden"><div style="height: 100%; background: #0B6B66; border-radius: 999px; {{progressStyle}}"></div></div>
+    <ol style="margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px">
+      <sc-for list="{{runSteps}}" as="r" hint-placeholder-count="8">
+        <li style="display: flex; align-items: center; gap: 12px; padding: 8px 4px; font-size: 15px; {{r.style}}">
+          <span style="flex: none; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; {{r.dotStyle}}">{{r.mark}}</span>{{r.label}}
+        </li>
+      </sc-for>
+    </ol>
+    <sc-if value="{{isDone}}" hint-placeholder-val="{{ false }}">
+      <div style="background: #FFFFFF; border: 1px solid #E2E5E0; border-radius: 14px; padding: 16px 18px; display: flex; flex-direction: column; gap: 10px">
+        <div style="font-weight: 600; color: #1E6B45">✓ 41 of 41 checks passed</div>
+        <div style="font-size: 14px; color: #3B4652; line-height: 1.5">Rubrics, points and instructions match the originals. Files open from EA105's own course files. EA-113 is unchanged.</div>
+        <div style="font-size: 14px; color: #3B4652; line-height: 1.5">To do by hand: add Brightspace Student Orientation (learning object) to Welcome.</div>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px">
+          <a href="#" style="background: #0B6B66; color: #FFFFFF; text-decoration: none; font-weight: 600; padding: 11px 18px; border-radius: 10px">Open EA105 Sandbox</a>
+          <a href="#" style="border: 1px solid #D5DAD4; color: #17212B; text-decoration: none; padding: 11px 18px; border-radius: 10px">Download report</a>
+          <button type="button" onClick="{{restart}}" style="border: none; background: transparent; color: #0B6B66; font-weight: 600; font-size: 15px; cursor: pointer; padding: 11px 8px">Start another transfer</button>
+        </div>
+      </div>
+    </sc-if>
+  </div>
+</main>
+</sc-if>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1000}}'>
+var KINDS = {
+  page: { label: 'Page', d: 'M7 3h7l5 5v13H7zM14 3v5h5M10 13h6M10 17h6' },
+  file: { label: 'File', d: 'M7 3h7l5 5v13H7zM14 3v5h5' },
+  assignment: { label: 'Assignment', d: 'M9 3h6v3H9zM7 4.5H5V21h14V4.5h-2M9 11h6M9 15h4', activity: true },
+  quiz: { label: 'Quiz', d: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17h.01', activity: true },
+  discussion: { label: 'Discussion', d: 'M4 5h16v11H9l-5 4z', activity: true },
+  survey: { label: 'Survey', d: 'M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01', activity: true },
+  tool: { label: 'Learning object', d: 'M4 7l8-4 8 4-8 4zM4 12l8 4 8-4M4 17l8 4 8-4' }
+};
+var ITEMS = {
+  i1: { title: 'Course Outline', kind: 'page', mod: 'm1', pa: false },
+  i2: { title: 'Navigating Brightspace', kind: 'page', mod: 'm1', pa: false },
+  i3: { title: 'Brightspace Student Orientation', kind: 'tool', mod: 'm1', manual: true },
+  i4: { title: 'Successful Online Learning: Overview', kind: 'page', mod: 'm2', pa: true },
+  i5: { title: 'Pre-workshop reading', kind: 'page', mod: 'm2', pa: true },
+  i6: { title: 'Session slides.pdf', kind: 'file', mod: 'm2' },
+  i7: { title: 'Successful Online Learning Assignment', kind: 'assignment', mod: 'm2', rubric: true, graded: true },
+  i8: { title: 'Mental Health and Self Care: Overview', kind: 'page', mod: 'm3', pa: true },
+  i9: { title: 'Self-care plan template.docx', kind: 'file', mod: 'm3', suggest: 'd3b' },
+  i10: { title: 'Mental Health and Self Care Learning Assignment', kind: 'assignment', mod: 'm3', rubric: true, graded: true },
+  i11: { title: "Advice for Future EA's", kind: 'discussion', mod: 'm3', graded: true, suggest: 'd3c' },
+  i12: { title: 'Observation Day Preferences Form', kind: 'survey', mod: 'm4', suggest: 'd4' },
+  i13: { title: 'Observation Days Assignment', kind: 'assignment', mod: 'm4', graded: true },
+  i14: { title: 'Attendance check-in', kind: 'quiz', mod: 'm4', graded: true, suggest: 'd4' }
+};
+var SOURCE = [
+  { id: 'm1', title: 'Welcome Module', items: ['i1', 'i2', 'i3'] },
+  { id: 'm2', title: 'Successful Online Learning', items: ['i4', 'i5', 'i6', 'i7'] },
+  { id: 'm3', title: 'Mental Health and Self Care', items: ['i8', 'i9', 'i10', 'i11'] },
+  { id: 'm4', title: 'Observation Day', items: ['i12', 'i13', 'i14'] }
+];
+var EXISTING = ['Course Resources', 'Observation Day', 'Development templates'];
+function folder(id) { return SOURCE.filter(function (g) { return g.id === id; })[0]; }
+var F = 'M3 7h6l2 2h10v10H3z', P = 'M7 3h7l5 5v13H7z', A = 'M9 3h6v3H9zM7 4.5H5V21h14V4.5h-2';
+var STARTS = [
+  { id: 'mirror', title: 'Copy EA-113 as it is', suggested: false,
+    text: "EA105 gets the same modules and folders as EA-113, with everything already in them.",
+    best: "EA-113 is already organized the way you want.",
+    preview: [[0, F, 'Welcome Module'], [1, P, 'Course Outline'], [0, F, 'Successful Online Learning'], [1, P, 'Overview'], [1, A, 'Assignment'], [0, F, 'Mental Health and Self Care']] },
+  { id: 'pattern', title: 'Give every module the same sections', suggested: true,
+    text: 'One module per EA-113 module, each split into Before Class, Class Materials and After Class. Items the app is sure about are sorted in for you.',
+    best: "EA105 should follow a standard workshop layout. EA-113's pages already say “before” and “after”.",
+    preview: [[0, F, 'Successful Online Learning'], [1, F, 'Before Class'], [2, P, 'Pre-workshop reading'], [1, F, 'Class Materials'], [1, F, 'After Class'], [2, A, 'Assignment']] },
+  { id: 'dest', title: "Fill EA105's existing modules", suggested: false,
+    text: "Keep EA105's modules as they are and add EA-113's content into the ones with matching names.",
+    best: 'EA105 is already built and just needs content.',
+    preview: [[0, F, 'Course Resources'], [1, P, '(unchanged)'], [0, F, 'Observation Day'], [1, A, '+ Observation Days Assignment'], [0, F, 'Development templates']] },
+  { id: 'empty', title: 'Build it myself', suggested: false,
+    text: 'Start with an empty outline. Add your own modules and drag in what you need.',
+    best: 'you want a completely new structure.',
+    preview: [[0, F, 'Nothing yet'], [1, P, 'drag items in']] }
+];
+var MODES = [
+  { id: 'preserve', title: 'Keep existing styling', text: 'Pages are copied exactly as they look now.' },
+  { id: 'bpa', title: 'Strip Page Automator styling', text: "Remove what Page Automator added. Keep the author's own formatting." },
+  { id: 'all', title: 'Strip all custom styling', text: 'Plain, clean pages. Content, structure and accessibility stay.' }
+];
+var STEPS = ['Connect', 'Arrange', 'Styling', 'Review', 'Create'];
+var RUN = ['Check that neither course changed since the scan', 'Prepare pages and files, clean styling', 'Copy Components: exactly the planned activities', 'Wait for Brightspace to finish copying', 'Create hidden modules and sections', 'Link activities into their modules', 'Upload files and pages, set the order', 'Read everything back and check it'];
+var SECTIONS = ['Before Class', 'Class Materials', 'After Class'];
+
+function sections(id) {
+  return SECTIONS.map(function (t, i) { return { id: id + 'abc'[i], title: t }; });
+}
+
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = this.fresh();
+  }
+
+  fresh() {
+    return {
+      step: 0, visited: 0, start: 'pattern', scanning: false,
+      sourceUrl: 'https://learn.okanagancollege.ca/d2l/home/25708',
+      targetUrl: 'https://learn.okanagancollege.ca/d2l/home/25707',
+      modules: [
+        { id: 'd1', title: 'Welcome', isNew: true, zones: [{ id: 'd1', title: '' }] },
+        { id: 'd2', title: 'Successful Online Learning', isNew: true, zones: sections('d2') },
+        { id: 'd3', title: 'Mental Health and Self Care', isNew: true, zones: sections('d3') },
+        { id: 'd4', title: 'Observation Day', isNew: true, clash: true, zones: [{ id: 'd4', title: '' }] }
+      ],
+      place: { i1: 'd1', i2: 'd1', i5: 'd2a', i4: 'd2b', i6: 'd2b', i7: 'd2c', i8: 'd3b', i10: 'd3c', i13: 'd4' },
+      seq: ['i1', 'i2', 'i5', 'i4', 'i6', 'i7', 'i8', 'i10', 'i13'],
+      skip: { i3: true },
+      selected: null, dragging: null, over: null, onlyWaiting: false, draftName: '', nextId: 5,
+      mode: 'bpa', applyLook: false, look: 'ea105', page: 'i8',
+      extras: { news: false, groups: false, glossary: false, appearance: false, navbar: false },
+      confirmed: false, run: -1,
+      history: [], future: [], toast: '',
+      editing: null, sectionDraft: '', layoutDraft: '', selectedFolder: null,
+      layouts: [{ id: 'ea105', name: 'EA105 workshop', sections: SECTIONS.slice(), home: 1 }]
+    };
+  }
+
+  // Put a module's items into new sections; items whose section is gone go to the layout's home section.
+  setSections(m, titles, home, label) {
+    var s = this.state, keep = {}, zones = [];
+    m.zones.forEach(function (z) { if (z.title) keep[z.title.toLowerCase()] = z; });
+    titles.forEach(function (t, i) {
+      var old = keep[t.toLowerCase()];
+      zones.push(old ? { id: old.id, title: t } : { id: m.id + '_' + s.nextId + '_' + i, title: t });
+    });
+    if (!zones.length) zones = [{ id: m.id, title: '' }];
+    var ids = zones.map(function (z) { return z.id; }), target = zones[Math.min(home || 0, zones.length - 1)].id;
+    var mine = m.zones.map(function (z) { return z.id; }), place = Object.assign({}, s.place);
+    Object.keys(place).forEach(function (id) { if (mine.indexOf(place[id]) >= 0 && ids.indexOf(place[id]) < 0) place[id] = target; });
+    var modules = s.modules.map(function (x) { return x.id === m.id ? Object.assign({}, x, { zones: zones }) : x; });
+    this.commit({ modules: modules, place: place, nextId: s.nextId + 1 }, label);
+  }
+
+  snapshot() {
+    var s = this.state;
+    return { modules: s.modules, place: s.place, seq: s.seq, skip: s.skip, nextId: s.nextId, label: '' };
+  }
+
+  // Every outline edit goes through here so it can be undone.
+  commit(change, label) {
+    var before = this.snapshot(); before.label = label;
+    var history = this.state.history.concat([before]).slice(-50);
+    this.setState(Object.assign({}, change, { history: history, future: [], toast: label, confirmed: false }));
+  }
+
+  undo() {
+    var h = this.state.history;
+    if (!h.length) return;
+    var prev = h[h.length - 1], now = this.snapshot(); now.label = prev.label;
+    this.setState({ modules: prev.modules, place: prev.place, seq: prev.seq, skip: prev.skip, nextId: prev.nextId,
+      history: h.slice(0, -1), future: this.state.future.concat([now]), toast: 'Undid: ' + prev.label, confirmed: false });
+  }
+
+  redo() {
+    var f = this.state.future;
+    if (!f.length) return;
+    var next = f[f.length - 1], now = this.snapshot(); now.label = next.label;
+    this.setState({ modules: next.modules, place: next.place, seq: next.seq, skip: next.skip, nextId: next.nextId,
+      future: f.slice(0, -1), history: this.state.history.concat([now]), toast: 'Redid: ' + next.label, confirmed: false });
+  }
+
+  componentWillUnmount() { clearInterval(this.timer); clearTimeout(this.scanTimer); }
+
+  go(step) { this.setState({ step: step, visited: Math.max(this.state.visited, step) }); }
+
+  placeItem(id, zone) {
+    if (ITEMS[id].manual) return;
+    var place = Object.assign({}, this.state.place); place[id] = zone;
+    var skip = Object.assign({}, this.state.skip); delete skip[id];
+    var seq = this.state.seq.filter(function (x) { return x !== id; }).concat([id]);
+    this.commit({ place: place, skip: skip, seq: seq }, 'Moved “' + ITEMS[id].title + '”');
+  }
+
+  // A whole source folder: every copyable item in it goes to one place.
+  placeFolder(fid, zone) {
+    var g = folder(fid), s = this.state;
+    var place = Object.assign({}, s.place), skip = Object.assign({}, s.skip), seq = s.seq.slice();
+    g.items.forEach(function (id) {
+      if (ITEMS[id].manual) return;
+      place[id] = zone; delete skip[id];
+      seq = seq.filter(function (x) { return x !== id; }).concat([id]);
+    });
+    this.commit({ place: place, skip: skip, seq: seq }, 'Moved the folder “' + g.title + '”');
+  }
+
+  // Dropping on the new-module area: a folder keeps its name, a single item gets a fresh module.
+  newModuleFrom(payload) {
+    var s = this.state, id = 'n' + s.nextId, isFolder = payload.indexOf('folder:') === 0;
+    var g = isFolder ? folder(payload.slice(7)) : null, title = g ? g.title : 'New module';
+    var clash = EXISTING.some(function (t) { return t.toLowerCase() === title.toLowerCase(); }) ||
+      s.modules.some(function (m) { return m.title.toLowerCase() === title.toLowerCase(); });
+    var place = Object.assign({}, s.place), skip = Object.assign({}, s.skip), seq = s.seq.slice();
+    (g ? g.items : [payload]).forEach(function (iid) {
+      if (!ITEMS[iid] || ITEMS[iid].manual) return;
+      place[iid] = id; delete skip[iid];
+      seq = seq.filter(function (x) { return x !== iid; }).concat([iid]);
+    });
+    this.commit({ modules: s.modules.concat([{ id: id, title: title, isNew: true, clash: clash, zones: [{ id: id, title: '' }] }]),
+      place: place, skip: skip, seq: seq, nextId: s.nextId + 1, selectedFolder: null },
+      g ? 'Made “' + title + '” a new module' : 'Made a new module');
+  }
+
+  copyName(text) {
+    var self = this, done = function () { self.setState({ toast: 'Copied “' + text + '”' }); };
+    try {
+      navigator.clipboard.writeText(text).then(done, function () { self.setState({ toast: 'Copying is blocked in this preview. In the app this copies “' + text + '”.' }); });
+    } catch (e) { self.setState({ toast: 'Copying is blocked in this preview. In the app this copies “' + text + '”.' }); }
+  }
+
+  takeOut(id) {
+    var place = Object.assign({}, this.state.place); delete place[id];
+    this.commit({ place: place }, 'Took out “' + ITEMS[id].title + '”');
+  }
+
+  setSkip(id, on) {
+    var skip = Object.assign({}, this.state.skip);
+    var place = Object.assign({}, this.state.place);
+    if (on) { skip[id] = true; delete place[id]; } else { delete skip[id]; }
+    this.commit({ skip: skip, place: place }, (on ? 'Skipped “' : 'Included “') + ITEMS[id].title + '”');
+  }
+
+  zones() {
+    var out = [];
+    this.state.modules.forEach(function (m) {
+      m.zones.forEach(function (z) { out.push({ id: z.id, label: m.title + (z.title ? ' › ' + z.title : ''), module: m }); });
+    });
+    return out;
+  }
+
+  updateModule(id, change, label, extra) {
+    var modules = this.state.modules.map(function (m) { return m.id === id ? Object.assign({}, m, change) : m; });
+    this.commit(Object.assign({ modules: modules }, extra || {}), label);
+  }
+
+  render_counts(zoneIds) {
+    var s = this.state, placed = Object.keys(s.place).filter(function (id) { return zoneIds[s.place[id]]; });
+    var unplaced = Object.keys(ITEMS).filter(function (id) { return !zoneIds[s.place[id]] && !s.skip[id]; });
+    var acts = placed.filter(function (id) { return KINDS[ITEMS[id].kind].activity; });
+    var rubrics = acts.filter(function (id) { return ITEMS[id].rubric; }).length;
+    var grades = acts.filter(function (id) { return ITEMS[id].graded; }).length;
+    var suggested = unplaced.filter(function (id) { return ITEMS[id].suggest && zoneIds[ITEMS[id].suggest]; });
+    return {
+      placed: placed, unplaced: unplaced, acts: acts, suggestedIds: suggested,
+      view: {
+        modules: s.modules.filter(function (m) { return m.isNew; }).length,
+        pages: placed.filter(function (id) { return ITEMS[id].kind === 'page'; }).length,
+        files: placed.filter(function (id) { return ITEMS[id].kind === 'file'; }).length,
+        activities: acts.length, unplaced: unplaced.length, suggested: suggested.length,
+        skipped: Object.keys(s.skip).length,
+        activityDetail: rubrics + ' rubric' + (rubrics === 1 ? '' : 's') + ', ' + grades + ' grade item' + (grades === 1 ? '' : 's') + ' come with them'
+      }
+    };
+  }
+
+  renderVals() {
+    var self = this, s = this.state;
+    var zoneList = this.zones();
+    var zoneIds = {}; zoneList.forEach(function (z) { zoneIds[z.id] = z; });
+    var c = this.render_counts(zoneIds);
+    var accent = '#0B6B66';
+
+    var steps = STEPS.map(function (label, i) {
+      var current = i === Math.min(s.step, 4), done = i < s.step;
+      return {
+        label: label, mark: done ? '✓' : String(i + 1), locked: i > s.visited || s.step >= 4,
+        go: function () { if (i <= s.visited && s.step < 4) self.go(i); },
+        style: current ? 'color:#17212B;font-weight:600;background:#F4F5F2' : (i > s.visited ? 'color:#8A939C;cursor:default' : 'color:#3B4652'),
+        dotStyle: done ? 'background:#E3F1EF;color:#074B48' : current ? 'background:' + accent + ';color:#FFFFFF' : 'background:#EEF0EC;color:#5B6672'
+      };
+    });
+
+    var starts = STARTS.map(function (st) {
+      var on = s.start === st.id;
+      return Object.assign({}, st, {
+        on: on,
+        pick: function () { self.setState({ start: st.id }); },
+        style: on ? 'border:2px solid ' + accent + ';padding:15px' : 'border:1px solid #E2E5E0',
+        radioStyle: on ? 'border:5px solid ' + accent + ';background:#FFFFFF' : 'border:1.5px solid #8A939C;background:#FFFFFF',
+        preview: st.preview.map(function (r) {
+          return { label: r[2], icon: r[1], style: 'padding-left:' + (r[0] * 12) + 'px;' + (st.id === 'empty' ? 'color:#8A939C;font-style:italic' : '') };
+        })
+      });
+    });
+
+    var dragStartFor = function (id) {
+      return function (e) { if (e && e.dataTransfer) { e.dataTransfer.setData('text/plain', id); e.dataTransfer.effectAllowed = 'move'; } self.setState({ dragging: id }); };
+    };
+
+    var sourceGroups = SOURCE.map(function (g) {
+      var items = g.items.filter(function (id) { return !s.onlyWaiting || c.unplaced.indexOf(id) >= 0; }).map(function (id) {
+        var it = ITEMS[id], z = zoneIds[s.place[id]], status, tone;
+        if (it.manual) { status = 'Manual'; tone = 'color:#5B6672'; }
+        else if (s.skip[id]) { status = 'Skipped'; tone = 'color:#5B6672'; }
+        else if (z) { status = '→ ' + (z.label.split(' › ')[1] || z.module.title); tone = 'color:#5B6672'; }
+        else { status = 'Needs a place'; tone = 'color:#8A4B00;background:#FFF4E0;padding:2px 8px;border-radius:999px'; }
+        var sel = s.selected === id;
+        return {
+          title: it.title, icon: KINDS[it.kind].d, status: status, statusStyle: tone,
+          rowStyle: (sel ? 'background:#E3F1EF;border-color:#B9DCD8;' : '') + (s.skip[id] || it.manual ? 'color:#8A939C;' : ''),
+          select: function () { self.setState({ selected: sel ? null : id, selectedFolder: null }); },
+          dragStart: dragStartFor(id)
+        };
+      });
+      var copyable = g.items.filter(function (id) { return !ITEMS[id].manual; }).length, on = s.selectedFolder === g.id;
+      return { title: g.title, items: items, count: copyable + ' items',
+        rowStyle: on ? 'background:#E3F1EF;border-color:#B9DCD8;color:#074B48' : '',
+        select: function () { self.setState({ selectedFolder: on ? null : g.id, selected: null }); },
+        dragStart: dragStartFor('folder:' + g.id) };
+    }).filter(function (g) { return g.items.length; });
+
+    var fsel = s.selectedFolder ? folder(s.selectedFolder) : null;
+    var sel = s.selected ? ITEMS[s.selected] : null;
+    var selected = fsel ? {
+      title: fsel.title, dest: '', canMove: true, isFolder: true, isItem: false, moveLabel: 'Move the whole folder to',
+      skipLabel: 'Skip', copyText: fsel.title,
+      note: 'Folder with ' + fsel.items.filter(function (id) { return !ITEMS[id].manual; }).length +
+        ' items. Drag it onto a section, drop it on “make it a new module”, or choose below.'
+    } : sel ? {
+      title: sel.title, dest: s.place[s.selected] || '', canMove: !sel.manual, isFolder: false, isItem: true, moveLabel: 'Move to',
+      copyText: sel.title,
+      skipLabel: s.skip[s.selected] ? 'Include' : 'Skip',
+      note: sel.manual ? "Brightspace's copy tools can't copy learning objects. Add it by hand after the transfer." :
+        KINDS[sel.kind].activity ? 'Copied with Copy Components' + (sel.rubric ? ', with its rubric' : '') + (sel.graded ? ' and grade item' : '') + ', then linked where you put it.' :
+        sel.kind === 'page' ? 'Copied as a page. Its images and files come along and links are rewritten.' : "Copied into EA105's own course files."
+    } : { title: '', dest: '', canMove: false, skipLabel: 'Skip', note: '', isFolder: false, isItem: false, moveLabel: '', copyText: '' };
+
+    var destModules = s.modules.map(function (m) {
+      var zones = m.zones.map(function (z) {
+        var items = s.seq.filter(function (id) { return s.place[id] === z.id; }).map(function (id) {
+          var it = ITEMS[id];
+          return { title: it.title, icon: KINDS[it.kind].d, isActivity: !!KINDS[it.kind].activity, kindLabel: KINDS[it.kind].label,
+                   takeOut: function () { self.takeOut(id); }, dragStart: dragStartFor(id),
+                   copy: function () { self.copyName(it.title); } };
+        });
+        var sectioned = m.zones.length > 1;
+        return {
+          title: z.title || (sectioned ? 'Directly in the module' : ''), hasTitle: !!z.title || sectioned, items: items, empty: !items.length,
+          zoneStyle: s.over === z.id && s.dragging ? 'border-color:' + accent + ';background:#E3F1EF' : '',
+          dragOver: function (e) { if (e) e.preventDefault(); },
+          dragEnter: function (e) { if (e) e.preventDefault(); if (s.over !== z.id) self.setState({ over: z.id }); },
+          drop: function (e) {
+            if (e) e.preventDefault();
+            var id = (e && e.dataTransfer && e.dataTransfer.getData('text/plain')) || self.state.dragging;
+            if (id && id.indexOf('folder:') === 0) self.placeFolder(id.slice(7), z.id);
+            else if (id && ITEMS[id]) self.placeItem(id, z.id);
+            self.setState({ dragging: null, over: null });
+          }
+        };
+      });
+      var badge = m.clash ? 'Name already in EA105' : m.isNew ? 'New · hidden' : 'Adds into existing';
+      return {
+        title: m.title, zones: zones, badge: badge,
+        copy: function () { self.copyName(m.title); },
+        badgeStyle: m.clash ? 'background:#FFF4E0;color:#7A4300' : m.isNew ? 'background:#E3F1EF;color:#074B48' : 'background:#EAF0FB;color:#2D4E8A',
+        cardStyle: m.clash ? 'border-color:#E9C27A' : '',
+        editing: s.editing === m.id,
+        editLabel: s.editing === m.id ? 'Close sections' : 'Edit sections',
+        editButtonStyle: s.editing === m.id ? 'background:#E3F1EF;border-color:#B9DCD8;color:#074B48' : 'background:#FFFFFF;color:#17212B',
+        toggleEdit: function () { self.setState({ editing: s.editing === m.id ? null : m.id, sectionDraft: '', layoutDraft: '' }); },
+        noSections: !m.zones.some(function (z) { return z.title; }),
+        sectionEdits: m.zones.filter(function (z) { return z.title; }).map(function (z) {
+          return {
+            title: z.title,
+            focus: function () { self.commit({}, 'Renamed “' + z.title + '”'); },
+            rename: function (e) {
+              var value = e.target.value;
+              self.setState({ modules: self.state.modules.map(function (x) {
+                return x.id !== m.id ? x : Object.assign({}, x, { zones: x.zones.map(function (y) { return y.id === z.id ? { id: y.id, title: value } : y; }) });
+              }) });
+            },
+            remove: function () {
+              var zones = m.zones.filter(function (y) { return y.id !== z.id; }), place = Object.assign({}, s.place);
+              if (!zones.length) zones = [{ id: m.id, title: '' }];
+              Object.keys(place).forEach(function (id) { if (place[id] === z.id) delete place[id]; });
+              self.commit({ place: place, modules: s.modules.map(function (x) { return x.id === m.id ? Object.assign({}, x, { zones: zones }) : x; }) },
+                'Removed the section “' + z.title + '”');
+            }
+          };
+        }),
+        addSection: function () {
+          var title = (s.sectionDraft || '').trim();
+          if (!title) return;
+          var titles = m.zones.filter(function (z) { return z.title; }).map(function (z) { return z.title; });
+          if (titles.some(function (t) { return t.toLowerCase() === title.toLowerCase(); })) { self.setState({ toast: '“' + title + '” is already a section here' }); return; }
+          self.setState({ sectionDraft: '' });
+          self.setSections(m, titles.concat([title]), 0, 'Added the section “' + title + '” to “' + m.title + '”');
+        },
+        layoutButtons: s.layouts.map(function (l) {
+          return { name: l.name, detail: l.sections.join(' · '),
+            apply: function () { self.setSections(m, l.sections, l.home, 'Applied “' + l.name + '” to “' + m.title + '”'); } };
+        }),
+        cantSave: !(s.layoutDraft || '').trim() || !m.zones.some(function (z) { return z.title; }),
+        saveStyle: (s.layoutDraft || '').trim() && m.zones.some(function (z) { return z.title; }) ? 'color:#17212B' : 'color:#B5BCB4;cursor:default',
+        saveLayout: function () {
+          var name = (s.layoutDraft || '').trim(), titles = m.zones.filter(function (z) { return z.title; }).map(function (z) { return z.title; });
+          if (!name || !titles.length) return;
+          var layouts = s.layouts.filter(function (l) { return l.name.toLowerCase() !== name.toLowerCase(); }).concat([{ id: 'l' + s.nextId, name: name, sections: titles, home: 0 }]);
+          self.setState({ layouts: layouts, layoutDraft: '', nextId: s.nextId + 1, toast: 'Saved the layout “' + name + '”. Use it on any module.' });
+        },
+        canRemove: true,
+        remove: function () {
+          var ids = m.zones.map(function (z) { return z.id; }), place = Object.assign({}, s.place);
+          Object.keys(place).forEach(function (id) { if (ids.indexOf(place[id]) >= 0) delete place[id]; });
+          self.commit({ modules: s.modules.filter(function (x) { return x.id !== m.id; }), place: place }, 'Removed “' + m.title + '”');
+        }
+      };
+    });
+
+    var warnings = [];
+    var warn = 'background:#FFF4E0;color:#7A4300', info = 'background:#EAF0FB;color:#2D4E8A', calm = 'background:#FFFFFF;border:1px solid #E2E5E0;color:#17212B';
+    if (c.unplaced.length) warnings.push({ title: c.unplaced.length + ' item' + (c.unplaced.length === 1 ? ' still needs' : 's still need') + ' a place',
+      body: 'Drag them in or skip them. ' + (c.suggestedIds.length ? c.suggestedIds.length + ' have a suggested spot.' : ''),
+      style: warn, hasAction: c.suggestedIds.length > 0, actionLabel: 'Accept suggestions', action: function () { self.accept(c.suggestedIds); } });
+    s.modules.forEach(function (m) {
+      if (m.clash) warnings.push({ title: '“' + m.title + '” is already in EA105', style: warn,
+        body: 'Creating it would leave two modules with the same name. You can add these items into the existing module instead.',
+        hasAction: true, actionLabel: 'Add into the existing one', action: function () { self.updateModule(m.id, { clash: false, isNew: false }, 'Added into the existing “' + m.title + '”'); } });
+    });
+    if (zoneIds[s.place.i13] && !zoneIds[s.place.i12]) warnings.push({ title: 'A release condition will be dropped', style: warn,
+      body: 'Observation Days Assignment only opens after the Preferences Form is submitted. The form isn\'t in this transfer, so the assignment would open straight away.',
+      hasAction: true, actionLabel: 'Include the form too', action: function () { self.placeItem('i12', s.place.i13); } });
+    if (s.skip.i3) warnings.push({ title: 'One item has to be added by hand', style: info,
+      body: 'Brightspace Student Orientation is a learning object. Brightspace\'s copy tools don\'t include those, so the report reminds you to add it.', hasAction: false });
+    if (c.acts.length) warnings.push({ title: c.acts.length + ' activities go through Copy Components', style: calm,
+      body: 'They keep their settings, rubrics and grade items. The app ticks exactly these items and checks Brightspace\'s confirmation before it copies anything.', hasAction: false });
+    warnings = warnings.map(function (w) { return Object.assign({ buttonStyle: '', action: function () {}, actionLabel: '' }, w); });
+    var blocking = c.unplaced.length + s.modules.filter(function (m) { return m.clash; }).length;
+
+    var modes = MODES.map(function (md) {
+      return Object.assign({}, md, { pick: function () { self.setState({ mode: md.id, applyLook: md.id === 'preserve' ? false : s.applyLook }); },
+        style: s.mode === md.id ? 'border:2px solid ' + accent + ';padding:15px' : 'border:1px solid #E2E5E0' });
+    });
+    var pageIds = c.placed.filter(function (id) { return ITEMS[id].kind === 'page'; });
+    var describe = function (id) {
+      var it = ITEMS[id];
+      if (s.mode === 'preserve') return 'Unchanged';
+      if (s.mode === 'bpa') return it.pa ? 'Cleaned · style block, font link, 4 wrappers' : 'Nothing to remove';
+      return it.pa ? 'Cleaned · style block, 4 wrappers, 5 inline styles' : 'Cleaned · 2 stylesheets, 9 classes';
+    };
+    var pages = pageIds.map(function (id) {
+      var status = describe(id);
+      return { title: ITEMS[id].title, status: status + (s.applyLook && s.mode !== 'preserve' ? ' · new look' : ''),
+        statusStyle: status.indexOf('Cleaned') === 0 ? 'color:#0B6B66' : 'color:#5B6672',
+        style: s.page === id ? 'background:#E3F1EF' : '', pick: function () { self.setState({ page: id }); } };
+    });
+    var previewId = pageIds.indexOf(s.page) >= 0 ? s.page : pageIds[0];
+    var previewTitle = previewId ? ITEMS[previewId].title.split(':')[0] : 'Mental Health';
+    var look = { ea105: { label: 'EA105 · Module', style: 'background:#1F2A37;color:#FFFFFF' },
+                 calm: { label: 'Okanagan College', style: 'background:#005F63;color:#FFFFFF' },
+                 classic: { label: 'Workshop', style: 'background:#F3E9DC;color:#3D2A14;border-bottom:3px solid #FF8204' } }[s.look];
+    var themed = s.applyLook && s.mode !== 'preserve';
+    var after = {
+      keepPA: s.mode === 'preserve', template: themed, bannerLabel: look.label, bannerStyle: look.style,
+      plainHeading: s.mode !== 'preserve' && !themed,
+      font: s.mode === 'preserve' ? "'Hanken Grotesk', sans-serif" : "Georgia, 'Times New Roman', serif",
+      cardStyle: s.mode === 'preserve' ? 'border:1px solid #E8EEF0;border-radius:10px;padding:14px' : '',
+      authorColor: s.mode === 'all' ? '' : 'color:#FF3366',
+      buttonStyle: s.mode === 'preserve' ? 'background:#A64800;color:#FFFFFF;padding:7px 12px;border-radius:6px;font-size:12px;font-weight:600' : 'color:#1D4ED8;text-decoration:underline'
+    };
+    var removedList = s.mode === 'preserve' ? ['Nothing. The page is copied as it is.'] :
+      s.mode === 'bpa' ? ['Page Automator style block and Poppins font link', 'Wrappers: main-container, hero, content-body, action-card', 'Banner label “OC” and the button look on one link', 'Kept: the author\'s pink text colour'] :
+      ['Page Automator style block and font link', '4 layout wrappers and 6 classes', '5 inline styles, including the author\'s pink text', 'The button look on one link (the link stays)'];
+    if (themed) removedList = removedList.concat(['Then placed inside the “' + look.label + '” look']);
+
+    var newMods = s.modules.filter(function (m) { return m.isNew; }), into = s.modules.filter(function (m) { return !m.isNew; });
+    var actTitles = c.acts.map(function (id) { return ITEMS[id]; });
+    var plan = [
+      { title: 'Check both courses', text: 'If either course changed since the scan, nothing is written and you\'re asked to scan again.' },
+      { title: 'Create ' + newMods.length + ' hidden modules', text: newMods.map(function (m) { return m.title; }).join(', ') + (into.length ? '. Items are added into ' + into.map(function (m) { return m.title; }).join(', ') + ' after what\'s already there.' : '.') },
+      { title: 'Run Copy Components once, for exactly ' + actTitles.length + ' activities', text: 'Content isn\'t selected and dates aren\'t shifted. If Brightspace\'s confirmation lists anything else, nothing is copied.',
+        code: actTitles.map(function (it) { return KINDS[it.kind].label + ': ' + it.title + (it.rubric ? '  + rubric' : '') + (it.graded ? '  + grade item' : ''); }).join('\n') },
+      { title: 'Link each activity where you placed it', text: 'With Content\'s own Add Existing, so they stay real Brightspace activities.' },
+      { title: 'Copy ' + c.view.pages + ' pages and ' + c.view.files + ' files', text: 'Files go into EA105\'s own course files; every link and image points there. Pages: ' + MODES.filter(function (m) { return m.id === s.mode; })[0].title.toLowerCase() + (themed ? ', then the ' + look.label + ' look.' : '.') },
+      { title: 'Read everything back', text: 'Order, rubrics, points, instructions and every file are checked. You get a report, and the plan can be resumed if anything stops.' }
+    ].map(function (p, i) { return Object.assign({ n: i + 1, hasCode: !!p.code, code: '' }, p); });
+
+    var EXTRAS = [
+      { key: 'news', title: 'Announcements (5)', text: 'Added as hidden announcements.', effect: 'Adds' },
+      { key: 'groups', title: 'Groups (2 categories)', text: 'Group categories and groups, without students.', effect: 'Adds' },
+      { key: 'glossary', title: 'Glossary (12 terms)', text: 'Merged into EA105\'s glossary.', effect: 'Adds' },
+      { key: 'appearance', title: 'Course appearance', text: 'EA-113\'s banner and colours replace EA105\'s.', effect: 'Replaces' },
+      { key: 'navbar', title: 'Navigation bar', text: 'EA105\'s navbar would be replaced by EA-113\'s.', effect: 'Replaces' }
+    ];
+    var extras = EXTRAS.map(function (x) {
+      var on = !!s.extras[x.key];
+      return Object.assign({}, x, { on: on, tick: on ? '✓' : '',
+        boxStyle: on ? 'background:' + accent + ';border:1px solid ' + accent : 'background:#FFFFFF;border:1.5px solid #8A939C',
+        effectStyle: x.effect === 'Replaces' ? 'background:#FFF4E0;color:#7A4300' : 'background:#F4F5F2;color:#5B6672',
+        toggle: function () { var e = Object.assign({}, s.extras); e[x.key] = !on; self.setState({ extras: e }); } });
+    });
+
+    var running = s.step >= 4, done = s.run >= RUN.length;
+    var runSteps = RUN.map(function (label, i) {
+      var st = i < s.run ? 'done' : i === s.run ? 'now' : 'todo';
+      return { label: label, mark: st === 'done' ? '✓' : st === 'now' ? '•' : '',
+        style: st === 'todo' ? 'color:#8A939C' : st === 'now' ? 'font-weight:600' : '',
+        dotStyle: st === 'done' ? 'background:#E3F1EF;color:#074B48' : st === 'now' ? 'background:' + accent + ';color:#FFFFFF' : 'border:1.5px solid #D5DAD4' };
+    });
+
+    return {
+      steps: steps, starts: starts,
+      isConnect: s.step === 0, isArrange: s.step === 1, isStyling: s.step === 2, isReview: s.step === 3, isRunning: running, isDone: done,
+      sourceUrl: s.sourceUrl, targetUrl: s.targetUrl,
+      onSource: function (e) { self.setState({ sourceUrl: e.target.value }); },
+      onTarget: function (e) { self.setState({ targetUrl: e.target.value }); },
+      scanLabel: s.scanning ? 'Scanning…' : 'Scan both courses',
+      scanText: s.scanning ? 'Reading 27 modules and 111 items from EA-113…' : 'Read only. Takes about a minute for a full course.',
+      scan: function () {
+        if (s.scanning) return;
+        self.setState({ scanning: true });
+        self.scanTimer = setTimeout(function () { self.setState({ scanning: false }); self.go(1); }, 1100);
+      },
+      onlyWaiting: s.onlyWaiting, filterStyle: s.onlyWaiting ? 'background:#E3F1EF;border-color:#B9DCD8;color:#074B48' : 'background:#FFFFFF;color:#3B4652',
+      toggleFilter: function () { self.setState({ onlyWaiting: !s.onlyWaiting }); },
+      noneWaiting: s.onlyWaiting && !c.unplaced.length,
+      sourceGroups: sourceGroups, hasSelection: !!(sel || fsel), selected: selected,
+      zoneOptions: zoneList.map(function (z) { return { id: z.id, label: z.label }; }),
+      moveSelected: function (e) {
+        if (!e.target.value) return;
+        if (s.selectedFolder) self.placeFolder(s.selectedFolder, e.target.value); else self.placeItem(s.selected, e.target.value);
+      },
+      folderToModule: function () { if (s.selectedFolder) self.newModuleFrom('folder:' + s.selectedFolder); },
+      copySelected: function () { if (selected.copyText) self.copyName(selected.copyText); },
+      newZone: {
+        style: s.over === '__new' && s.dragging ? 'border-color:' + accent + ';background:#E3F1EF;color:#074B48' : '',
+        dragOver: function (e) { if (e) e.preventDefault(); },
+        dragEnter: function (e) { if (e) e.preventDefault(); if (s.over !== '__new') self.setState({ over: '__new' }); },
+        drop: function (e) {
+          if (e) e.preventDefault();
+          var id = (e && e.dataTransfer && e.dataTransfer.getData('text/plain')) || self.state.dragging;
+          if (id) self.newModuleFrom(id);
+          self.setState({ dragging: null, over: null });
+        }
+      },
+      toggleSkip: function () { self.setSkip(s.selected, !s.skip[s.selected]); },
+      dragEnd: function () { self.setState({ dragging: null, over: null }); },
+      destModules: destModules, draftName: s.draftName,
+      sectionDraft: s.sectionDraft, layoutDraft: s.layoutDraft,
+      onSectionDraft: function (e) { self.setState({ sectionDraft: e.target.value }); },
+      onLayoutDraft: function (e) { self.setState({ layoutDraft: e.target.value }); },
+      onDraft: function (e) { self.setState({ draftName: e.target.value }); },
+      addModule: function () {
+        var title = (s.draftName || '').trim() || 'New module', id = 'n' + s.nextId;
+        self.commit({ modules: s.modules.concat([{ id: id, title: title, isNew: true, zones: [{ id: id, title: '' }] }]), nextId: s.nextId + 1, draftName: '' }, 'Added “' + title + '”');
+      },
+      canUndo: s.history.length > 0, canRedo: s.future.length > 0,
+      cantUndo: !s.history.length, cantRedo: !s.future.length,
+      undoTitle: s.history.length ? 'Undo: ' + s.history[s.history.length - 1].label + ' (Ctrl+Z)' : 'Nothing to undo',
+      redoTitle: s.future.length ? 'Redo: ' + s.future[s.future.length - 1].label + ' (Ctrl+Y)' : 'Nothing to redo',
+      undoStyle: s.history.length ? 'color:#17212B;cursor:pointer' : 'color:#B5BCB4;cursor:default',
+      redoStyle: s.future.length ? 'color:#17212B;cursor:pointer' : 'color:#B5BCB4;cursor:default',
+      undo: function () { self.undo(); }, redo: function () { self.redo(); },
+      hasToast: !!s.toast && s.step === 1, toast: s.toast,
+      dismissToast: function () { self.setState({ toast: '' }); },
+      onKey: function (e) {
+        var tag = (e.target && e.target.tagName) || '';
+        if (s.step !== 1 || !(e.ctrlKey || e.metaKey) || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+        var key = (e.key || '').toLowerCase();
+        if (key === 'z' && !e.shiftKey) { e.preventDefault(); self.undo(); }
+        else if (key === 'y' || (key === 'z' && e.shiftKey)) { e.preventDefault(); self.redo(); }
+      },
+      counts: c.view, warnings: warnings, warningCount: warnings.length,
+      hasSuggestions: c.suggestedIds.length > 0,
+      acceptSuggestions: function () { self.accept(c.suggestedIds); },
+      arrangeStatus: blocking ? blocking + ' thing' + (blocking === 1 ? '' : 's') + ' to sort out before creating · saved automatically' : 'Everything has a place · saved automatically',
+      toStyling: function () { self.go(2); }, toArrange: function () { self.go(1); }, toReview: function () { self.go(3); },
+      modes: modes, applyLook: s.applyLook, lookDisabled: s.mode === 'preserve', look: s.look,
+      lookTrack: themed ? 'background:' + accent : 'background:#C9CFC8', lookKnob: themed ? 'left:19px' : 'left:3px',
+      toggleLook: function () { if (s.mode !== 'preserve') self.setState({ applyLook: !s.applyLook }); },
+      pickLook: function (e) { self.setState({ look: e.target.value, applyLook: s.mode !== 'preserve' }); },
+      pages: pages, pageCountLabel: pages.length + ' pages · ' + pages.filter(function (p) { return p.status.indexOf('Cleaned') === 0; }).length + ' cleaned',
+      previewTitle: previewTitle, after: after, removedList: removedList,
+      plan: plan, extras: extras,
+      blocked: blocking > 0, blockText: blocking + ' thing' + (blocking === 1 ? '' : 's') + ' to sort out first.',
+      confirmed: s.confirmed, confirmTick: s.confirmed ? '✓' : '',
+      confirmBox: s.confirmed ? 'background:' + accent + ';border:1px solid ' + accent : 'background:#FFFFFF;border:1.5px solid #8A939C',
+      toggleConfirm: function () { self.setState({ confirmed: !s.confirmed }); },
+      createDisabled: blocking > 0 || !s.confirmed,
+      createStyle: blocking > 0 || !s.confirmed ? 'background:#E2E5E0;color:#5B6672;cursor:not-allowed' : 'background:' + accent + ';color:#FFFFFF',
+      create: function () {
+        if (blocking > 0 || !s.confirmed) return;
+        self.setState({ step: 4, visited: 4, run: 0 });
+        clearInterval(self.timer);
+        self.timer = setInterval(function () {
+          var next = self.state.run + 1;
+          self.setState({ run: next });
+          if (next >= RUN.length) clearInterval(self.timer);
+        }, 750);
+      },
+      runSteps: runSteps,
+      runTitle: done ? 'Transfer created' : 'Creating the transfer…',
+      runText: done ? 'Everything new is hidden in EA105 Sandbox until you publish it.' : 'You can stop after the current step and resume later; nothing is ever duplicated.',
+      progressStyle: 'width:' + Math.round(100 * Math.max(0, Math.min(s.run, RUN.length)) / RUN.length) + '%',
+      restart: function () { clearInterval(self.timer); self.setState(self.fresh()); }
+    };
+  }
+
+  accept(ids) {
+    var place = Object.assign({}, this.state.place), seq = this.state.seq.slice();
+    ids.forEach(function (id) { place[id] = ITEMS[id].suggest; seq = seq.filter(function (x) { return x !== id; }).concat([id]); });
+    this.commit({ place: place, seq: seq }, 'Accepted ' + ids.length + ' suggestion' + (ids.length === 1 ? '' : 's'));
+  }
+}
+</script>
+</body>
+</html>

@@ -52,7 +52,7 @@ def course_id_from_url(url: str) -> str:
     parsed = urlparse(url.strip())
     if parsed.scheme != "https" or parsed.hostname != HOST or parsed.port not in (None, 443):
         raise ValueError(f"Enter a Brightspace course or section URL on {HOST}.")
-    match = re.search(r"/d2l/le/(?:lessons|content)/(\d+)(?:/|$)", parsed.path)
+    match = re.search(r"/d2l/(?:home|le/(?:lessons|content))/(\d+)(?:/|$)", parsed.path)
     course_id = match.group(1) if match else parse_qs(parsed.query).get("ou", [""])[0]
     if not re.fullmatch(r"[0-9]+", course_id):
         raise ValueError("The URL needs a Brightspace course ID.")

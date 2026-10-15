@@ -10,10 +10,12 @@ matching Brightspace modules.
 import asyncio
 import re
 import threading
+from contextlib import ExitStack
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
 from content_checker import ContentChecker, _extract_course_id
+from h5p_progress import H5PRun, clean_url
 
 
 async def _verify_topic_in_module_strict(bs_page, course_id, module_id, expected_name) -> bool:
@@ -26,24 +28,28 @@ async def _verify_topic_in_module_strict(bs_page, course_id, module_id, expected
         topics = await bs_page.evaluate(
             """async ([courseId, moduleId]) => {
                 const resp = await fetch(
-                    `/d2l/api/le/1.0/${courseId}/content/modules/${moduleId}/structure/`,
-                    { credentials: 'include' }
+                    `/d2l/api/le/1.0/${courseId}/content/modules/${moduleId}/structure/?_=${Date.now()}`,
+                    { credentials: 'include', cache: 'no-store' }
                 );
-                if (!resp.ok) return null;
+                if (!resp.ok) throw Error(`Cannot verify H5P pages: HTTP ${resp.status}`);
                 return await resp.json();
             }""",
             [str(course_id), str(module_id)],
         )
-        if not topics:
-            return False
+        if not isinstance(topics, list):
+            raise RuntimeError('The destination topic list could not be read.')
         name_norm = re.sub(r'[^\w]', '', expected_name).lower()
         for topic in topics:
             title_norm = re.sub(r'[^\w]', '', topic.get('Title', '')).lower()
             if title_norm == name_norm and ContentChecker._is_h5p_topic(topic):
                 return True
+            if title_norm == name_norm and str(topic.get('Url', '')).split('?')[0].lower().endswith(('.html', '.htm')):
+                from unit_overview import BrowserContentAPI
+                html = await BrowserContentAPI(bs_page, str(course_id), str(module_id)).get_topic_html(topic['Id'])
+                if ContentChecker._html_contains_h5p_embed(html): return True
         return False
-    except Exception:
-        return False
+    except Exception as exc:
+        raise RuntimeError(f"Cannot check whether {expected_name} is already saved. No new page will be created: {exc}") from exc
 
 
 async def run_h5p_only(
@@ -67,6 +73,8 @@ async def run_h5p_only(
     moodle_username: str = "",
     moodle_password: str = "",
     stop_flag: Optional[list] = None,
+    resume_id: Optional[str] = None,
+    progress_directory=None,
 ) -> None:
     from browser import launch_browser, wait_for_login
 
@@ -112,9 +120,22 @@ async def run_h5p_only(
         log(f"✗ Could not extract course ID from: {bs_url}", "error")
         return
 
+    progress = H5PRun.load(resume_id, progress_directory) if resume_id else H5PRun.create(
+        bs_url, moodle_url, course_id, h5p_grade_all, progress_directory)
+    if clean_url(bs_url) != progress.data['bs_url'] or clean_url(moodle_url) != progress.data['moodle_url'] or str(course_id) != progress.data['course_id']:
+        raise ValueError('The saved H5P run belongs to a different course pair.')
+    checker._h5p.progress = progress
+    checker._h5p.grade_all = progress.data['grade_all']
+
     check_stopped()
-    p, browser, context, page = await launch_browser()
+    from transfer_runner import PlanLock
+    resources = ExitStack()
+    resources.enter_context(PlanLock(progress.path))
+    p = browser = None
     try:
+        progress.data['status'] = 'running'
+        progress.save()
+        p, browser, context, page = await launch_browser()
         check_stopped()
         await wait_for_login(
             page, context,
@@ -128,18 +149,35 @@ async def run_h5p_only(
         if not bs_flat:
             return
 
+        try:
+            details = await page.evaluate('''async (id) => {
+                const r = await fetch(`/d2l/api/lp/1.49/courses/${id}`);
+                if (!r.ok) return null; return await r.json();
+            }''', str(course_id))
+            if isinstance(details, dict) and details.get('Name'):
+                progress.data['course_name'] = details['Name']
+                progress.save()
+        except Exception:
+            pass  # Course ID still identifies the saved run if its name is unavailable.
+
         log("─" * 52, "dim")
         check_stopped()
-        moodle_items = await checker._scrape_moodle(context)
+        if resume_id and progress.data['moodle_items']:
+            moodle_items = progress.data['moodle_items']
+            log('Resuming the saved activity list — Moodle does not need to be scraped again.', 'info')
+        else:
+            moodle_items = await checker._scrape_moodle(context)
+            if moodle_items: progress.capture_moodle(moodle_items)
         if not moodle_items:
             return
 
         check_stopped()
         parsed = urlparse(bs_url)
         bs_base = f"{parsed.scheme}://{parsed.netloc}"
-        bs_flat = await checker._ensure_h5p_destination_units(
-            context, page, bs_base, course_id, moodle_items, bs_flat
-        )
+        if not progress.data['activities']:
+            bs_flat = await checker._ensure_h5p_destination_units(
+                context, page, bs_base, course_id, moodle_items, bs_flat
+            )
         if bs_flat is None:
             return
         check_stopped()
@@ -152,10 +190,16 @@ async def run_h5p_only(
         inserted = checker._summary.get("h5p_inserted", [])
         failed = checker._summary.get("h5p_failed", [])
         already = checker._summary.get("h5p_already_present", [])
+        rows = progress.data['activities']
+        remaining = progress.counts()[2]
+        empty_course = bool(progress.data['moodle_items']) and not any(row['type'] == 'EXTERNAL' for row in progress.data['moodle_items'])
+        completed = (bool(rows) or empty_course) and not remaining and not failed
+        progress.data['status'] = 'complete' if completed else 'paused'
+        progress.save()
         log(
-            f"✓ H5P done: {len(inserted)} newly inserted, "
+            f"{'✓ H5P done' if completed else '⚠ H5P incomplete'}: {len(inserted)} newly inserted, "
             f"{len(already)} already present, {len(failed)} failed",
-            "success" if not failed else "warning",
+            "success" if completed else "warning",
         )
         log(
             f"  Gradebook: {len(checker._summary.get('h5p_graded', []))} graded, "
@@ -164,17 +208,23 @@ async def run_h5p_only(
             "info",
         )
 
-        if on_complete:
+        log(f"Saved course progress: {progress.label()}", 'info')
+        if on_complete and completed:
             on_complete()
-        while browser.is_connected():
-            await asyncio.sleep(0.5)
 
     except Exception as e:
         log(f"✗ Unexpected error: {e}", "error")
         raise
     finally:
         try:
-            if browser.is_connected():
-                await browser.close()
+            if progress.data['status'] != 'complete':
+                progress.data['status'] = 'paused'
+                progress.save()
         finally:
-            await p.stop()
+            try:
+                if browser and browser.is_connected(): await browser.close()
+            finally:
+                try:
+                    if p: await p.stop()
+                finally:
+                    resources.close()

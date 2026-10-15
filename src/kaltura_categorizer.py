@@ -1,8 +1,9 @@
 import asyncio
+import html
 import re
 import os
 import sys
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 from playwright.async_api import async_playwright
 
@@ -14,6 +15,36 @@ from js_helpers import _norm
 KMC_URL = "https://kmc.cap2.ovp.kaltura.com/index.php/kmcng/content/entries/list"
 KMC_SESSION_FILE = str(USERDATA_DIR / "kmc_session.json")
 MOODLE_SESSION_FILE = str(USERDATA_DIR / "moodle_session.json")
+
+
+def _whole_moodle_course_url(url):
+    parts = urlparse(url.strip())
+    course_id = parse_qs(parts.query).get('id', [''])[0]
+    if parts.path not in ('/course/view.php', '/enrol/index.php') or not course_id.isdigit():
+        raise ValueError('Use the whole Moodle course URL: /course/view.php?id=… (not a section or activity URL).')
+    return urlunparse(parts._replace(path='/course/view.php', query=urlencode({'id': course_id}), fragment=''))
+
+
+def _youtube_watch_url(url):
+    """Identify the provider without mistaking a Moodle activity label for it."""
+    if not isinstance(url, str): return None
+    try:
+        parsed = urlparse(html.unescape(url))
+    except ValueError:
+        return None
+    host = (parsed.hostname or '').lower()
+    path = parsed.path.strip('/').split('/')
+    video_id = ''
+    if host in ('youtu.be', 'www.youtu.be'):
+        video_id = path[0]
+    elif host in ('youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtube-nocookie.com', 'www.youtube-nocookie.com'):
+        if path[0] == 'watch':
+            video_id = parse_qs(parsed.query).get('v', [''])[0]
+        elif len(path) > 1 and path[0] in ('embed', 'shorts', 'live'):
+            video_id = path[1]
+    if re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
+        return 'https://www.youtube.com/watch?v=' + video_id
+    return None
 
 # Moodle renders section 0 ("General") with a heading element that is present but
 # blank (`data-sectionname=" "`). Testing the element alone leaves sectionName as
@@ -49,6 +80,71 @@ SECTION_NAMES_JS = r"""
 
 
 class KalturaCategorizer:
+
+    async def _youtube_sources(self, page):
+        sources = await page.evaluate('''() => {
+            const assignment = location.pathname.includes('/mod/kalvidassign/');
+            const root = assignment ? document.querySelector('#intro,.activity-description')
+                : document.querySelector('#region-main,main') || document.body;
+            if (!root) return [];
+            const urls = [...root.querySelectorAll('iframe[src],a[href],video[src],source[src]')]
+                .map(e => e.getAttribute('src') || e.getAttribute('href'));
+            // Moodle's lazy VideoJS player may not have created its iframe yet.
+            for (const el of root.querySelectorAll('[data-setup-lazy],[data-setup]')) {
+                for (const attr of ['data-setup-lazy','data-setup']) {
+                    try {
+                        const setup = JSON.parse(el.getAttribute(attr) || '{}');
+                        for (const source of setup.sources || []) if (source.src) urls.push(source.src);
+                    } catch (_) {}
+                }
+            }
+            return urls;
+        }''')
+        return list(dict.fromkeys(url for source in sources if (url := _youtube_watch_url(source))))
+
+    async def _load_full_course_listing(self, page, course_url, log):
+        """Moodle's per-section overview omits activity links until editing is on.
+
+        Match Checker's authoring view without changing any course content.
+        Never treat a list of section summaries as a complete empty scan.
+        """
+        summaries = page.locator('li.section.section-summary')
+        if await summaries.count():
+            log('Moodle is showing section summaries. Loading the full course activity list…', 'info')
+            toggle = page.locator(
+                '#user-editing-switch, input[name="setmode"][type="checkbox"], '
+                '.editmode-switch-form input[type="checkbox"]'
+            ).first
+            if not await toggle.count():
+                raise RuntimeError('Moodle is showing section summaries, but Edit mode is unavailable. '
+                                   'The Kaltura scan is incomplete; no videos have been ruled out.')
+            # The switch submits a form. Wait for its replacement document,
+            # rather than extracting links from the old course overview.
+            try:
+                if not await toggle.is_checked():
+                    # check() also tries to verify the old input after submit;
+                    # the replacement document may have already removed it.
+                    await toggle.click(timeout=8000)
+                await page.wait_for_function("""() =>
+                    document.body.classList.contains('editing')
+                    && !document.querySelector('li.section.section-summary')
+                """, timeout=20000)
+            except Exception as exc:
+                raise RuntimeError('Moodle did not load the complete course activity list. '
+                                   'The Kaltura scan is incomplete; try again after enabling Edit mode.') from exc
+            # Reopen the whole-course URL after the toggle's navigation, just
+            # as Checker does before reading all modules and nested sections.
+            await page.goto(course_url, wait_until='domcontentloaded', timeout=30000)
+            await page.wait_for_timeout(1000)
+        if await summaries.count():
+            raise RuntimeError('Moodle still shows section summaries. The Kaltura scan is incomplete.')
+        coverage = await page.evaluate("""() => ({
+            sections: document.querySelectorAll('li.section').length,
+            activities: document.querySelectorAll('li.section li.activity').length
+        })""")
+        if not coverage['sections']:
+            raise RuntimeError('No Moodle course sections loaded. The Kaltura scan is incomplete.')
+        log(f"Course coverage: {coverage['sections']} sections, {coverage['activities']} activity rows.", 'info')
 
     async def scan_moodle_course(
         self,
@@ -109,11 +205,10 @@ class KalturaCategorizer:
                 context = await browser.new_context(storage_state=storage)
                 page = await context.new_page()
 
-                # Normalise common Moodle URL variants (e.g. enrol/index.php) to course/view.php
-                _id_match = re.search(r"[?&]id=(\d+)", moodle_course_url)
-                if _id_match and "course/view.php" not in moodle_course_url:
-                    _base = moodle_course_url.split("/enrol")[0].split("/course")[0]
-                    moodle_course_url = f"{_base}/course/view.php?id={_id_match.group(1)}"
+                # A selected-section query is not a whole-course inventory.
+                normalized_url = _whole_moodle_course_url(moodle_course_url)
+                if normalized_url != moodle_course_url:
+                    moodle_course_url = normalized_url
                     log(f"Using Moodle course page: {moodle_course_url}")
 
                 log(f"Navigating to {moodle_course_url}")
@@ -153,12 +248,13 @@ class KalturaCategorizer:
                             moodle_password=moodle_password,
                             _retry_stale_session=False,
                         )
-                    log(f"Could not open Moodle course content: {stale_reason}. Use 'Login to Moodle' first.", "error")
-                    return []
+                    raise RuntimeError(f"Could not open Moodle course content: {stale_reason}. Use 'Login to Moodle' first.")
 
                 if "mymoodle.okanagan.bc.ca" not in page.url:
                     log(f"Not on Moodle — got redirected to {page.url[:80]} — session may have expired. Use 'Login to Moodle' first.", "error")
-                    return []
+                    raise RuntimeError('Moodle course content is unavailable. The Kaltura scan is incomplete.')
+
+                await self._load_full_course_listing(page, moodle_course_url, log)
 
                 # Kaltura players can be embedded directly in labels/section summaries on
                 # the course page, without a kalvidres/page/book activity link.
@@ -268,8 +364,12 @@ class KalturaCategorizer:
                     document.querySelectorAll(SECTION_SEL).forEach(section => {
                         const sectionName = sectionNameOf(section);
                         section.querySelectorAll(
-                            'a[href*="mod/kalvidres/view.php"], a[href*="mod/page/view.php"], a[href*="mod/book/view.php"]'
+                            'a[href*="mod/kalvidres/view.php"], a[href*="mod/kalvidassign/view.php"], '
+                            + 'a[href*="mod/page/view.php"], a[href*="mod/book/view.php"]'
                         ).forEach(a => {
+                            // Subsections belong to their own Brightspace unit,
+                            // not the first parent visited by this loop.
+                            if (a.closest(SECTION_SEL) !== section) return;
                             if (!map[a.href]) map[a.href] = sectionName;
                         });
                     });
@@ -278,7 +378,7 @@ class KalturaCategorizer:
 
                 all_links = list(link_data.keys())
                 log(f"Found {len(course_embeds)} Kaltura embed(s) directly on the course page")
-                log(f"Found {len(all_links)} candidate link(s) on course page (kalvidres + pages + books)")
+                log(f"Found {len(all_links)} candidate link(s) on course page (Kaltura resources + media assignments + pages + books)")
 
                 if not all_links and not course_embeds:
                     title = await page.title()
@@ -289,18 +389,31 @@ class KalturaCategorizer:
                 seen_entries = set()
                 # chapter URL dedupe (a book's own TOC can list the chapter we're already on)
                 seen_chapter_urls = set()
+                other_videos = set()
+
+                async def report_other_videos(name):
+                    for video_url in await self._youtube_sources(page):
+                        if video_url in other_videos: continue
+                        other_videos.add(video_url)
+                        log(f"  YouTube video: {html.unescape(name)} → {video_url}", 'info')
+                        log('  This is a YouTube embed/link; it does not have a Kaltura entry ID and is not sent to KMC.', 'info')
 
                 async def scan_embedded_entries():
                     """Scan the current page's body HTML for embedded Kaltura entryIds."""
                     return await page.evaluate(r"""() => {
                         const found = [];
+                        // Assignment descriptions are course content; learner
+                        // submissions and grading data are outside this scan.
+                        const root = location.pathname.includes('/mod/kalvidassign/')
+                            ? document.querySelector('#intro,.activity-description') : document;
+                        if (!root) return [];
                         // iframe src pattern: entryId=xxx or entryid/xxx
-                        document.querySelectorAll('iframe[src*="kaltura"]').forEach(f => {
+                        root.querySelectorAll('iframe[src*="kaltura"]').forEach(f => {
                             const m = f.src.match(/entryid[%2F\/=]+([\w_]+)/i);
                             if (m) found.push(m[1]);
                         });
                         // script-based: entryId: 'xxx' or entryId: "xxx"
-                        document.querySelectorAll('script').forEach(s => {
+                        root.querySelectorAll('script').forEach(s => {
                             const matches = [...s.textContent.matchAll(/entryId\s*[=:]\s*['"]([^'"]+)['"]/gi)];
                             matches.forEach(m => found.push(m[1]));
                         });
@@ -329,6 +442,7 @@ class KalturaCategorizer:
                             continue
                         seen_entries.add(entry_id)
                         added += 1
+                        name_base = html.unescape(name_base)
                         name = name_base if len(embedded) == 1 else f"{name_base} ({j+1})"
                         log(f"  → embed entry_id={entry_id}  name={name!r}", "info")
                         results.append({
@@ -380,9 +494,10 @@ class KalturaCategorizer:
                             is_book = "mod/book" in link
                             embedded = await scan_embedded_entries()
                             page_name = await get_page_name()
+                            await report_other_videos(page_name)
 
                             if not embedded:
-                                log(f"  No Kaltura embeds found in page — skipping", "dim")
+                                log('  No Kaltura embeds found in this activity.', 'dim')
                             else:
                                 log(f"  Found {len(embedded)} Kaltura embed(s) in page: {page_name!r}", "info")
                                 record_embeds(embedded, page_name, link, section_name)
@@ -419,9 +534,10 @@ class KalturaCategorizer:
                                         await page.goto(chapter_url, wait_until="domcontentloaded", timeout=20000)
                                         await page.wait_for_timeout(1500)
                                         chapter_embedded = await scan_embedded_entries()
+                                        chapter_name = await get_page_name()
+                                        await report_other_videos(chapter_name)
                                         if not chapter_embedded:
                                             continue
-                                        chapter_name = await get_page_name()
                                         log(f"  Found {len(chapter_embedded)} Kaltura embed(s) in chapter: {chapter_name!r}", "info")
                                         record_embeds(chapter_embedded, chapter_name, chapter_url, section_name)
                                     except Exception as e:
@@ -431,6 +547,8 @@ class KalturaCategorizer:
                     except Exception as e:
                         log(f"  Error: {repr(e)} — skipping", "warning")
                         continue
+                if other_videos:
+                    log(f"Also identified {len(other_videos)} YouTube video(s), reported separately above from Kaltura results.", 'info')
             finally:
                 await browser.close()
         return results

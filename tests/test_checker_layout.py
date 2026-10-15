@@ -26,7 +26,8 @@ def checker(qtbot, monkeypatch, request):
     mw.load_config.return_value = {}
     panel = CheckerPanel(mw)
     panel.setFont(QFont("Segoe UI", 10))
-    panel.setStyleSheet(gui_styles.get_stylesheet())
+    QApplication.instance().setStyleSheet(gui_styles.get_stylesheet())
+    panel.refresh_theme()
     qtbot.addWidget(panel)
     panel.show()
     return panel
@@ -45,8 +46,8 @@ def fully_visible(widget, viewport):
 
 
 def report(panel):
-    panel._bs_entry.setText("https://brightspace.example/course/123")
-    panel._moodle_entry.setText("https://moodle.example/course/456")
+    panel._bs_entry.setText("https://brightspace.example/d2l/le/lessons/123")
+    panel._moodle_entry.setText("https://moodle.example/course/view.php?id=456")
     panel._show_scan_report(dict(
         missing=1, broken_links=0, books=0, h5p=0, files=0, activities=0,
         findings=[dict(status="missing", name="Introduction", type="Page", section="Week 1")],
@@ -59,24 +60,22 @@ def test_standard_window_keeps_main_actions_visible(checker):
     panel.resize(960, 800)
     settled()
     viewport = panel._scroll.viewport()
-    assert fully_visible(panel._run_btn, viewport)
-    assert fully_visible(panel._review_btn, viewport)
+    assert fully_visible(panel._run_btn, panel)
     assert fully_visible(panel._details_btn, viewport)
     assert panel._scroll.verticalScrollBar().maximum() == 0
     report(panel)
-    assert panel._findings.isVisible()
-    assert not panel._empty_state.isVisible()
-    assert fully_visible(panel._review_btn, viewport)
-    panel._review_btn.click()
+    assert panel._group_rows["content"].isVisible()
+    assert not panel._findings.isVisible()  # detail stays out of the overview
+    assert fully_visible(panel._review_btn, panel)
+    panel._group_rows["content"].click()
     panel._fix_boxes["content"].setChecked(True)
     settled()
     assert panel._apply_btn.isEnabled()
-    assert fully_visible(panel._apply_btn, viewport)
+    assert fully_visible(panel._apply_btn, panel)
     assert panel._scroll.verticalScrollBar().maximum() == 0
 
 
 def test_small_window_keeps_fixes_and_activity_reachable(checker):
-    from PySide6.QtWidgets import QScrollArea
     panel = checker
     panel.resize(560, 560)
     settled()
@@ -86,12 +85,16 @@ def test_small_window_keeps_fixes_and_activity_reachable(checker):
     panel._review_btn.click()
     settled()
     viewport = panel._scroll.viewport()
-    assert fully_visible(panel._apply_btn, viewport)
-    fix_scroll = panel._tabs.widget(1).findChild(QScrollArea)
-    for box in panel._fix_boxes.values():
-        fix_scroll.ensureWidgetVisible(box)
-        settled()
-        assert fully_visible(box, fix_scroll.viewport())
+    assert fully_visible(panel._apply_btn, panel)
+    for group, keys in (("links", ("repair_files",)), ("content", ("content", "files", "activities")), ("books", ("books",)), ("other", ("order",))):
+        panel._open_group(group)
+        for key in keys:
+            box = panel._fix_boxes[key]
+            panel._scroll.ensureWidgetVisible(box)
+            settled()
+            assert fully_visible(box, viewport)
+        assert fully_visible(panel._apply_btn, panel)
+    panel._open_group("content")
     panel._fix_boxes["content"].setChecked(True)
     panel.resize(960, 800)
     settled()
@@ -102,3 +105,16 @@ def test_small_window_keeps_fixes_and_activity_reachable(checker):
     settled()
     assert fully_visible(panel._log, viewport)
     assert panel._scroll.horizontalScrollBar().maximum() == 0
+
+
+def test_long_result_text_is_not_compressed_or_clipped(checker):
+    checker.resize(560, 560)
+    report(checker)
+    checker._show_run_result(dict(mode="apply", status="stopped", summary={"files_uploaded": [("Outline", "Week 1")]}, errors=[]))
+    settled()
+    checker._show_run_result(dict(mode="apply", status="finished", summary={"files_uploaded": [], "files_failed": [("Outline", "Week 1")], "broken_links_repaired": 1}, errors=["A file upload needs attention."]))
+    settled()
+    body = checker._result_body
+    assert body.height() >= body.heightForWidth(body.width())
+    assert fully_visible(checker._run_btn, checker)
+    assert checker._scroll.horizontalScrollBar().maximum() == 0

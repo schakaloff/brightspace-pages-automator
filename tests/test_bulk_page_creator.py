@@ -145,7 +145,9 @@ def test_text_is_escaped_and_html_preserved():
 
 @pytest.mark.parametrize("url", ["https://example.test/d2l/le/lessons/123",
     "http://learn.okanagancollege.ca/d2l/le/lessons/123", "https://learn.okanagancollege.ca/",
-    "https://learn.okanagancollege.ca:444/d2l/le/lessons/123"])
+    "https://learn.okanagancollege.ca:444/d2l/le/lessons/123",
+    "https://example.test/d2l/home/25708", "https://learn.okanagancollege.ca:444/d2l/home/25708",
+    "https://learn.okanagancollege.ca/d2l/home/not-a-course"])
 def test_invalid_course_urls(url):
     with pytest.raises(ValueError):
         course_id_from_url(url)
@@ -155,6 +157,11 @@ def test_lesson_and_legacy_course_urls():
     assert course_id_from_url("https://learn.okanagancollege.ca/d2l/le/lessons/123/units/20") == "123"
     assert course_id_from_url("https://learn.okanagancollege.ca/d2l/le/content/123/home") == "123"
     assert course_id_from_url("https://learn.okanagancollege.ca/d2l/home?ou=123") == "123"
+
+
+@pytest.mark.parametrize("course_id", ["25708", "25707"])
+def test_course_home_links_are_accepted_by_the_browser_worker_parser(course_id):
+    assert course_id_from_url(f"https://learn.okanagancollege.ca/d2l/home/{course_id}") == course_id
 
 
 def test_adapter_passes_unique_filenames_and_authored_html():

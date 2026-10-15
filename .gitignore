@@ -53,3 +53,5 @@ python-embed/
 
 # User config (saved URLs, API key)
 user_config.json
+transfer-investigation/
+duplicate-preview/

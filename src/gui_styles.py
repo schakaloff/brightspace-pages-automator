@@ -377,6 +377,25 @@ QDialog[design="modern"], {s} QDialog[design="modern"] {{ background-color: {c['
 {s} QLabel[role="field-label"] {{ font-size: 13px; font-weight: 600; }}
 {s} QLabel[role="dim"], {s} QLabel[role="hint"] {{ color: {c['muted']}; font-size: 13px; }}
 {s} QLabel[role="hint"] {{ font-size: 12px; }}
+QWidget#link_review_panel QLabel[role="link-title"] {{ font-size: 14px; font-weight: 600; }}
+QWidget#link_review_panel QLabel[role="section-heading"] {{ font-size: 18px; }}
+QWidget#link_review_panel QFrame[role="review-rule"] {{ background: {c['border']}; border: none; }}
+QWidget#link_review_panel QFrame[role="review-row"] {{
+    background: transparent; border: none; border-bottom: 1px solid {c['border']};
+}}
+QWidget#link_review_panel QFrame[role="review-row"][selected="true"] {{ background: {c['selected']}; }}
+QWidget#link_review_panel QPushButton[variant="link"] {{
+    background: transparent; color: {c['focus']}; border: none; padding: 8px 0;
+    font-weight: 400; text-align: left;
+}}
+QWidget#link_review_panel QPushButton[variant="link"]:hover {{ color: {c['text']}; text-decoration: underline; }}
+QWidget#link_review_panel QFrame#link_review_footer {{ background: {c['surface']}; border-top: 1px solid {c['border']}; }}
+QDialog[design="modern"] QLabel[role="error"] {{ color: {c['error']}; }}
+QDialog[design="modern"] QRadioButton {{ color: {c['text']}; spacing: 10px; padding: 4px 0; }}
+QDialog[design="modern"] QRadioButton::indicator {{
+    width: 16px; height: 16px; border: 1px solid {c['muted']}; border-radius: 8px; background: {c['surface']};
+}}
+QDialog[design="modern"] QRadioButton::indicator:checked {{ background: {c['focus']}; border-color: {c['focus']}; }}
 QWidget#checker_panel QTabWidget#course_workflow_tabs::pane {{ border: none; background: transparent; }}
 QWidget#checker_panel QTabWidget#course_workflow_tabs QTabBar::tab {{
     background: transparent; color: {c['muted']}; border: none; border-radius: 7px;

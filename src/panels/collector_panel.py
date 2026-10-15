@@ -27,6 +27,7 @@ from panels._shared import (
     NoScrollComboBox,
 )
 from style_presets import STYLE_PRESETS, load_style_reference
+from course_context import brightspace_course_key, moodle_course_id
 
 
 class CollectState(Enum):
@@ -52,6 +53,7 @@ class CollectorPanel(QWidget):
         self._succeeded = False          # set from the backend log stream, read on __DONE__
         self._last_page_count = None     # parsed from "✓ Text done: N pages"
         self._spin_idx = 0
+        self._moodle_bound_course = None
         self._build()
         self._apply_state()
         self._poll_timer = QTimer(self)
@@ -171,6 +173,7 @@ class CollectorPanel(QWidget):
         adv = QVBoxLayout(self._adv_container)
         adv.setContentsMargins(12, 4, 12, 6)
         adv.setSpacing(6)
+        adv.addWidget(_form_label("BATCH OPTIONS"))
 
         self._multi_unit_chk = QCheckBox("Also do the following units in this course")
         self._multi_unit_chk.setObjectName("chk_also_do_following_units")
@@ -199,17 +202,35 @@ class CollectorPanel(QWidget):
         adv.addLayout(sub_row)
         adv.addSpacing(2)
 
-        adv.addWidget(_form_label("MOODLE COURSE URL  (optional — fixes odd file names)"))
+        adv.addWidget(_divider())
+        self._use_moodle_names = QCheckBox("Use original Moodle names (optional)")
+        self._use_moodle_names.setObjectName("use_moodle_names_checkbox")
+        adv.addWidget(self._use_moodle_names)
+        moodle_help = QLabel(
+            "Use the matching Moodle course to recover readable file and link titles. "
+            "Collection works without this. The source resets when you change courses or reopen the app."
+        )
+        moodle_help.setProperty("role", "dim")
+        moodle_help.setWordWrap(True)
+        adv.addWidget(moodle_help)
+        adv.addWidget(_form_label("ORIGINAL MOODLE COURSE URL"))
         self._moodle_entry = QLineEdit()
         self._moodle_entry.setObjectName("moodle_url_edit")
         self._moodle_entry.setPlaceholderText("https://mymoodle.okanagan.bc.ca/course/view.php?id=…")
         self._moodle_entry.setFixedHeight(34)
+        self._moodle_entry.setAccessibleName("Original Moodle course URL")
         adv.addWidget(self._moodle_entry)
+        self._checker_source_btn = QPushButton("Use matching source from Checker")
+        self._checker_source_btn.setProperty("variant", "secondary")
+        self._checker_source_btn.clicked.connect(self._use_checker_source)
+        adv.addWidget(self._checker_source_btn, 0, Qt.AlignmentFlag.AlignLeft)
         adv.addSpacing(2)
+        adv.addWidget(_divider())
+        adv.addWidget(_form_label("PERFORMANCE"))
 
         par_row = QHBoxLayout()
         par_row.setSpacing(10)
-        par_row.addWidget(_form_label("SPEED  (pages at once)"), 0, Qt.AlignmentFlag.AlignVCenter)
+        par_row.addWidget(_form_label("PAGES COLLECTED AT ONCE"), 0, Qt.AlignmentFlag.AlignVCenter)
         self._parallel_spin = QSpinBox()
         self._parallel_spin.setObjectName("speed_spin")
         self._parallel_spin.setRange(1, 10)
@@ -223,10 +244,36 @@ class CollectorPanel(QWidget):
         par_row.addWidget(self._parallel_spin)
         par_row.addStretch()
         adv.addLayout(par_row)
+        speed_hint = QLabel("Default: 3. Higher values can be faster but may trigger Brightspace rate limits.")
+        speed_hint.setProperty("role", "dim")
+        speed_hint.setWordWrap(True)
+        adv.addWidget(speed_hint)
 
         self._adv_container.setVisible(False)
         top.addWidget(self._adv_container)
         panel.addSpacing(4)
+        self._moodle_summary_row = QFrame()
+        summary_layout = QHBoxLayout(self._moodle_summary_row)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        self._moodle_summary = QLabel()
+        self._moodle_summary.setObjectName("collector_moodle_summary")
+        self._moodle_summary.setWordWrap(True)
+        self._moodle_summary.setTextFormat(Qt.TextFormat.PlainText)
+        summary_layout.addWidget(self._moodle_summary, 1)
+        self._moodle_change_btn = QPushButton("Change")
+        self._moodle_change_btn.setProperty("variant", "secondary")
+        self._moodle_change_btn.clicked.connect(self._change_moodle_source)
+        summary_layout.addWidget(self._moodle_change_btn)
+        self._moodle_clear_btn = QPushButton("Clear")
+        self._moodle_clear_btn.setProperty("variant", "secondary")
+        self._moodle_clear_btn.clicked.connect(self._clear_moodle_source)
+        summary_layout.addWidget(self._moodle_clear_btn)
+        panel.addWidget(self._moodle_summary_row)
+        self._moodle_notice = QLabel()
+        self._moodle_notice.setProperty("role", "dim")
+        self._moodle_notice.setWordWrap(True)
+        self._moodle_notice.hide()
+        panel.addWidget(self._moodle_notice)
 
         # ── Status row (hidden unless running or succeeded) ───────────────────
         self._status_row = QFrame()
@@ -316,24 +363,23 @@ class CollectorPanel(QWidget):
         outer_scroll.setWidget(outer_holder)
         layout.addWidget(outer_scroll, 1)
 
-        # Restore this panel's URLs, falling back to Checker course URLs where useful.
+        # Keep workflow preferences, but never restore the optional Moodle source.
         cfg = self._mw.load_config() if hasattr(self._mw, "load_config") else {}
         if cfg.get("col_unit_url"):
             self._unit_entry.setText(cfg["col_unit_url"])
         if cfg.get("col_target_url"):
             self._target_entry.setText(cfg["col_target_url"])
-        saved_moodle_url = cfg.get("col_moodle_url") or cfg.get("chk_moodle_url")
-        if saved_moodle_url:
-            self._moodle_entry.setText(saved_moodle_url)
-        if cfg.get("chk_bs_url"):
-            self._bs_course_hint.setText(f"Course carried over from Checker: {cfg['chk_bs_url']}")
-            self._bs_course_hint.show()
         if "col_auto_create" in cfg:
             self._auto_create_chk.setChecked(bool(cfg["col_auto_create"]))
         preset = cfg.get("collector_style_preset", "calm")
         index = self._style_preset.findData(preset)
         self._style_preset.setCurrentIndex(max(index, 0))
         self._on_auto_toggle(self._auto_create_chk.isChecked())
+        self._unit_entry.textChanged.connect(self._on_course_changed)
+        self._moodle_entry.textChanged.connect(self._on_moodle_source_changed)
+        self._use_moodle_names.toggled.connect(self._on_moodle_enabled)
+        self._on_moodle_enabled(False)
+        self.refresh_theme()
 
     # ── Collapse toggles ──────────────────────────────────────────────────────
 
@@ -393,7 +439,9 @@ class CollectorPanel(QWidget):
         self._adv_btn.setEnabled(enabled)
         self._adv_container.setEnabled(enabled)
         self._parallel_spin.setEnabled(enabled)
-        self._moodle_entry.setEnabled(enabled)
+        self._use_moodle_names.setEnabled(enabled and not self._cleanup_only_chk.isChecked())
+        self._moodle_summary_row.setEnabled(enabled)
+        self._refresh_moodle_summary()
         self._style_preset.setEnabled(enabled)
         self._multi_unit_chk.setEnabled(enabled and not self._cleanup_only_chk.isChecked())
         # dependent checkbox keeps its parent-gated rule when re-enabling
@@ -464,14 +512,103 @@ class CollectorPanel(QWidget):
             self._auto_continue_chk.setChecked(False)
 
     def refresh_carryover(self):
-        """Re-read Checker's saved URLs (call when this tab becomes visible)."""
-        cfg = self._mw.load_config() if hasattr(self._mw, "load_config") else {}
-        if cfg.get("chk_moodle_url") and not self._moodle_entry.text().strip():
-            self._moodle_entry.setText(cfg["chk_moodle_url"])
-            self._adv_btn.setChecked(True)
-        if cfg.get("chk_bs_url"):
-            self._bs_course_hint.setText(f"Course carried over from Checker: {cfg['chk_bs_url']}")
-            self._bs_course_hint.show()
+        """Offer an explicit Checker source; never refill a cleared field."""
+        self._refresh_moodle_summary()
+
+    def _checker_source(self):
+        checker = getattr(self._mw, "_checker", None)
+        if checker is None:
+            return ""
+        bs_field = getattr(checker, "_bs_entry", None)
+        moodle_field = getattr(checker, "_moodle_entry", None)
+        if not isinstance(bs_field, QLineEdit) or not isinstance(moodle_field, QLineEdit):
+            return ""
+        current = brightspace_course_key(self._unit_entry.text())
+        source = _normalize_url(moodle_field.text())
+        if current and current == brightspace_course_key(bs_field.text()) and moodle_course_id(source):
+            return source
+        return ""
+
+    def _use_checker_source(self):
+        source = self._checker_source()
+        if not source:
+            self._moodle_notice.setText("Choose the same Brightspace course in Checker and add its original Moodle course first.")
+            self._moodle_notice.show()
+            return
+        self._moodle_entry.setText(source)
+        self._use_moodle_names.setChecked(True)
+
+    def _on_moodle_source_changed(self):
+        if self._moodle_entry.text().strip():
+            self._moodle_bound_course = self._course_context_key()
+            self._moodle_notice.hide()
+        else:
+            self._moodle_bound_course = None
+        self._refresh_moodle_summary()
+
+    def _course_context_key(self):
+        text = _normalize_url(self._unit_entry.text())
+        # Unknown URL forms are bound to the exact URL, so they cannot silently
+        # reuse a source across an unrecognized course change.
+        return brightspace_course_key(text) or text or None
+
+    def _on_course_changed(self):
+        current = self._course_context_key()
+        if self._moodle_bound_course and current != self._moodle_bound_course:
+            self._clear_moodle_source()
+            self._moodle_notice.setText("Moodle name recovery was cleared because the Brightspace course changed.")
+            self._moodle_notice.show()
+        elif self._moodle_entry.text().strip() and not self._moodle_bound_course:
+            self._moodle_bound_course = current
+        self._refresh_moodle_summary()
+
+    def _on_moodle_enabled(self, checked):
+        if checked:
+            self._moodle_bound_course = self._course_context_key()
+        self._refresh_moodle_summary()
+
+    def _refresh_moodle_summary(self):
+        busy = self._state == CollectState.RUNNING
+        enabled = self._use_moodle_names.isChecked() and not self._cleanup_only_chk.isChecked()
+        self._moodle_entry.setEnabled(enabled and not busy)
+        source = _normalize_url(self._moodle_entry.text())
+        source_id = moodle_course_id(source)
+        self._checker_source_btn.setEnabled(enabled and not busy and bool(self._checker_source()))
+        self._checker_source_btn.setToolTip("Copies the currently displayed Checker source only when its Brightspace course matches this unit.")
+        self._moodle_summary_row.setVisible(enabled)
+        self._moodle_summary.setText(
+            f"Moodle name recovery enabled · Source course {source_id}"
+            if source_id else "Moodle name recovery enabled · Add a valid Moodle course URL before running."
+        )
+        self._moodle_summary.setToolTip(source)
+
+    def _change_moodle_source(self):
+        self._adv_btn.setChecked(True)
+        self._moodle_entry.setFocus()
+        self._moodle_entry.selectAll()
+
+    def _clear_moodle_source(self):
+        self._use_moodle_names.setChecked(False)
+        self._moodle_entry.clear()
+        self._moodle_bound_course = None
+        self._moodle_notice.hide()
+        self._refresh_moodle_summary()
+
+    def refresh_theme(self):
+        import gui_styles
+        c = gui_styles.modern_colors()
+        self.setStyleSheet(
+            f'QLabel[role="form-label"] {{ color: {c["muted"]}; font-size: 11px; }}'
+            f'QLabel[role="dim"] {{ color: {c["muted"]}; }}'
+            f'QLabel#collector_moodle_summary {{ color: {c["focus"]}; font-size: 12px; }}'
+        )
+        for button in (self._adv_btn, self._log_handle):
+            button.setStyleSheet(
+                f'QToolButton {{ background: transparent; border: none; color: {c["muted"]}; '
+                'padding: 4px 0; font-size: 12px; font-weight: 600; text-align: left; }'
+                f'QToolButton:hover {{ color: {c["text"]}; }}'
+                f'QToolButton:focus {{ border: 1px solid {c["focus"]}; }}'
+            )
 
     def save_state(self):
         if not hasattr(self._mw, "save_config"):
@@ -479,7 +616,7 @@ class CollectorPanel(QWidget):
         self._mw.save_config({
             "col_unit_url": self._unit_entry.text().strip(),
             "col_target_url": self._target_entry.text().strip(),
-            "col_moodle_url": self._moodle_entry.text().strip(),
+            "col_moodle_url": "",  # Retire legacy persistence on the next save.
             "col_auto_create": self._auto_create_chk.isChecked(),
             "collector_style_preset": self._style_preset.currentData(),
         })
@@ -490,9 +627,16 @@ class CollectorPanel(QWidget):
             return
         unit_url   = _normalize_url(self._unit_entry.text())
         target_url = _normalize_url(self._target_entry.text())
-        moodle_url = _normalize_url(self._moodle_entry.text())
+        moodle_url = _normalize_url(self._moodle_entry.text()) if self._use_moodle_names.isChecked() else ""
         auto_create = self._auto_create_chk.isChecked()
         cleanup_only = self._cleanup_only_chk.isChecked()
+        if cleanup_only:
+            moodle_url = ""
+        elif self._use_moodle_names.isChecked() and not moodle_course_id(moodle_url):
+            self._log.append_log("Add a valid original Moodle course URL, or turn off Moodle name recovery.", "warning")
+            self._adv_btn.setChecked(True)
+            self._moodle_entry.setFocus()
+            return
         multi_unit  = self._multi_unit_chk.isChecked()
         auto_continue = self._auto_continue_chk.isChecked()
         if not unit_url:

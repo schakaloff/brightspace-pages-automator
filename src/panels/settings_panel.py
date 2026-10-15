@@ -1,23 +1,25 @@
 import json
 import os
 import sys
-import webbrowser
 from pathlib import Path
 
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit, QFrame, QScrollArea,
-)
-from PySide6.QtCore import Qt, Signal, QTimer
-
-from panels._shared import _divider, _form_label, _section_header, NoScrollComboBox
+from PySide6.QtWidgets import QWidget
+from PySide6.QtCore import Signal, QTimer
+import gui_styles
 
 
 class SettingsPanel(QWidget):
-    """Scrollable settings panel with API key, downloads folder, and guide."""
+    """Categorized app settings with explicit account management."""
 
     api_key_changed = Signal(str)
     model_changed = Signal(str)
+
+    CREDENTIALS = {
+        "bs": ("bs_username", "BrightspacePagesAutomator"),
+        "sso": ("sso_email", "BrightspacePagesAutomator_SSO"),
+        "moodle": ("moodle_username", "BrightspacePagesAutomator_Moodle"),
+        "kmc": ("kmc_username", "BrightspacePagesAutomator_KMC"),
+    }
 
     MODELS = [
         ("claude-opus-5", "Opus 5 — highest quality, slower/pricier"),
@@ -37,385 +39,35 @@ class SettingsPanel(QWidget):
     # ── Build UI ──────────────────────────────────────────────────────────────
 
     def _build(self):
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        container = QWidget()
-        scroll.setWidget(container)
-
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(scroll)
-
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(0)
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-
-        # ── Header ────────────────────────────────────────────────────────────
-        layout.addWidget(_section_header("Settings"))
-        sub = QLabel("Shared configuration for all tabs.")
-        sub.setProperty("role", "dim")
-        layout.addWidget(sub)
-        layout.addSpacing(24)
-        layout.addWidget(_divider())
-        layout.addSpacing(20)
-
-        # ── Section 0: Appearance ─────────────────────────────────────────────
-        layout.addWidget(_form_label("APP VERSION & UPDATES"))
-        layout.addSpacing(6)
-
-        self._update_diag_lbl = QLabel("")
-        self._update_diag_lbl.setProperty("role", "dim")
-        self._update_diag_lbl.setWordWrap(True)
-        self._update_diag_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._update_diag_lbl.setStyleSheet(
-            "font-family: 'Consolas', monospace; font-size: 11px;"
-        )
-        layout.addWidget(self._update_diag_lbl)
-        layout.addSpacing(8)
-
-        update_btn_row = QHBoxLayout()
-        update_btn_row.setSpacing(8)
-
-        check_update_btn = QPushButton("Check Latest Installer")
-        check_update_btn.setProperty("variant", "secondary")
-        check_update_btn.setFixedHeight(36)
-        check_update_btn.setToolTip("Check GitHub Releases for the latest installer.")
-        check_update_btn.clicked.connect(self._check_latest_installer)
-        update_btn_row.addWidget(check_update_btn)
-
-        open_update_log_btn = QPushButton("Open Updater Log")
-        open_update_log_btn.setProperty("variant", "secondary")
-        open_update_log_btn.setFixedHeight(36)
-        open_update_log_btn.setToolTip("Open the updater log file shown above.")
-        open_update_log_btn.clicked.connect(self._open_updater_log)
-        update_btn_row.addWidget(open_update_log_btn)
-        update_btn_row.addStretch()
-        layout.addLayout(update_btn_row)
-        layout.addSpacing(24)
-        layout.addWidget(_divider())
-        layout.addSpacing(20)
-        self.refresh_update_diagnostics()
-
-        layout.addWidget(_form_label("APPEARANCE"))
-        layout.addSpacing(6)
-
-        theme_row = QHBoxLayout()
-        theme_row.setSpacing(8)
-        theme_row.setAlignment(Qt.AlignmentFlag.AlignLeft)
-
-        self._btn_dark = QPushButton("Dark")
-        self._btn_dark.setProperty("variant", "secondary")
-        self._btn_dark.setFixedSize(80, 36)
-        self._btn_dark.setToolTip("Switch to dark theme.")
-        self._btn_dark.clicked.connect(lambda: self._mw.set_theme("dark"))
-
-        self._btn_light = QPushButton("Light")
-        self._btn_light.setProperty("variant", "secondary")
-        self._btn_light.setFixedSize(80, 36)
-        self._btn_light.setToolTip("Switch to light theme.")
-        self._btn_light.clicked.connect(lambda: self._mw.set_theme("light"))
-
-        theme_row.addWidget(self._btn_dark)
-        theme_row.addWidget(self._btn_light)
-        layout.addLayout(theme_row)
-        layout.addSpacing(24)
-        layout.addWidget(_divider())
-        layout.addSpacing(20)
-
-        # ── Section 1: Claude API Key ─────────────────────────────────────────
-        layout.addWidget(_form_label("CLAUDE API KEY"))
-        layout.addSpacing(6)
-
-        key_row = QHBoxLayout()
-        key_row.setSpacing(8)
-
-        self._key_field = QLineEdit()
-        self._key_field.setPlaceholderText("sk-ant-…")
-        self._key_field.setEchoMode(QLineEdit.EchoMode.Password)
-        self._key_field.setFixedHeight(40)
-        self._key_field.setToolTip(
-            "Your Anthropic Claude API key. Required for the Collect and Restyle tabs.\n"
-            "Get one at console.anthropic.com. Saved automatically."
-        )
-        self._key_field.textChanged.connect(self._on_key_changed)
-        key_row.addWidget(self._key_field)
-
-        show_btn = QPushButton("Show")
-        show_btn.setProperty("variant", "secondary")
-        show_btn.setFixedSize(72, 40)
-        show_btn.setToolTip("Toggle API key visibility.")
-        show_btn.setCheckable(True)
-        show_btn.toggled.connect(
-            lambda on: self._key_field.setEchoMode(
-                QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
-            )
-        )
-        show_btn.toggled.connect(lambda on: show_btn.setText("Hide" if on else "Show"))
-        key_row.addWidget(show_btn)
-        layout.addLayout(key_row)
-
-        hint = QLabel("Used by Collect and Restyle tabs. Saved automatically.")
-        hint.setProperty("role", "dim")
-        hint.setWordWrap(True)
-        layout.addSpacing(6)
-        layout.addWidget(hint)
-        layout.addSpacing(16)
-
-        layout.addWidget(_form_label("MODEL"))
-        layout.addSpacing(6)
-
-        self._model_combo = NoScrollComboBox()
-        self._model_combo.setFixedHeight(40)
-        for model_id, label in self.MODELS:
-            self._model_combo.addItem(label, model_id)
-        self._model_combo.currentIndexChanged.connect(self._on_model_changed)
-        layout.addWidget(self._model_combo)
-        layout.addSpacing(24)
-        layout.addWidget(_divider())
-        layout.addSpacing(20)
-
-        # ── Section 2: Downloads Folder ───────────────────────────────────────
-        layout.addWidget(_form_label("DOWNLOADS FOLDER"))
-        layout.addSpacing(6)
-
-        dl_row = QHBoxLayout()
-        downloads_path = Path(__file__).parent.parent.parent / "downloads"
-        path_lbl = QLabel(str(downloads_path))
-        path_lbl.setProperty("role", "dim")
-        path_lbl.setStyleSheet(
-            "font-family: 'Consolas', monospace; font-size: 11px;"
-        )
-        dl_row.addWidget(path_lbl, 1)
-
-        open_btn = QPushButton("Open Folder")
-        open_btn.setProperty("variant", "secondary")
-        open_btn.setFixedHeight(40)
-        open_btn.setToolTip("Open the downloads folder in your file manager.")
-        def _open_folder():
-            p = str(downloads_path) if downloads_path.exists() else str(downloads_path.parent)
-            if sys.platform == "win32":
-                os.startfile(p)
-            elif sys.platform == "darwin":
-                import subprocess; subprocess.Popen(["open", p])
-            else:
-                import subprocess; subprocess.Popen(["xdg-open", p])
-        open_btn.clicked.connect(_open_folder)
-        dl_row.addWidget(open_btn)
-        layout.addLayout(dl_row)
-        layout.addSpacing(24)
-        layout.addWidget(_divider())
-        layout.addSpacing(20)
-
-        # ── Section 3: Workflow Guide ─────────────────────────────────────────
-        layout.addWidget(_form_label("WORKFLOW GUIDE"))
-        layout.addSpacing(6)
-
-        guide_btn = QPushButton("Open Full Visual Guide in Browser")
-        guide_btn.setFixedHeight(42)
-        guide_btn.setToolTip("Open the step-by-step workflow guide in your browser. Shareable and printable.")
-        guide_path = Path(__file__).parent.parent.parent / "WORKFLOW_GUIDE.html"
-        guide_btn.clicked.connect(
-            lambda: webbrowser.open(
-                f"file:///{str(guide_path).replace(os.sep, '/')}"
-            )
-        )
-        layout.addWidget(guide_btn)
-        layout.addSpacing(8)
-
-        guide_hint = QLabel("Detailed step-by-step flowchart — shareable and printable.")
-        guide_hint.setProperty("role", "dim")
-        layout.addWidget(guide_hint)
-        layout.addSpacing(24)
-        layout.addWidget(_divider())
-        layout.addSpacing(20)
-
-        # ── Section 3: Brightspace Credentials ───────────────────────────────
-        layout.addWidget(_form_label("BRIGHTSPACE CREDENTIALS"))
-        layout.addSpacing(4)
-        bs_hint = QLabel("Used for direct login. If SSO is configured below, SSO takes priority.")
-        bs_hint.setProperty("role", "dim")
-        bs_hint.setWordWrap(True)
-        layout.addWidget(bs_hint)
-        layout.addSpacing(6)
-
-        self._bs_user_field = QLineEdit()
-        self._bs_user_field.setPlaceholderText("n.firstname")
-        self._bs_user_field.setFixedHeight(40)
-        self._bs_user_field.setToolTip("Your Brightspace username (e.g. n.firstname).")
-        layout.addWidget(self._bs_user_field)
-        layout.addSpacing(6)
-
-        self._bs_pass_field = QLineEdit()
-        self._bs_pass_field.setPlaceholderText("Password")
-        self._bs_pass_field.setEchoMode(QLineEdit.EchoMode.Password)
-        self._bs_pass_field.setFixedHeight(40)
-        self._bs_pass_field.setToolTip("Your Brightspace password. Stored securely in your system keyring.")
-        layout.addWidget(self._bs_pass_field)
-        layout.addSpacing(6)
-
-        self._bs_cred_status = QLabel("")
-        self._bs_cred_status.setProperty("role", "dim")
-        layout.addWidget(self._bs_cred_status)
-
-        bs_save_btn = QPushButton("Save Brightspace Credentials")
-        bs_save_btn.setProperty("variant", "secondary")
-        bs_save_btn.setFixedHeight(36)
-        bs_save_btn.setToolTip("Save username to config and password to your system keyring.")
-        bs_save_btn.clicked.connect(self._save_bs_credentials)
-        layout.addWidget(bs_save_btn)
-        layout.addSpacing(6)
-
-        bs_import_btn = QPushButton("Import from Quiz Automator")
-        bs_import_btn.setProperty("variant", "secondary")
-        bs_import_btn.setFixedHeight(36)
-        bs_import_btn.setToolTip(
-            "Copy the Brightspace username/password saved in the Quiz Automator "
-            "app into this app. Shows field names only before importing — never "
-            "the values."
-        )
-        bs_import_btn.clicked.connect(self._import_bs_from_quiz_automator)
-        layout.addWidget(bs_import_btn)
-        layout.addSpacing(24)
-        layout.addWidget(_divider())
-        layout.addSpacing(20)
-
-        # ── Section 4: Microsoft SSO Credentials ─────────────────────────────
-        layout.addWidget(_form_label("MICROSOFT SSO CREDENTIALS"))
-        layout.addSpacing(4)
-        sso_hint = QLabel("Used for Microsoft single sign-on login. Takes priority over direct Brightspace login.")
-        sso_hint.setProperty("role", "dim")
-        sso_hint.setWordWrap(True)
-        layout.addWidget(sso_hint)
-        layout.addSpacing(6)
-
-        self._sso_email_field = QLineEdit()
-        self._sso_email_field.setPlaceholderText("NFirstname.Lastname@okanagan.bc.ca")
-        self._sso_email_field.setFixedHeight(40)
-        self._sso_email_field.setToolTip("Your Microsoft SSO email address (e.g. NFirstname.Lastname@okanagan.bc.ca).")
-        layout.addWidget(self._sso_email_field)
-        layout.addSpacing(6)
-
-        self._sso_pass_field = QLineEdit()
-        self._sso_pass_field.setPlaceholderText("Password")
-        self._sso_pass_field.setEchoMode(QLineEdit.EchoMode.Password)
-        self._sso_pass_field.setFixedHeight(40)
-        self._sso_pass_field.setToolTip("Your Microsoft SSO password. Stored securely in your system keyring.")
-        layout.addWidget(self._sso_pass_field)
-        layout.addSpacing(6)
-
-        self._sso_status = QLabel("")
-        self._sso_status.setProperty("role", "dim")
-        layout.addWidget(self._sso_status)
-
-        sso_save_btn = QPushButton("Save SSO Credentials")
-        sso_save_btn.setProperty("variant", "secondary")
-        sso_save_btn.setFixedHeight(36)
-        sso_save_btn.setToolTip("Save SSO email and password to your system keyring.")
-        sso_save_btn.clicked.connect(self._save_sso_credentials)
-        layout.addWidget(sso_save_btn)
-        layout.addSpacing(24)
-        layout.addWidget(_divider())
-        layout.addSpacing(20)
-
-        # ── Section 5: Moodle Credentials ────────────────────────────────────
-        layout.addWidget(_form_label("MOODLE CREDENTIALS"))
-        layout.addSpacing(4)
-        moodle_hint = QLabel("Used by the Checker and Kaltura tabs to access your Moodle course content.")
-        moodle_hint.setProperty("role", "dim")
-        moodle_hint.setWordWrap(True)
-        layout.addWidget(moodle_hint)
-        layout.addSpacing(6)
-
-        self._moodle_user_field = QLineEdit()
-        self._moodle_user_field.setPlaceholderText("n.firstname")
-        self._moodle_user_field.setFixedHeight(40)
-        self._moodle_user_field.setToolTip("Your Moodle username.")
-        layout.addWidget(self._moodle_user_field)
-        layout.addSpacing(6)
-
-        self._moodle_pass_field = QLineEdit()
-        self._moodle_pass_field.setPlaceholderText("Password")
-        self._moodle_pass_field.setEchoMode(QLineEdit.EchoMode.Password)
-        self._moodle_pass_field.setFixedHeight(40)
-        self._moodle_pass_field.setToolTip("Your Moodle password. Stored securely in your system keyring.")
-        layout.addWidget(self._moodle_pass_field)
-        layout.addSpacing(6)
-
-        self._moodle_status = QLabel("")
-        self._moodle_status.setProperty("role", "dim")
-        layout.addWidget(self._moodle_status)
-
-        moodle_save_btn = QPushButton("Save Moodle Credentials")
-        moodle_save_btn.setProperty("variant", "secondary")
-        moodle_save_btn.setFixedHeight(36)
-        moodle_save_btn.setToolTip("Save Moodle username and password to your system keyring.")
-        moodle_save_btn.clicked.connect(self._save_moodle_credentials)
-        layout.addWidget(moodle_save_btn)
-        layout.addSpacing(24)
-        layout.addWidget(_divider())
-        layout.addSpacing(20)
-
-        # ── Section 6: KMC (Kaltura) Credentials ─────────────────────────────
-        layout.addWidget(_form_label("KMC CREDENTIALS"))
-        layout.addSpacing(6)
-
-        self._kmc_user_field = QLineEdit()
-        self._kmc_user_field.setPlaceholderText("NFirstname.Lastname@okanagan.bc.ca")
-        self._kmc_user_field.setFixedHeight(40)
-        layout.addWidget(self._kmc_user_field)
-        layout.addSpacing(6)
-
-        self._kmc_pass_field = QLineEdit()
-        self._kmc_pass_field.setPlaceholderText("Password")
-        self._kmc_pass_field.setEchoMode(QLineEdit.EchoMode.Password)
-        self._kmc_pass_field.setFixedHeight(40)
-        layout.addWidget(self._kmc_pass_field)
-        layout.addSpacing(6)
-
-        self._kmc_status = QLabel("")
-        self._kmc_status.setProperty("role", "dim")
-        layout.addWidget(self._kmc_status)
-
-        kmc_save_btn = QPushButton("Save KMC Credentials")
-        kmc_save_btn.setProperty("variant", "secondary")
-        kmc_save_btn.setFixedHeight(36)
-        kmc_save_btn.clicked.connect(self._save_kmc_credentials)
-        layout.addWidget(kmc_save_btn)
-        layout.addSpacing(24)
-        layout.addWidget(_divider())
-        layout.addSpacing(20)
-
-        # ── Version footer ────────────────────────────────────────────────────
-        try:
-            from update_checker import current_build_label
-            footer_version = current_build_label()
-        except Exception:
-            footer_version = "unknown build"
-        ver = QLabel(f"Brightspace Pages Automator  {footer_version}")
-        ver.setProperty("role", "dim")
-        ver.setStyleSheet("font-size:11px;")
-        layout.addWidget(ver)
-        layout.addStretch()
-
+        from panels.settings_layout import build_settings
+        build_settings(self)
         self._load_credentials()
+        self.mark_active_theme("light" if gui_styles.is_light() else "dark")
+
+    def _config(self):
+        cfg = self._mw.load_config() if hasattr(self._mw, "load_config") else {}
+        return cfg if isinstance(cfg, dict) else {}
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def mark_active_theme(self, name: str):
-        """Highlight the active theme button."""
+        """Refresh scoped colours and highlight the active theme button."""
+        from panels.settings_styles import settings_stylesheet
+        self.setStyleSheet(settings_stylesheet())
         for btn, theme in ((self._btn_dark, "dark"), (self._btn_light, "light")):
             active = theme == name
             btn.setProperty("variant", "theme-active" if active else "secondary")
+            btn.setAccessibleName(f"{theme.title()} theme" + (", selected" if active else ""))
             btn.style().unpolish(btn)
             btn.style().polish(btn)
 
     def set_api_key(self, key: str):
         """Set the API key field without emitting api_key_changed."""
+        self._save_timer.stop()
         self._key_field.blockSignals(True)
         self._key_field.setText(key)
         self._key_field.blockSignals(False)
+        self._set_status(self._key_status, "API key saved on this computer" if key else "No API key saved", "saved" if key else "")
 
     def set_model(self, model_id: str):
         """Set the model dropdown without emitting model_changed."""
@@ -475,6 +127,18 @@ class SettingsPanel(QWidget):
             f"Installer log: {diagnostics.get('setup_log_path', 'unknown')}",
         ]
         self._update_diag_lbl.setText("\n".join(lines))
+        summary = f"Version {diagnostics.get('current_version', 'unknown')} · {result}\nLast checked: {checked}"
+        if install_result:
+            outcome = install_result
+            if diagnostics.get("setup_exit_code", "") != "":
+                outcome += f" (Setup exit code {diagnostics['setup_exit_code']})"
+            summary += f"\nLast installation: {outcome}"
+        self._update_summary_lbl.setText(summary)
+
+    def _check_for_updates(self):
+        self._update_summary_lbl.setText("Checking for updates…")
+        if hasattr(self._mw, "_run_update_check"):
+            self._mw._run_update_check(force_install=False)
 
     def _check_latest_installer(self):
         if hasattr(self._mw, "_run_update_check"):
@@ -500,7 +164,7 @@ class SettingsPanel(QWidget):
 
     @property
     def bs_username(self) -> str:
-        return self._mw.load_config().get("bs_username", "")
+        return self._config().get("bs_username", "") if self._login_method == "direct" else ""
 
     @property
     def bs_password(self) -> str:
@@ -510,7 +174,7 @@ class SettingsPanel(QWidget):
 
     @property
     def sso_email(self) -> str:
-        return self._mw.load_config().get("sso_email", "")
+        return self._config().get("sso_email", "") if self._login_method == "sso" else ""
 
     @property
     def sso_password(self) -> str:
@@ -520,7 +184,7 @@ class SettingsPanel(QWidget):
 
     @property
     def moodle_username(self) -> str:
-        return self._mw.load_config().get("moodle_username", "")
+        return self._config().get("moodle_username", "")
 
     @property
     def moodle_password(self) -> str:
@@ -530,7 +194,7 @@ class SettingsPanel(QWidget):
 
     @property
     def kmc_username(self) -> str:
-        return self._mw.load_config().get("kmc_username", "")
+        return self._config().get("kmc_username", "")
 
     @property
     def kmc_password(self) -> str:
@@ -542,18 +206,24 @@ class SettingsPanel(QWidget):
 
     def _on_key_changed(self, key: str):
         self.api_key_changed.emit(key)
+        self._set_status(self._key_status, "Saving API key…")
         self._save_timer.start(500)
 
     def _save_api_key(self):
         import keyring
         key = self._key_field.text().strip()
-        if key:
-            keyring.set_password("BrightspacePagesAutomator_Claude", "api_key", key)
-        else:
-            try:
-                keyring.delete_password("BrightspacePagesAutomator_Claude", "api_key")
-            except keyring.errors.PasswordDeleteError:
-                pass
+        try:
+            if key:
+                keyring.set_password("BrightspacePagesAutomator_Claude", "api_key", key)
+            else:
+                try:
+                    keyring.delete_password("BrightspacePagesAutomator_Claude", "api_key")
+                except keyring.errors.PasswordDeleteError:
+                    pass
+        except Exception:
+            self._set_status(self._key_status, "Could not save the API key. Check your system credential store and try again.", "error")
+            return
+        self._set_status(self._key_status, "API key saved on this computer" if key else "No API key saved", "saved" if key else "")
 
     def _on_model_changed(self, index: int):
         model_id = self._model_combo.itemData(index)
@@ -561,50 +231,136 @@ class SettingsPanel(QWidget):
         if hasattr(self._mw, "save_config"):
             self._mw.save_config({"claude_model": model_id})
 
+    @staticmethod
+    def _set_status(widget, text, state=""):
+        widget.setText(text)
+        widget.setProperty("state", state)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
     def _load_credentials(self):
         import keyring
-        cfg = self._mw.load_config() if hasattr(self._mw, "load_config") else {}
+        cfg = self._config()
+        for key, (config_key, service) in self.CREDENTIALS.items():
+            user, password, status = self._account_fields[key]
+            username = cfg.get(config_key, "")
+            user.setText(username)
+            try:
+                saved_password = keyring.get_password(service, username) or "" if username else ""
+                password.setText(saved_password)
+                self._refresh_account(key, bool(username and saved_password))
+            except Exception:
+                self._set_status(status, "Could not read the saved password. Check your system credential store.", "error")
+                if key in self._account_summaries:
+                    self._set_status(self._account_summaries[key], "Credential store unavailable", "error")
+        method = cfg.get("bs_login_method")
+        if method not in ("sso", "direct"):
+            method = "sso" if cfg.get("sso_email") or not cfg.get("bs_username") else "direct"
+        self._login_method = method
+        for radio, value in ((self._sso_radio, "sso"), (self._direct_radio, "direct")):
+            radio.blockSignals(True)
+            radio.setChecked(method == value)
+            radio.blockSignals(False)
+        self._show_login_form()
 
-        bs_user = cfg.get("bs_username", "")
-        if bs_user:
-            self._bs_user_field.setText(bs_user)
-            pw = keyring.get_password("BrightspacePagesAutomator", bs_user)
-            if pw:
-                self._bs_pass_field.setText(pw)
+    def _show_login_form(self):
+        self._account_forms["sso"].setVisible(self._login_method == "sso")
+        self._account_forms["bs"].setVisible(self._login_method == "direct")
 
-        sso_email = cfg.get("sso_email", "")
-        if sso_email:
-            self._sso_email_field.setText(sso_email)
-            pw = keyring.get_password("BrightspacePagesAutomator_SSO", sso_email)
-            if pw:
-                self._sso_pass_field.setText(pw)
+    def _choose_login_method(self, method):
+        self._login_method = method
+        if hasattr(self._mw, "save_config"):
+            self._mw.save_config({"bs_login_method": method})
+        for key in ("moodle", "kmc"):
+            self._account_forms[key].hide()
+            self._account_edit_buttons[key].setText("Edit" if self._config().get(self.CREDENTIALS[key][0]) else "Set up")
+        self._show_login_form()
 
-        moodle_user = cfg.get("moodle_username", "")
-        if moodle_user:
-            self._moodle_user_field.setText(moodle_user)
-            pw = keyring.get_password("BrightspacePagesAutomator_Moodle", moodle_user)
-            if pw:
-                self._moodle_pass_field.setText(pw)
+    def _toggle_account_form(self, key):
+        opening = self._account_forms[key].isHidden()
+        for other in ("sso", "bs", "moodle", "kmc"):
+            self._account_forms[other].setVisible(opening and other == key)
+        for other, btn in self._account_edit_buttons.items():
+            btn.setText("Close" if opening and other == key else ("Edit" if self._config().get(self.CREDENTIALS[other][0]) else "Set up"))
+        if opening:
+            self._account_fields[key][0].setFocus()
+        else:
+            self._show_login_form()
 
-        kmc_user = cfg.get("kmc_username", "")
-        if kmc_user:
-            self._kmc_user_field.setText(kmc_user)
-            pw = keyring.get_password("BrightspacePagesAutomator_KMC", kmc_user)
-            if pw:
-                self._kmc_pass_field.setText(pw)
+    def _refresh_account(self, key, configured):
+        text = "Saved on this computer" if configured else "Not configured"
+        state = "saved" if configured else ""
+        self._set_status(self._account_fields[key][2], text, state)
+        if key in self._account_summaries:
+            self._set_status(self._account_summaries[key], text, state)
+            if self._account_forms[key].isHidden():
+                self._account_edit_buttons[key].setText("Edit" if configured else "Set up")
+
+    def _mark_account_dirty(self, key):
+        self._set_status(self._account_fields[key][2], "Unsaved changes — use Save changes.")
+
+    def _save_credentials(self, key):
+        import keyring
+        config_key, service = self.CREDENTIALS[key]
+        user, password_field, status = self._account_fields[key]
+        username = user.text().strip()
+        password = password_field.text()  # Spaces may be part of a valid password.
+        if not username:
+            self._set_status(status, "Enter an email first." if key in ("sso", "kmc") else "Enter a username first.", "error")
+            user.setFocus()
+            return False
+        try:
+            if not password and not keyring.get_password(service, username):
+                self._set_status(status, "Enter a password first. To remove saved credentials, use Remove saved credentials.", "error")
+                password_field.setFocus()
+                return False
+            if password:
+                keyring.set_password(service, username, password)
+            self._mw.save_config({config_key: username})
+            if self._config().get(config_key) != username:
+                self._set_status(status, "Could not save the account name. Check access to the app settings and try again.", "error")
+                return False
+        except Exception:
+            self._set_status(status, "Could not save credentials. Check your system credential store and try again.", "error")
+            return False
+        self._refresh_account(key, True)
+        return True
+
+    def _remove_credentials(self, key):
+        import keyring
+        from PySide6.QtWidgets import QMessageBox
+        config_key, service = self.CREDENTIALS[key]
+        username = self._config().get(config_key, "")
+        status = self._account_fields[key][2]
+        if not username:
+            self._set_status(status, "No saved credentials to remove.")
+            return
+        choice = QMessageBox.question(
+            self, "Remove saved credentials?",
+            "Remove the saved sign-in details from this computer? You can add them again later.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            try:
+                keyring.delete_password(service, username)
+            except keyring.errors.PasswordDeleteError:
+                pass
+            self._mw.save_config({config_key: ""})
+            if self._config().get(config_key):
+                self._set_status(status, "Password removed, but the saved account name could not be cleared. Try removing again.", "error")
+                return
+        except Exception:
+            self._set_status(status, "Could not remove credentials. Check your system credential store and try again.", "error")
+            return
+        self._account_fields[key][0].clear()
+        self._account_fields[key][1].clear()
+        self._refresh_account(key, False)
+        self._set_status(status, "Saved credentials removed.")
 
     def _save_bs_credentials(self):
-        import keyring
-        username = self._bs_user_field.text().strip()
-        password = self._bs_pass_field.text().strip()
-        if not username:
-            self._bs_cred_status.setText("Enter a username first.")
-            return
-        self._mw.save_config({"bs_username": username})
-        if password:
-            keyring.set_password("BrightspacePagesAutomator", username, password)
-        self._bs_cred_status.setText("Saved.")
-        QTimer.singleShot(3000, lambda: self._bs_cred_status.setText(""))
+        return self._save_credentials("bs")
 
     def _import_bs_from_quiz_automator(self):
         """Import Brightspace username/password from Quiz Automator's saved config.
@@ -621,23 +377,20 @@ class SettingsPanel(QWidget):
 
         if not cfg_path or not cfg_path.exists():
             self._bs_cred_status.setText("Quiz Automator config not found.")
-            QTimer.singleShot(3000, lambda: self._bs_cred_status.setText(""))
             return
 
         try:
             cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             self._bs_cred_status.setText("Could not read Quiz Automator config.")
-            QTimer.singleShot(3000, lambda: self._bs_cred_status.setText(""))
             return
 
         username = (cfg.get("bs_username") or "").strip()
-        password = (cfg.get("bs_password") or "").strip()
+        password = cfg.get("bs_password") or ""
         fields = [name for name, val in (("bs_username", username), ("bs_password", password)) if val]
 
         if not fields:
             self._bs_cred_status.setText("No Brightspace credentials found in Quiz Automator.")
-            QTimer.singleShot(3000, lambda: self._bs_cred_status.setText(""))
             return
 
         dlg = QMessageBox(self)
@@ -656,47 +409,17 @@ class SettingsPanel(QWidget):
             self._bs_user_field.setText(username)
         if password:
             self._bs_pass_field.setText(password)
-        self._save_bs_credentials()
+        if not self._save_bs_credentials():
+            return
 
         print(f"[settings] Imported from Quiz Automator: {', '.join(fields)}", flush=True)
         self._bs_cred_status.setText(f"Imported: {', '.join(fields)}")
-        QTimer.singleShot(3000, lambda: self._bs_cred_status.setText(""))
 
     def _save_sso_credentials(self):
-        import keyring
-        email = self._sso_email_field.text().strip()
-        password = self._sso_pass_field.text().strip()
-        if not email:
-            self._sso_status.setText("Enter an email first.")
-            return
-        self._mw.save_config({"sso_email": email})
-        if password:
-            keyring.set_password("BrightspacePagesAutomator_SSO", email, password)
-        self._sso_status.setText("Saved.")
-        QTimer.singleShot(3000, lambda: self._sso_status.setText(""))
+        self._save_credentials("sso")
 
     def _save_moodle_credentials(self):
-        import keyring
-        username = self._moodle_user_field.text().strip()
-        password = self._moodle_pass_field.text().strip()
-        if not username:
-            self._moodle_status.setText("Enter a username first.")
-            return
-        self._mw.save_config({"moodle_username": username})
-        if password:
-            keyring.set_password("BrightspacePagesAutomator_Moodle", username, password)
-        self._moodle_status.setText("Saved.")
-        QTimer.singleShot(3000, lambda: self._moodle_status.setText(""))
+        self._save_credentials("moodle")
 
     def _save_kmc_credentials(self):
-        import keyring
-        username = self._kmc_user_field.text().strip()
-        password = self._kmc_pass_field.text().strip()
-        if not username:
-            self._kmc_status.setText("Enter a username first.")
-            return
-        self._mw.save_config({"kmc_username": username})
-        if password:
-            keyring.set_password("BrightspacePagesAutomator_KMC", username, password)
-        self._kmc_status.setText("Saved.")
-        QTimer.singleShot(3000, lambda: self._kmc_status.setText(""))
+        self._save_credentials("kmc")

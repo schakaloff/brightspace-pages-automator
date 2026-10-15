@@ -117,6 +117,17 @@ class BuildStyleHub(QWidget):
                                "Collect unit", "book"),
         ]
         layout.addLayout(self._primary_grid)
+        layout.addSpacing(16)
+        layout.addWidget(self._support_card("duplicate_content", "Duplicate content",
+                                           "Copy sections, pages, files and links with a preview of the resulting structure.",
+                                           "Make copies", "copy"))
+        layout.addSpacing(16)
+        layout.addWidget(self._support_card("structured_transfer", "Structured Transfer",
+                                           "Copy another course into this one, reorganized, restyled and with its activities.",
+                                           "Plan transfer", "book"))
+        layout.addSpacing(8)
+        layout.addWidget(self._button("structured_transfer_qt", "Use in-app planner (edit and create)", "ghost"),
+                         0, Qt.AlignmentFlag.AlignLeft)
         layout.addSpacing(30)
         layout.addWidget(self._label("Update existing content", "hub-section"))
         layout.addSpacing(4)

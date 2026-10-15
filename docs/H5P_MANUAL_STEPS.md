@@ -102,6 +102,31 @@ loads and is the right one.
 
 ## When something goes wrong
 
+**The automator reports "Page tile not found" before uploading.**
+This happens before the H5P library opens. "Already cached" means the local
+download is ready; it does not mean the activity has been uploaded or inserted.
+The source app now waits for a visible Page tile before clicking again, so a
+slow-opening Create New menu is not interrupted. Restart `dev.bat` or `run.bat`
+and retry; cached downloads are reused. The H5P navigation also supports the
+narrow **Add → Create New** layout and Page tiles identified by their label,
+including versions with a different link format. If the library still cannot open, the
+affected activities are reported as incomplete instead of a successful zero-item
+run. There is no need to delete the cached files or course content for this error.
+Brightspace can redraw the chooser while it loads; the app captures the live
+Page link and follows it within the selected course and unit.
+
+**The automator reports "Insert dialog footer button never became available".**
+The grade-item choice can appear immediately after selecting an H5P library row,
+before the final Insert button is usable. The app handles the saved gradebook
+choice first when that happens, then clicks the enabled footer inside the
+Brightspace dialog frame. Resume the saved course to keep verified pages and
+reuse existing cloud uploads.
+
+**The automator reports "Saved page could not be confirmed in its unit".**
+Save and Close starts an asynchronous save. The app now waits for Brightspace
+to leave the editor before checking the destination, and requests a fresh
+destination list. On resume, it checks for an existing H5P page before inserting.
+
 **"Missing main library H5P.ImagePair 1.4"** (or another library name) when you
 click Use.
 The activity uses a content type the college's H5P setup doesn't have
@@ -125,6 +150,27 @@ else; a working one shows the activity itself.
 ---
 
 ## Doing a whole course
+
+The H5P panel saves a separate run for each Moodle/Brightspace course pair.
+After an interrupted run, choose it under **Resume saved course**, then click
+**Resume saved course…**. Its course URLs and original gradebook choice are restored.
+You can work on another course and return to this one later, including after
+closing the app or computer. The list shows uploads, inserted pages and remaining
+activities. **Run H5P** starts a fresh scan and keeps earlier saved runs available.
+
+A resume uses the saved activity list instead of scraping Moodle again. Each run
+keeps its own downloaded packages, so another course cannot overwrite them.
+The app checks the live destination first, including H5P embedded in HTML pages,
+and checks the cloud library for uploads still needed by unfinished pages. An
+interrupted save is recorded before it is attempted, then verified before retrying;
+a failed destination read stops the run rather than treating the page as absent.
+Existing pages and their gradebook settings stay unchanged. Missing destination
+units or unavailable saved downloads are reported for a fresh scan.
+
+Progress is stored locally under the app's user-data folder in `h5p-runs`, without
+credentials or login/session tokens. Runs made before this feature have no saved
+activity list: run the course once to create its entry. Existing cloud uploads
+and cached downloads will still be reused.
 
 The tool exists because this adds up: a 40-activity course is roughly two hours
 by hand, and the two easy mistakes above (untitled uploads, near-identical
