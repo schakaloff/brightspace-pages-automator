@@ -20,7 +20,6 @@ MIN_SPLASH_MS = 600
 
 import gui_styles
 from gui_sidebar import Sidebar, StepButton
-from gui_icons import make_icon
 from app_version import APP_VERSION
 from gui_splash import StartupSplash
 

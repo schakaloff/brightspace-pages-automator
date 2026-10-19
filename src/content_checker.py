@@ -21,17 +21,16 @@ import re
 from collections import Counter
 from functools import lru_cache
 import threading
-import uuid
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 import time
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 from playwright.async_api import BrowserContext, Page
 from config import SESSION_FILE
 from js_helpers import DEEP_FIND_JS
 from h5p_handler import H5PHandler
-from content_matcher import _norm, _numbers_conflict, _digitize, _containment_match, _detect_external_tool, _compare_items, _EXTERNAL_TOOLS, _WORD_NUMS
+from content_matcher import _norm, _detect_external_tool, _compare_items
 from activity_linker import ACTIVITY_TYPES, resolve_existing_activity_links
 from rebuild_helpers import (
     download_filename,
@@ -1991,8 +1990,7 @@ class ContentChecker:
                 return True
         return False
 
-    # NOTE: Replaced by two-step API approach (_upload_file_to_brightspace +
-    # _create_bs_file_topic). Kept as reference. Do not delete.
+    # Previous UI upload implementation, kept as reference. Do not delete.
     # async def _upload_files_to_bs_module_ui(
     #     self,
     #     context: "BrowserContext",
@@ -2203,44 +2201,6 @@ class ContentChecker:
                 await tab.close()
             except Exception:
                 pass
-
-    async def _create_bs_file_topic(
-        self, bs_page: "Page", course_id: str, module_id, title: str, file_url: str
-    ) -> bool:
-        result = await bs_page.evaluate(
-            """async ([courseId, moduleId, title, fileUrl]) => {
-                try {
-                    const resp = await fetch(
-                        `/d2l/api/le/1.0/${courseId}/content/modules/${moduleId}/structure/`,
-                        {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            credentials: 'include',
-                            body: JSON.stringify({
-                                Title: title,
-                                ShortTitle: '',
-                                Type: 1,
-                                TopicType: 1,
-                                Url: fileUrl,
-                                IsHidden: false,
-                                IsLocked: false
-                            })
-                        }
-                    );
-                    const body = await resp.text().catch(() => '');
-                    return { ok: resp.ok, status: resp.status, body: body.slice(0, 500) };
-                } catch (e) {
-                    return { ok: false, status: 0, body: String(e) };
-                }
-            }""",
-            [course_id, str(module_id), title, file_url],
-        )
-        if result and result.get("ok"):
-            return True
-        self.log(
-            f"    ✗ Topic API ({result.get('status','?')}): {result.get('body','')}", "error"
-        )
-        return False
 
     async def _create_bs_link_topic(
         self, bs_page: "Page", course_id: str, module_id, title: str, target_url: str
@@ -2463,56 +2423,6 @@ class ContentChecker:
             for link in links[:8]:
                 self.log(f"      - {link['text'][:50]} -> {link_filename(link['href'])}", "error")
         return items
-
-    async def _host_course_file(
-        self, bs_page: "Page", course_id: str, module_id, filename: str,
-        blob: bytes, content_type: str,
-    ) -> tuple:
-        """Upload one file into the course; returns (url, helper topic id)."""
-        token = await bs_page.evaluate("() => localStorage.getItem('XSRF.Token') || ''")
-        if not token:
-            raise RuntimeError("no XSRF token for file upload")
-        base = f"{urlparse(self.bs_url).scheme}://{urlparse(self.bs_url).netloc}"
-        descriptor = _json_mod.dumps({
-            "Title": filename, "ShortTitle": "", "Type": 1, "TopicType": 1,
-            "Url": filename, "StartDate": None, "EndDate": None, "DueDate": None,
-            "IsHidden": True, "IsLocked": False, "OpenAsExternalResource": None,
-            "Description": None,
-        })
-        boundary = f"bpa_{uuid.uuid4().hex}"
-        crlf = chr(13) + chr(10)
-        body = b"".join([
-            (f'--{boundary}{crlf}Content-Disposition: form-data; name=""{crlf}'
-             f"Content-Type: application/json{crlf}{crlf}{descriptor}{crlf}").encode("utf-8"),
-            (f'--{boundary}{crlf}Content-Disposition: form-data; name=""; filename="{filename}"{crlf}'
-             f"Content-Type: {content_type}{crlf}{crlf}").encode("utf-8"),
-            blob,
-            f"{crlf}--{boundary}--{crlf}".encode("utf-8"),
-        ])
-        response = await bs_page.context.request.post(
-            f"{base}/d2l/api/le/1.0/{course_id}/content/modules/{module_id}/structure/",
-            headers={"Content-Type": f"multipart/mixed; boundary={boundary}", "X-Csrf-Token": token},
-            data=body, timeout=120000, fail_on_status_code=False,
-        )
-        if not response.ok:
-            raise RuntimeError(f"upload failed: HTTP {response.status}")
-        try:
-            topic = _json_mod.loads(await response.text())
-        except Exception:
-            topic = {}
-        if not topic.get("Url"):
-            listing = await bs_page.context.request.get(
-                f"{base}/d2l/api/le/1.75/{course_id}/content/modules/{module_id}/structure/",
-                headers={"Accept": "application/json"}, timeout=30000, fail_on_status_code=False,
-            )
-            matches = [
-                entry for entry in (await listing.json() if listing.ok else [])
-                if str(entry.get("Url") or "").endswith(filename)
-            ]
-            if len(matches) != 1:
-                raise RuntimeError(f"uploaded file could not be identified ({len(matches)} matches)")
-            topic = matches[0]
-        return str(topic.get("Url") or ""), topic.get("Id")
 
     async def _fetch_moodle_binary(self, context: "BrowserContext", href: str) -> tuple:
         """Download one Moodle file, rejecting login pages and HTML."""
@@ -3509,68 +3419,6 @@ class ContentChecker:
             self.log(f"   ⚠ Could not write evidence file: {e}", "warning")
 
         self.log("=" * 52, "error")
-
-    async def _download_moodle_files(self, tab, items: list) -> None:
-        """
-        Download all pluginfile.php FILE items (embedded + top-level resources)
-        using the already-authenticated Playwright session.
-        Saves to downloads/files/<section>/<filename>.
-        """
-        file_items = [
-            i for i in items
-            if i.get("type") == "FILE"
-            and i.get("href")
-            and "pluginfile.php" in i.get("href", "")
-        ]
-
-        if not file_items:
-            return
-
-        self.log("", "dim")
-        self.log("─" * 52, "dim")
-        self.log(f"📥 Downloading {len(file_items)} files from Moodle…", "step")
-
-        save_root = Path(__file__).parent.parent / "downloads" / "files"
-        save_root.mkdir(parents=True, exist_ok=True)
-
-        success = 0
-        for idx, item in enumerate(file_items, 1):
-            name    = item.get("name", "file")
-            href    = item["href"]
-            section = re.sub(r'[^\w\s\-]', '', item.get("section", "unsorted")).strip()[:60] or "unsorted"
-
-            self.log(f"  [{idx}/{len(file_items)}] {name}", "info")
-            try:
-                section_dir = save_root / section
-                section_dir.mkdir(parents=True, exist_ok=True)
-
-                async with tab.expect_download(timeout=20000) as dl_info:
-                    try:
-                        await tab.goto(href, wait_until="domcontentloaded", timeout=20000)
-                    except Exception as e:
-                        if "Download is starting" not in str(e):
-                            raise
-
-                download  = await dl_info.value
-                suggested = download.suggested_filename or re.sub(r'[^\w\s\-.]', '', name).strip()[:80]
-                save_path = section_dir / suggested
-
-                # avoid overwriting if duplicate filename in same section
-                if save_path.exists():
-                    stem, suffix = save_path.stem, save_path.suffix
-                    save_path = section_dir / f"{stem}_{idx}{suffix}"
-
-                await download.save_as(str(save_path))
-                self.log(f"    💾 {suggested}", "success")
-                success += 1
-
-            except Exception as e:
-                self.log(f"    ✗ Failed: {e}", "error")
-
-        self.log("", "dim")
-        self.log(f"  Files: {success}/{len(file_items)} downloaded", "success")
-        if success > 0:
-            self.log(f"  Saved to: downloads/files/", "dim")
 
     async def _switch_to_instructor_role(self, tab) -> None:
         """

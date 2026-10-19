@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLayout, QLabel, QPushButton,
     QFrame, QScrollArea, QCheckBox, QDialog, QLineEdit, QFileDialog,
     QDialogButtonBox, QRadioButton, QButtonGroup, QMenu, QStackedWidget,
 )
@@ -142,6 +142,7 @@ class LinkReviewPanel(QWidget):
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         body = QWidget()
         layout = QVBoxLayout(body)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
         layout.setContentsMargins(34, 32, 34, 24)
         layout.setSpacing(14)
         self._scroll.setWidget(body)
@@ -150,7 +151,6 @@ class LinkReviewPanel(QWidget):
         self._heading = label("Review links", "page-heading")
         head.addWidget(self._heading, 1)
         self._steps = label("Find   →   Choose   →   Apply")
-        self._steps.setWordWrap(False)
         head.addWidget(self._steps)
         layout.addLayout(head)
         context = QHBoxLayout()

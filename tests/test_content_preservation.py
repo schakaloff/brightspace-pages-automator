@@ -152,6 +152,29 @@ def test_semantic_readback_allows_wrappers_entities_unicode_and_absolute_urls():
     assert equivalent, reason
 
 
+def test_readback_accepts_brightspace_rewriting_a_backslash_image_path():
+    # Unit 994202: Brightspace saved the Moodle-imported banner with "/" and
+    # %20, and the run stopped claiming the image was missing.
+    expected = (
+        '<h2>Overview</h2><p><img alt="Banner" '
+        'src="/content/enforced/23840-X(Y)/Content\\Designer (16).png"></p>'
+    )
+    actual = (
+        '<h2>Overview</h2><p><img alt="Banner" src="https://learn.example.edu'
+        '/content/enforced/23840-X(Y)/Content/Designer%20(16).png"></p>'
+    )
+    assert content_is_preserved(expected, actual) == (True, "")
+    equivalent, reason = content_is_equivalent(expected, actual)
+    assert equivalent, reason
+
+
+def test_readback_still_rejects_an_encoded_backslash_becoming_a_folder():
+    expected = '<img alt="A" src="/content/a%5Cb.png">'
+    actual = '<img alt="A" src="/content/a/b.png">'
+    preserved, _ = content_is_preserved(expected, actual)
+    assert not preserved
+
+
 @pytest.mark.parametrize(
     "changed",
     [

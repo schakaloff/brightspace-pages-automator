@@ -1,5 +1,5 @@
 """Review navigation and truthful display states, separate from browser work."""
-from PySide6.QtCore import Qt, QTimer, QPoint
+from PySide6.QtCore import QTimer, QPoint
 
 import gui_styles
 from gui_icons import make_pixmap

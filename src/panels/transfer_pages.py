@@ -6,7 +6,7 @@ import os
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLineEdit,
                                QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar, QRadioButton, QScrollArea,
-                               QSplitter, QStackedWidget, QTextBrowser, QVBoxLayout, QWidget, QSizePolicy)
+                               QSplitter, QTextBrowser, QVBoxLayout, QWidget)
 
 import transfer_outline as o
 from panels.transfer_arrange import button, label

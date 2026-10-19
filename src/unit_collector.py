@@ -528,11 +528,7 @@ class UnitCollector:
         from editor_save import dialog_still_open
 
         return await dialog_still_open(page)
-    async def _verify_saved(self, page: Page, target_url: str, expected_min_chars: int) -> bool:
-        """Shared with Restyle — see src/editor_save.py."""
-        from editor_save import verify_topic_saved
 
-        return await verify_topic_saved(page, target_url, expected_min_chars, self.log)
     async def _scrape_topics(self, page: Page) -> List[dict]:
         self.log("Scanning unit for topic pages...", "info")
         try:
@@ -1809,52 +1805,6 @@ class UnitCollector:
                     except Exception:
                         pass
         return result
-
-    async def _append_to_target(self, context, section_html: str) -> bool:
-        """Open the target page editor, append section_html via source code, save and close."""
-        page = await context.new_page()
-        try:
-            if not await self._navigate_to_edit(page, self._active_target):
-                self.log("✗ Could not open target page editor", "error")
-                return False
-            if not await self._source_code_append(page, section_html):
-                return False
-            return await self._save_and_close(page)
-        except Exception as e:
-            self.log(f"✗ Append to target failed: {e}", "error")
-            return False
-        finally:
-            try:
-                await page.close()
-            except Exception:
-                pass
-
-    async def _read_back_for_styling(self, page: Page, expected_min_chars: int) -> Optional[str]:
-        """Re-open the saved target page and read its HTML back out of the
-        source dialog. Returns None when this attempt raced the editor's own
-        load — a not-yet-populated editor looks exactly like an empty page, and
-        styling that would overwrite the real content with nothing."""
-        if not await self._navigate_to_edit(page, self._active_target):
-            self.log("  ✗ Could not reopen target page", "warning")
-            return None
-        if not await self._open_source_code(page):
-            self.log("  ✗ Source Code not found", "warning")
-            return None
-
-        html = await self._extract_html(page)
-        if not html:
-            self.log("  ✗ Could not extract assembled HTML", "warning")
-            return None
-
-        if expected_min_chars and len(html) < expected_min_chars * 0.5:
-            self.log(
-                f"  ✗ Re-opened page only had {len(html):,} chars, expected "
-                f"~{expected_min_chars:,}. If this repeats with the same number, "
-                "the page is empty and the save was lost — not a slow editor.",
-                "warning",
-            )
-            return None
-        return html
 
     async def _apply_claude_style(
         self, context, expected_min_chars: int = 0,

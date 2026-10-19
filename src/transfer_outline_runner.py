@@ -16,13 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 from pathlib import Path
 from urllib.parse import quote, unquote, urljoin, urlparse, urlsplit
 
 from transfer_files import placeholder, reference_key, render_template, transform_references, unlink_moodle_placeholders
-from transfer_outline import KIND_NAMES, counts, placements, source_of, validate_outline, walk
-from transfer_plan import all_objects, digest, norm, rubric_signature
+from transfer_outline import counts, source_of, validate_outline, walk
+from transfer_plan import all_objects, digest, rubric_signature
 from transfer_runner import TransferRequestRejected, TransferRunner, save_plan, source_inventory_matches
 from transfer_styling import MODES, piece_document, style_page
 

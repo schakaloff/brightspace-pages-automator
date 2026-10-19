@@ -1,9 +1,8 @@
-import math
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton, QLabel, QHBoxLayout, QScrollArea, QFrame,
 )
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QPainterPath, QFont, QPolygonF
-from PySide6.QtCore import Qt, Signal, QRect, QRectF, QPointF, QSize
+from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont
+from PySide6.QtCore import Qt, Signal, QRect, QRectF
 
 import gui_styles
 

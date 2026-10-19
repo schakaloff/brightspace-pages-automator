@@ -3,7 +3,7 @@ from PySide6.QtGui import (
     QPainter, QPixmap, QIcon, QPen, QBrush,
     QPainterPath, QColor, QPolygonF,
 )
-from PySide6.QtCore import Qt, QRectF, QPointF, QRect
+from PySide6.QtCore import Qt, QRectF, QPointF
 
 
 def _make_pixmap(size: int, draw_fn, color: str) -> QPixmap:

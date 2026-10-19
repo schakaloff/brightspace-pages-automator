@@ -341,7 +341,8 @@ async def apply_style(
             ".sr-only sibling outside the anchor. Every visible icon and text node must exist in the "
             "HTML rather than a CSS pseudo-element. Keep the markup shallow so a non-technical "
             "instructor can select the title, use Edit Link, or mouse-copy and paste the row without "
-            "collapsing its width or corrupting it."
+            "collapsing its width or corrupting it. Separate sections with a plain <hr> element, "
+            "never a border on a heading, section, or wrapper, so an instructor can delete a line."
         )
 
     client = anthropic.AsyncAnthropic(api_key=api_key)
@@ -443,6 +444,8 @@ async def apply_style(
             # "New window" setting in the visual Edit Link dialog.
             from link_behavior import open_page_links_in_new_window
             result = open_page_links_in_new_window(result)
+            from dividers import make_dividers_easy_to_select
+            result = make_dividers_easy_to_select(result)
 
             # Imported pages can be mostly presentation markup. A shorter
             # rewrite is valid when its authored content is still present.

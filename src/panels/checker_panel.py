@@ -246,28 +246,6 @@ class CheckerPanel(CheckerReview, QWidget):
             return
         self._run_worker(scan_only=True)
 
-    def _start_full_run(self):
-        """Legacy entry point now uses the visible selected-fix preview."""
-        self._preview_selected()
-
-    def _start_phase_b(self):
-        if not self._mw.chromium_ready:
-            self._log.append_log("Browser engine still installing — please wait.", "warning")
-            return
-        self._run_worker(phase_b=True, full_run=False)
-
-    def _start_order_only(self):
-        if not self._mw.chromium_ready:
-            self._log.append_log("Browser engine still installing — please wait.", "warning")
-            return
-        self._run_worker(order_only=True)
-
-    def _start_books_only(self):
-        if not self._mw.chromium_ready:
-            self._log.append_log("Browser engine still installing — please wait.", "warning")
-            return
-        self._run_worker(books_only=True)
-
     def _stop_run(self):
         """Cancel the active browser task and release any user prompt waits."""
         if self._stop_flag[0]:

@@ -206,7 +206,13 @@ def _snapshot(source_html: str) -> _ContentSnapshot:
 def _normalise_url_parts(value: str):
     value = unicodedata.normalize("NFC", html.unescape(value or "")).strip()
     parsed = urlsplit(value)
-    return parsed, unquote(parsed.path), parsed.query, unquote(parsed.fragment)
+    path = parsed.path
+    # Browsers read a literal "\" in a web URL path as "/", and Brightspace
+    # saves Moodle-imported paths such as "Content\Designer (16).png" that way.
+    # An encoded %5C is a real character, so normalise before unquoting.
+    if parsed.scheme.casefold() in {"", "http", "https"}:
+        path = path.replace("\\", "/")
+    return parsed, unquote(path), parsed.query, unquote(parsed.fragment)
 
 
 def _urls_equivalent(expected: str, actual: str) -> bool:

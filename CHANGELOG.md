@@ -6,6 +6,12 @@ The matching section is pulled into the GitHub Release notes automatically,
 and shown to users in the in-app "Update available" dialog.
 
 ## 0.8.11
+- Section dividers have a wider click area so instructors can select and delete
+  them. Divider formatting preserves quoted attributes and embedded code.
+- Accept Brightspace's normalization of imported image-path separators during
+  save verification, and keep Restyle's cached helper modules consistent.
+- Removed the old GUI backup, disconnected previewer, unused methods and imports,
+  and a duplicate dependency. Fixed the sample link-review layout on small windows.
 - Added Transfer Studio for reviewing, arranging, styling and copying course
   content, with saved drafts, Stop/Resume and verified transfer reports.
 - Added reviewed content duplication, course activity link reuse and structured

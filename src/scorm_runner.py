@@ -1,5 +1,4 @@
 """Separate, resumable Moodle ZIP → Brightspace SCORM workflow."""
-import asyncio
 from contextlib import ExitStack
 
 from browser import launch_browser, wait_for_login

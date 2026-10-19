@@ -31,10 +31,11 @@ async def replace_topic_html(page, topic_url: str, source_html: str, log) -> boo
     so use the authenticated content API and require a semantic read-back.
     """
     from content_preservation import content_is_preserved
+    from dividers import make_dividers_easy_to_select
     from link_behavior import open_page_links_in_new_window
     from unit_overview import BrowserContentAPI
 
-    source_html = open_page_links_in_new_window(source_html)
+    source_html = make_dividers_easy_to_select(open_page_links_in_new_window(source_html))
 
     ids = _topic_ids(topic_url)
     if not ids:

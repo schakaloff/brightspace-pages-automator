@@ -2,7 +2,7 @@ from dataclasses import replace
 import sys
 
 import pytest
-from PySide6.QtWidgets import QApplication, QDialogButtonBox, QLineEdit, QLabel
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QLineEdit, QLabel, QPushButton
 
 sys.path.insert(0, "src")
 
@@ -96,15 +96,18 @@ def test_reset_does_not_open_a_location_dialog(panel):
 
 
 @pytest.mark.parametrize("width", [560, 960])
-def test_small_layout_keeps_primary_action_visible_without_horizontal_scroll(panel, width):
+def test_small_layout_keeps_primary_action_visible_without_horizontal_scroll(panel, width, qtbot):
     panel.resize(width, 560)
-    QApplication.processEvents()
-    assert panel._scroll.horizontalScrollBar().maximum() == 0
+    qtbot.waitUntil(lambda: panel._scroll.horizontalScrollBar().maximum() == 0)
     assert panel.rect().contains(panel._review_btn.mapTo(panel, panel._review_btn.rect().center()))
-    panel._scroll.ensureWidgetVisible(panel._checks["reading"])
-    QApplication.processEvents()
     viewport = panel._scroll.viewport()
-    assert viewport.rect().contains(panel._checks["reading"].mapTo(viewport, panel._checks["reading"].rect().center()))
+    def reading_is_visible():
+        # Resizing rebuilds the rows; let Qt finish its deferred layout before
+        # judging whether the refreshed checkbox can be scrolled into view.
+        checkbox = panel._checks["reading"]
+        panel._scroll.ensureWidgetVisible(checkbox)
+        return viewport.rect().contains(checkbox.mapTo(viewport, checkbox.rect().center()))
+    qtbot.waitUntil(reading_is_visible)
     assert panel.links[0].selected
 
 
@@ -118,7 +121,10 @@ def test_regular_app_routes_between_preview_and_existing_checker(qtbot, monkeypa
     monkeypatch.setattr(MainWindow, "closeEvent", lambda self, event: event.accept())
     window = MainWindow()
     qtbot.addWidget(window)
-    window._checker._preview_btn.click()
+    window._checker._other_btn.click()
+    preview_button, = [button for button in window._checker.findChildren(QPushButton)
+                       if button.text() == "Try sample link review"]
+    preview_button.click()
     assert window._stack.currentWidget() is window._link_review
     window._link_review._existing_btn.click()
     assert window._stack.currentWidget() is window._checker

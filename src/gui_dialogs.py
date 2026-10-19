@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QScrollArea, QWidget, QCheckBox, QSpinBox,
+    QPushButton, QScrollArea, QWidget, QCheckBox,
     QFrame, QProgressBar, QFileDialog, QLineEdit,
 )
 from PySide6.QtCore import Qt, Signal
@@ -662,7 +662,6 @@ class UpdateDialog(QDialog):
         launched = False
         try:
             from update_checker import (
-                UpdateIntegrityError,
                 cleanup_update_dir,
                 download_asset,
                 fetch_expected_sha256,

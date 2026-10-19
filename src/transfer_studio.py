@@ -13,7 +13,7 @@ import threading
 from http.cookies import SimpleCookie, CookieError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit, quote
+from urllib.parse import parse_qs, urlsplit
 
 import transfer_outline as outline
 from bulk_page_creator import course_id_from_url

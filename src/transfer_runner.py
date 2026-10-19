@@ -1,8 +1,6 @@
 """Preview-first, journaled target execution. No destructive rollback."""
 from __future__ import annotations
 
-import asyncio
-import copy
 import hashlib
 import json
 import os
@@ -15,7 +13,7 @@ from transfer_api import TransferAPI, choose_templates
 from transfer_files import FileBundle, placeholder, reference_key, render_template
 from transfer_plan import (SKIP, all_objects, assignment_for, assignment_grading, build_plan, category_for_role, digest,
                            grade_categories, native_required, norm, recipe_sections, rubric_signature,
-                           session_section, validate_plan)
+                           validate_plan)
 
 
 class TransferRequestRejected(RuntimeError):

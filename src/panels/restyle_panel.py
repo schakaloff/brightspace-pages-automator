@@ -10,7 +10,7 @@ from PySide6.QtCore import Signal, QTimer
 
 from gui_log import LogWidget
 from panels._shared import (
-    _divider, _form_label, _section_header, PAGE_THEMES, _build_theme_swatches, friendly_error,
+    _form_label, _section_header, _build_theme_swatches, friendly_error,
     NoScrollComboBox,
 )
 from style_presets import STYLE_PRESETS, load_style_reference
@@ -197,8 +197,8 @@ class RestylePanel(QWidget):
                     done_sent[0] = True
                     q.put(("__DONE__", ""))
             try:
-                import sys as _sys
-                _sys.modules.pop("automator", None)
+                # Never re-import automator alone: its helpers stay cached, so
+                # a fresh automator beside a stale run_summary crashed mid-run.
                 from automator import run as automator_run
                 asyncio.run(automator_run(
                     url=url,
