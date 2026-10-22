@@ -185,7 +185,7 @@ def test_native_dmg_replacement_and_rollback(tmp_path, monkeypatch, fail_relaunc
     directory = tmp_path / (mac.UPDATE_DIR_PREFIX + 'native')
     directory.mkdir()
     image = directory / 'update.dmg'
-    subprocess.run(['/usr/bin/hdiutil', 'create', '-srcfolder', str(source),
+    subprocess.run(['/usr/bin/hdiutil', 'create', '-srcfolder', str(source.parent),
                     '-ov', '-format', 'UDZO', str(image)], check=True, capture_output=True)
     monkeypatch.setattr(mac, 'update_result_path', lambda: tmp_path / 'result')
     monkeypatch.setattr(mac, 'update_log_path', lambda: tmp_path / 'log')

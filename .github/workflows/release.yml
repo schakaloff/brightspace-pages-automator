@@ -4,6 +4,10 @@ on:
   push:
     branches: [main, dev]
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   get-version:
     runs-on: ubuntu-latest
@@ -100,13 +104,20 @@ jobs:
       - name: Write build commit
         run: git rev-parse --short HEAD > BUILD_COMMIT
       - run: pyinstaller installer/brightspace_automator_mac.spec --noconfirm
+      - name: Verify packaged app and prepare drag-to-Applications image
+        run: |
+          codesign --verify --deep --strict "dist/Brightspace Pages Automator.app"
+          mkdir dmg-root
+          ditto "dist/Brightspace Pages Automator.app" "dmg-root/Brightspace Pages Automator.app"
+          ln -s /Applications dmg-root/Applications
+          cp docs/MAC_UPDATES.md "dmg-root/Updating MTB Writer.txt"
       - name: Wrap .app into a .dmg
         run: |
           # hdiutil intermittently fails with "Resource busy" right after PyInstaller's
           # ad-hoc code-signing step on GitHub's macOS runners — retry a few times.
           for i in 1 2 3 4 5; do
             hdiutil create -volname "Brightspace Pages Automator" \
-              -srcfolder "dist/Brightspace Pages Automator.app" \
+              -srcfolder dmg-root \
               -ov -format UDZO \
               "BrightspacePagesAutomator-${{ needs.get-version.outputs.version }}-${{ matrix.arch }}.dmg" && break
             echo "hdiutil failed (attempt $i), retrying in 5s..."
