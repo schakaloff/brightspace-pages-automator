@@ -22,8 +22,10 @@ def bundle(path, marker='new', native=False):
         CFBundlePackageType='APPL', CFBundleName='MTB Writer', CFBundleVersion='1')))
     executable = contents / 'MacOS' / 'BrightspacePagesAutomator'
     if native:
-        shutil.copy2('/usr/bin/true', executable)
-        subprocess.run(['/usr/bin/codesign', '--force', '--deep', '--sign', '-', str(path)], check=True)
+        # Copy bytes only: copy2 also tries to transfer SIP-protected system
+        # flags from /usr/bin/true, which an ordinary Mac user cannot set.
+        shutil.copyfile('/usr/bin/true', executable)
+        executable.chmod(0o755)
     else:
         executable.write_text('fake executable')
     # A resource marker lets us distinguish old/new bundles after replacement.
