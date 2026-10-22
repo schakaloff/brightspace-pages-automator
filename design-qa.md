@@ -298,3 +298,75 @@ an ungraded task, another graded assignment, unchanged 70/30 categories, no sour
 writes, and a completed rerun without new writes. Tests also cover malformed choices,
 protection of scored tasks, direct next-item navigation and persisted mapping refresh.
 No live Brightspace writes or changes to Nick's actual saved proposal were made.
+
+## Sidebar header: selected option 1 (2026-10-21)
+
+Source visual truth: `C:/Users/Nick/.codex/generated_images/01a15f57-7d40-72c2-bff2-db97e2a04afb/exec-f1dbf3a0-e000-4532-919b-11701e22dc69.png` (1448 x 1086, generated comparison board showing open and collapsed states).
+
+Implementation evidence: `test-results/sidebar/light-expanded.png`, `light-collapsed.png`, `dark-expanded.png`, and `dark-collapsed.png`. Native PySide6/Fusion, Segoe UI, 1120 x 800 logical and physical pixels, density 1. Existing app navigation and empty Checker state. This is a native application change, not a website prototype.
+
+Combined comparison evidence: `test-results/sidebar/option-1-comparison.png`. The source board is scaled proportionally to 720 x 540; native app regions remain at density 1. Focused header crops below show both open and collapsed states; native crops enlarged proportionally for inspection. The generated board has no reliable CSS size or device density, so it is a structural reference, not a pixel-exact viewport specification. Existing 160px sidebar width and app content layout are intentionally retained.
+
+Findings: no actionable P0/P1/P2 mismatches in the scoped header. The two-line brand is replaced with a contiguous single-line wordmark, the header is reduced to 56px, and the panel glyph is replaced with the selected bordered directional chevron. The collapsed control stays centered and reverses direction. No changes to the unrelated Checker content are claimed.
+
+Required fidelity surfaces checked:
+- Typography: native Segoe UI, matching size for both words, muted medium-weight MTB and bold Writer. No wrapping or clipping.
+- Spacing and layout: common vertical center for wordmark and 28px toggle, 14px outer padding, compact header, consistent rail alignment.
+- Colors: existing light/dark theme tokens retained; active navigation and Settings remain intact.
+- Asset quality: existing QPainter icon library supplies sharp directional chevrons; no raster logos, decorative assets, or placeholders are required by the selected concept.
+- Copy: MTB Writer, Check & fix, Media, Build & style, Settings, and accessible Collapse/Expand sidebar labels checked.
+
+Validation: 30 GUI tests passed, covering mouse and keyboard toggling, navigation and Settings while collapsed, animation reversal, startup preference restoration, and saved user changes. Both themes rendered and inspected. Production credentials and course data were not used by the render harness. Git diff whitespace check passed.
+
+Comparison history: first post-change comparison passed; no P0/P1/P2 fixes were required after comparison. Native application rendering and existing width are intentional adaptations of the generated concept.
+
+Implementation checklist: complete. Follow-up polish: none required for this scope.
+
+final result: passed
+
+## Media chooser: selected option 1 (2026-10-21)
+
+Source visual truth: `C:/Users/Nick/.codex/generated_images/01a15f57-7d40-72c2-bff2-db97e2a04afb/exec-34f09a49-446b-4ec8-b38a-1a7a258b72a2.png` (1774 x 887).
+
+Implementation evidence: `test-results/media-hub/light-hover.png`, `light-focus.png`, `light-expanded.png`, `dark-expanded.png`, and `dark-narrow.png`. Native PySide6/Fusion at density 1 with Segoe UI. Desktop viewport 1120 x 800 logical/physical pixels; narrow viewport 720 x 560. State: Media chooser, three tools, no transfer running. Render harness disables credentials, config writes and startup network work.
+
+Combined full-view and focused-row comparison: `test-results/media-hub/option-1-comparison.png`. Source is proportionally normalized to 960 x 480. Implementation uses the same 960 x 480 Media content crop, removing the existing 160px sidebar and unused lower canvas. Focused first-row crops preserve scale. Generated mockup has no reliable CSS/device density; existing native desktop layout is the implementation constraint.
+
+Comparison history:
+- Initial review found a P2 hierarchy difference: 16px tool titles and 56px icon tiles were smaller than the selected visual direction. Increased titles to 18px, descriptions to 15px, icon tiles to 64px, minimum row height to 96px, and screen title to 28px. Captured again and inspected the combined comparison and narrow layout.
+- Post-fix comparison: no outstanding actionable P0/P1/P2 issues. The new rows reproduce the left icon tile, grouped text, full-width navigation target, right chevron and teal hover treatment.
+
+Required fidelity surfaces:
+- Typography: Segoe UI; 28px page title, 18px semibold tool names and 15px descriptions. Descriptions wrap without clipping at narrow widths.
+- Layout: 32px page gutters, 12px row gaps, 12px rounded corners, 64px icon tiles and full-row hit targets. Narrow layouts scroll vertically when required, with no horizontal scroll.
+- Colors: existing native theme tokens, neutral icon tiles, white/light surfaces and teal hover/focus border. Dark theme icons and surfaces refresh with the application theme.
+- Assets: unmodified puzzle, package and movie outline SVGs from the same pinned Tabler v3.41.0 release already bundled by the application. Existing chevron asset. The official movie glyph is a filmstrip without the mockup's play triangle; this is an accepted P3 asset variation, preserving the existing icon family and license. No placeholder images or decorative generated assets are needed.
+- Copy: Media, H5P activities, SCORM packages, Kaltura videos and their descriptions retained. Course-URL hint follows the selected concept. Separate Open buttons removed.
+
+Behavior: each row is one native accessible button. Qt window-level event tests click icons, titles and whitespace on all three tools and confirm one correct navigation event each. Tab, Enter and Space work without nested focus targets. Existing tool routes and course-URL propagation are retained. Opening a tool does not start a transfer.
+
+Validation: 29 existing GUI/startup/hub checks passed, 17 focused navigation/integration checks passed, and 6 final row-layout/SCORM integration checks passed after the sizing refinement (overlapping suites). New SVGs render in both themes and are included by the existing assets packaging rules. Git diff whitespace check passed.
+
+Implementation checklist complete. Residual P3: native Tabler filmstrip differs slightly from the illustrative video icon in the generated mockup. No live Moodle or Brightspace actions were needed.
+
+final result: passed
+
+## Side-by-side window sizing (2026-10-21)
+
+Implemented the resize fix in the native application shell. Minimum window size is now 560 x 480 logical pixels. Below 760px width the sidebar automatically becomes an icon rail; above 820px it restores the user's preferred state. Automatic changes never overwrite the saved preference, and the user can still manually expand navigation while narrow.
+
+Only the active page contributes its minimum size to the content viewport. Dense legacy pages can scroll inside that viewport without forcing the entire window wider. Media, Checker, H5P and Settings were visually checked at 624 x 640 logical pixels with 150% scale, in both themes. Evidence: `test-results/window-layout/light-media-150.png`, `light-checker-150.png`, `light-h5p-150.png`, `light-settings-150.png`, corresponding dark captures, minimum-size and restored-wide captures. Captures are native Qt client areas; Windows title bars/borders are not included.
+
+Removed the startup override that set QT_SCALE_FACTOR=1.5 and relaunched. Qt 6 already follows Windows' per-monitor scale, and a global factor multiplies the native factor: https://doc.qt.io/qt-6/highdpi.html#qt-scale-factor . Explicit environment settings supplied by the user remain untouched.
+
+Validation: 19 window/startup/sidebar/media tests plus 76 existing GUI/workflow regressions passed (95 total). Cases cover minimum/half-screen widths, keyboard/pointer navigation, manual preference restoration, narrow primary actions, and scrolling a dense page then returning to an ordinary page without overflow. Manual Qt scale checks at 100%, 125%, 150% and 200% retain a 624px logical window and render at 624, 780, 936 and 1248 physical pixels respectively. The 936px client area leaves room in the user's approximately 960px half-screen at 150%; native Windows snapping itself was not driven by this test harness.
+
+No source/course content, credentials or real preferences were changed by the verification harness. Text size remains governed by the normal platform/theme settings. Dense legacy pages use scrolling rather than a full UI redesign. Visual inspection found no blocked primary controls at the tested sizes.
+
+final result: passed
+
+## H5P Back navigation (2026-10-21)
+
+Added a persistent Back button at the left of the H5P footer, keeping Stop & save on the right. The saved-progress hint now sits above the actions so the buttons remain reachable in narrow windows. Back from an active scan, review or transfer cancels the worker, waits for its save/browser cleanup, then returns to editable course setup. Back from results returns to setup; Back from idle setup returns to Media. URLs stay populated and saved transfers remain available. Stop & save still opens the progress/results view.
+
+Native Qt screenshots inspected in light and dark themes: `test-results/h5p-design/app/light-624-connect-waiting.png` and `dark-1120-connect-waiting.png`. Back, Stop & save and the disabled scan action fit the narrow footer. Browser-course mutations were not needed for this UI check.

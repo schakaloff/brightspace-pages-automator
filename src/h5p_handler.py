@@ -205,7 +205,7 @@ class H5PHandler:
                 self.log(f"  ✗ Recovery copy failed for {failure['name']}: {exc}", "error")
         return recovered
 
-    async def enable_downloads(self, context, items: list) -> list[dict]:
+    async def enable_downloads(self, context, items: list, *, activity_keys=None) -> list[dict]:
         """
         For each H5P activity: open Settings, tick Allow download, Save and display.
         Each item gets a fresh page so a crashed/stalled tab can't affect the rest.
@@ -215,6 +215,7 @@ class H5PHandler:
             if i.get("type") == "EXTERNAL"
             and ("hvp" in i.get("hint", "") or "h5p" in i.get("hint", ""))
             and i.get("href")
+            and (activity_keys is None or self.activity_key(i) in activity_keys)
         ]
 
         if not h5p_items:
@@ -229,6 +230,9 @@ class H5PHandler:
         save_dir.mkdir(parents=True, exist_ok=True)
 
         cached_status, pending_status = self.local_download_status(items)
+        if activity_keys is not None:
+            cached_status = [e for e in cached_status if self.activity_key(e['item']) in activity_keys]
+            pending_status = [e for e in pending_status if self.activity_key(e['item']) in activity_keys]
         cached_items = [
             (entry["item"], entry["safe_name"], entry["path"])
             for entry in cached_status
@@ -262,6 +266,11 @@ class H5PHandler:
             )
 
         for idx, (item, safe_name, save_path) in enumerate(pending_items, 1):
+            if self._should_stop():
+                return failures
+            observer = getattr(self, 'on_download', None)
+            if observer:
+                observer(safe_name, 'pending')
             name      = item["name"]
             url       = item["href"]
 
@@ -437,6 +446,8 @@ class H5PHandler:
                 self.log(f"    ✗ Failed: {e}", "error")
                 failure_reason = str(e)
             finally:
+                if observer:
+                    observer(safe_name, 'confirmed' if downloaded else 'failed')
                 if not downloaded:
                     failures.append({
                         "activity_key": self.activity_key(item),
@@ -1055,11 +1066,9 @@ class H5PHandler:
             await tab.wait_for_timeout(1000)
 
     TITLE_SELECTORS = (
-        'input.h5peditor-text[maxlength="255"]',
-        'input.h5peditor-text[name*="title"]',
-        'input[name*="title"]',
-        'input[id*="title"]',
-        'input.h5peditor-text',
+        '.h5peditor-form > .tree > .field-name-extraTitle input.h5peditor-text',
+        '.h5peditor-form > .tree > .field-name-title input.h5peditor-text',
+        'input.h5peditor-text[name="title"]',
     )
 
     async def _set_content_title(self, tab, item_name: str, attempts: int = 10) -> bool:
@@ -1071,19 +1080,24 @@ class H5PHandler:
         about:blank/srcdoc and was being skipped entirely.
         """
         for attempt in range(attempts):
-            for frame in tab.frames:
-                if frame.is_detached():
-                    continue
-                for sel in self.TITLE_SELECTORS:
+            # Try semantic title selectors across all frames before any fallback.
+            # A generic text input can be an activity question or the outer page title.
+            for sel in self.TITLE_SELECTORS:
+                for frame in tab.frames:
+                    if frame.is_detached():
+                        continue
                     try:
-                        if not await frame.locator(sel).count():
+                        if await frame.locator(sel).count() != 1:
                             continue
                         inp = frame.locator(sel).first
                         await inp.wait_for(state="visible", timeout=2000)
                         await inp.click(click_count=3, timeout=3000)
                         await inp.fill(item_name, timeout=3000)
+                        # H5P updates its metadata model on change, not on input.
+                        await inp.dispatch_event('change')
+                        await inp.press('Tab')
                         after = await inp.input_value()
-                        if (after or "").strip() == item_name.strip():
+                        if after == item_name:
                             self.log(
                                 f"    title set via {sel} (frame {frame.url[:50]!r})",
                                 "dim",
@@ -1107,6 +1121,7 @@ class H5PHandler:
     async def upload_one(self, tab, h5p_frame, h5p_file, item_name,
                          known_cloud_titles: Optional[list[str]] = None) -> bool:
         """Upload one .h5p through the cloud editor and return to its list."""
+        self._last_verified_upload = None
         list_url = h5p_frame.url
         try:
             if known_cloud_titles is not None and h5p_frame.is_detached():
@@ -1200,20 +1215,22 @@ class H5PHandler:
             }""")
             await tab.wait_for_timeout(800)
 
-            try:
-                async with tab.expect_file_chooser(timeout=5000) as fc_info:
-                    if not await self._click_when_ready(
-                        hub_frame,
-                        'button.h5p-hub-upload-button',
-                        "Clicking H5P upload file button",
-                        timeout=5000,
-                    ):
-                        raise RuntimeError("H5P upload file button was not ready")
-                fc = await fc_info.value
-                await fc.set_files(str(h5p_file))
-            except Exception:
-                self.log("  → Upload button did not open file chooser; setting hidden file input directly", "dim")
-                await hub_frame.locator('input[type="file"][accept=".h5p"]').first.set_input_files(str(h5p_file))
+            from h5p_titles import named_upload_package
+            with named_upload_package(h5p_file, item_name) as upload_file:
+                try:
+                    async with tab.expect_file_chooser(timeout=5000) as fc_info:
+                        if not await self._click_when_ready(
+                            hub_frame,
+                            'button.h5p-hub-upload-button',
+                            "Clicking H5P upload file button",
+                            timeout=5000,
+                        ):
+                            raise RuntimeError("H5P upload file button was not ready")
+                    fc = await fc_info.value
+                    await fc.set_files(str(upload_file))
+                except Exception:
+                    self.log("  → Upload button did not open file chooser; setting hidden file input directly", "dim")
+                    await hub_frame.locator('input[type="file"][accept=".h5p"]').first.set_input_files(str(upload_file))
 
             await tab.wait_for_timeout(1000)
             self.log("  → Clicking Use…", "dim")
@@ -1294,6 +1311,12 @@ class H5PHandler:
             except Exception:
                 await tab.wait_for_timeout(3000)
 
+            saved_frame = await self.find_list_frame(tab)
+            saved_titles = await self._collect_cloud_titles(tab, saved_frame) if saved_frame else []
+            if item_name not in saved_titles:
+                self.log(f"  ✗ The uploaded H5P title did not match the Moodle name: {item_name!r}", 'error')
+                return False
+            self._last_verified_upload = item_name
             self.log(f"  ✓ Uploaded: {item_name}", "success")
             return True
         except Exception as e:
@@ -1566,15 +1589,27 @@ class H5PHandler:
     async def finalize(self, tab, title: str, is_quiz: bool, should_grade: bool = False) -> bool:
         editor_url = getattr(tab, 'url', '')
         try:
-            # Fill title — prefer exact maxlength match, fall back to any d2l-input
+            from h5p_titles import new_page_target, saved_page_id, ensure_owned_page_title
+            target = new_page_target(editor_url) if not is_quiz else None
+            api = None
+            existing_ids = set()
+            if target:
+                from unit_overview import BrowserContentAPI
+                api = BrowserContentAPI(tab, *target)
+                existing_ids = {str(t['Id']) for t in await api.list_structure()}
+            # A filled DOM value is not proof that the page's save model was updated.
             self.log(f"  → Setting title: {title!r}…", "dim")
             title_filled = False
-            for sel in [
+            title_selectors = [
                 'input.d2l-input[maxlength="256"]' if is_quiz else 'input.d2l-input[maxlength="150"]',
                 'input.d2l-input[maxlength="256"]',
                 'input.d2l-input[maxlength="150"]',
-                'input.d2l-input',
-            ]:
+            ]
+            # Insert Stuff can reload the editor after its final Insert click.
+            # Wait for the new editor instead of filling a disappearing old input.
+            await tab.locator(', '.join(f'{sel}:visible' for sel in title_selectors)).first.wait_for(
+                state='visible', timeout=15000)
+            for sel in title_selectors:
                 try:
                     loc = tab.locator(sel).first
                     count = await tab.locator(sel).count()
@@ -1584,16 +1619,24 @@ class H5PHandler:
                         f"    title selector {sel}: count={count}, visible={visible}, enabled={enabled}",
                         "dim",
                     )
-                    if count > 0:
+                    if count == 1 and visible and enabled:
                         await loc.wait_for(state="visible", timeout=5000)
                         await loc.click(click_count=3, timeout=5000)
-                        await loc.fill(title, timeout=5000)
-                        title_filled = True
-                        break
+                        # Brightspace can show a filled value yet retain Untitled
+                        # in its save model. Send the keyboard events as well.
+                        await loc.fill('', timeout=5000)
+                        await loc.press_sequentially(title, timeout=5000)
+                        await loc.dispatch_event('change')
+                        await loc.press('Tab')
+                        if await loc.input_value() == title:
+                            await tab.wait_for_timeout(250)
+                            title_filled = await loc.input_value() == title
+                        if title_filled:
+                            break
                 except Exception as title_err:
                     self.log(f"    title selector {sel} failed: {str(title_err).splitlines()[0]}", "dim")
             if not title_filled:
-                self.log("  ✗ Title input not found; page was not saved", "error")
+                self.log("  ✗ The exact Moodle name could not be confirmed in Page Title; page was not saved", "error")
                 return False
             # Save the named action. A generic d2l-desktop selector can match a
             # different control on the New Page screen.
@@ -1637,6 +1680,14 @@ class H5PHandler:
                 except Exception as exc:
                     self.log(f"  ✗ Save and Close did not finish: {str(exc).splitlines()[0]}", 'error')
                     return False
+            if api:
+                topic_id = saved_page_id(editor_url, tab.url, existing_ids)
+                if topic_id:
+                    on_saved = getattr(self, '_on_page_saved', None)
+                    if on_saved:
+                        on_saved(topic_id)
+                    await ensure_owned_page_title(api, topic_id, title)
+                    self.log(f'  ✓ Saved page name confirmed: {title}', 'success')
             return True
         except Exception as e:
             self.log(f"  ✗ _h5p_finalize error: {e}", "error")
@@ -1962,9 +2013,22 @@ class H5PHandler:
             remaining = []
             for item in matched:
                 if self._should_stop(): return
-                present = await self._verify_topic_in_module(page, course_id, item['bs_module_id'], item['name'])
+                if item.get('name_check_required') and item.get('saved_topic_id'):
+                    from h5p_titles import ensure_owned_page_title
+                    from unit_overview import BrowserContentAPI
+                    await ensure_owned_page_title(BrowserContentAPI(page, course_id, item['bs_module_id']),
+                        item['saved_topic_id'], item['name'])
+                    verify_saved_name = getattr(self, '_verify_saved_name', self._verify_topic_in_module)
+                    if not await verify_saved_name(page, course_id, item['bs_module_id'], item['name']):
+                        raise RuntimeError(f"{item['name']}: the recorded page could not be verified after its rename. A second page will not be created.")
+                    self._checkpoint(item, 'name_check_required', False)
+                    item['name_check_required'] = False
+                verifier = getattr(self, '_verify_saved_name', self._verify_topic_in_module) if item.get('name_check_required') else self._verify_topic_in_module
+                present = await verifier(page, course_id, item['bs_module_id'], item['name'])
+                if item.get('name_check_required') and not present:
+                    raise RuntimeError(f"{item['name']}: check and correct the previously saved page title in Brightspace before retrying. A second page will not be created.")
                 if present:
-                    self._checkpoint(item, 'insertion', 'confirmed')
+                    self._checkpoint(item, 'insertion', 'confirmed', name_check_required=False)
                     self._summary['h5p_already_present'].append((item['name'], item['bs_module_title']))
                     if item['should_grade'] and not item.get('graded'):
                         self._summary['h5p_grade_failed'].append((item['name'], item['bs_module_title']))
@@ -2097,18 +2161,20 @@ class H5PHandler:
                                 return
                             self.log(f"  [{idx}/{len(to_upload)}] Uploading: {item['name']}…", "info")
                             if progress and not Path(item['file']).is_file():
-                                raise RuntimeError(f"{item['name']}: the saved download is missing. Run a fresh course scan to download it again.")
+                                self._checkpoint(item, 'problem', 'Download missing. Resume to retry or choose a replacement file.')
+                                item['upload_failed'] = True
+                                continue
                             self._checkpoint(item, 'upload', 'pending')
                             ok = await self.upload_one(
                                 upload_tab, h5p_frame, item["file"], item["name"],
                                 known_cloud_titles=known_cloud_titles,
                             )
-                            if ok and progress:
+                            if ok and progress and getattr(self, '_last_verified_upload', None) != item['name']:
                                 # A clicked cloud Save is not a durable result
                                 # until the uploaded title can be read back.
                                 live = await self.find_list_frame(upload_tab)
                                 verified = await self._collect_cloud_titles(upload_tab, live) if live else []
-                                ok = bool(self._title_in_cloud(item['name'], verified))
+                                ok = item['name'] in verified
                             if not ok:
                                 self.log(f"    ✗ Upload failed — will skip insert for this item", "warning")
                                 item["upload_failed"] = True
@@ -2201,7 +2267,12 @@ class H5PHandler:
                         self._summary["h5p_failed"].append((name, bs_module_title))
                     continue
 
-                ok = await self.finalize(tab, name, is_quiz=False, should_grade=item["should_grade"])
+                self._on_page_saved = lambda topic_id: self._checkpoint(item, 'saved_topic_id', topic_id,
+                    name_check_required=True)
+                try:
+                    ok = await self.finalize(tab, name, is_quiz=False, should_grade=item["should_grade"])
+                finally:
+                    self._on_page_saved = None
                 if not ok:
                     if self._last_grade_status in ("skip", "stop"):
                         self._summary["h5p_grade_failed"].append((name, bs_module_title))
@@ -2209,7 +2280,7 @@ class H5PHandler:
                         if self._last_grade_status == "stop":
                             return
                         continue
-                    self.log("    ✗ Page was not saved", "error")
+                    self.log("    ✗ Page save or saved-name verification did not finish", "error")
                     self._summary["h5p_failed"].append((name, bs_module_title))
                     consecutive_save_failures += 1
                     if consecutive_save_failures >= 3:
@@ -2227,7 +2298,8 @@ class H5PHandler:
                 # delay is enough, or treating one early miss as a failure.
                 confirmed = False
                 for attempt in range(4):
-                    confirmed = await self._verify_topic_in_module(
+                    verify_saved_name = getattr(self, '_verify_saved_name', self._verify_topic_in_module)
+                    confirmed = await verify_saved_name(
                         page, course_id, bs_module_id, name
                     )
                     if confirmed:
@@ -2241,9 +2313,12 @@ class H5PHandler:
                     newly_inserted_count += 1
                     bucket = "h5p_graded" if item["should_grade"] else "h5p_ungraded"
                     self._summary[bucket].append((name, bs_module_title))
-                    self._checkpoint(item, 'insertion', 'confirmed', graded=item['should_grade'])
+                    self._checkpoint(item, 'insertion', 'confirmed', graded=item['should_grade'], name_check_required=False)
                 else:
-                    self.log("    ✗ Saved page could not be confirmed in its unit", "error")
+                    self.log("    ✗ Saved H5P page could not be confirmed with its Moodle name in the destination unit", "error")
+                    if getattr(self, '_verify_saved_name', None):
+                        self._checkpoint(item, 'name_check_required', True,
+                            problem='A page may have saved with a different name. Check its title in Brightspace before retrying.')
                     self._summary["h5p_failed"].append((name, bs_module_title))
                     consecutive_save_failures += 1
                     if consecutive_save_failures >= 3:

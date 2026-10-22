@@ -29,6 +29,7 @@ def clean_url(url):
 class H5PRun:
     def __init__(self, path, data):
         self.path, self.data = Path(path), data
+        self.on_change = None
 
     @classmethod
     def create(cls, bs_url, moodle_url, course_id, grade_all=False, directory=None):
@@ -67,6 +68,8 @@ class H5PRun:
             file.flush()
             os.fsync(file.fileno())
         os.replace(temp, self.path)
+        if self.on_change:
+            self.on_change(copy.deepcopy(self.data))
 
     def capture_moodle(self, items):
         from h5p_handler import H5PHandler
@@ -106,6 +109,8 @@ class H5PRun:
         modules = {str(row['id']): row for row in bs_flat if row.get('kind') == 'MODULE'}
         result = []
         for row in self.data['activities']:
+            if not row.get('selected', True):
+                continue
             module = modules.get(str(row['bs_module_id']))
             if not module:
                 raise ValueError(f"{row['name']}: saved destination unit is missing. Run a fresh course scan.")

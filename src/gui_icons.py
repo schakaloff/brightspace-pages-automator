@@ -178,6 +178,16 @@ def _next_arrow(p, s, c):
     p.drawLine(QPointF(s * 0.62, s * 0.68), QPointF(s * 0.86, cy))
 
 
+def _sidebar_toggle(p, s, c, expand):
+    _stroke(p, c, 1.8)
+    outer, inner = (.38, .65) if expand else (.62, .35)
+    path = QPainterPath()
+    path.moveTo(s * outer, s * .24)
+    path.lineTo(s * inner, s * .50)
+    path.lineTo(s * outer, s * .76)
+    p.drawPath(path)
+
+
 def _done(p, s, c):
     pen = QPen(c, 1.8)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -243,6 +253,8 @@ _FNS = {
     "settings": _settings, "run": _run, "next": _next_arrow,
     "done": _done, "locked": _locked, "running": _running,
     "update": _update, "check": _check,
+    "sidebar_expand": lambda p, s, c: _sidebar_toggle(p, s, c, True),
+    "sidebar_collapse": lambda p, s, c: _sidebar_toggle(p, s, c, False),
 }
 
 

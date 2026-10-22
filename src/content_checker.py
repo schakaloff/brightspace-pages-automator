@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from playwright.async_api import BrowserContext, Page
+from playwright.async_api import BrowserContext, Page, TimeoutError as PlaywrightTimeoutError
 from config import SESSION_FILE
 from js_helpers import DEEP_FIND_JS
 from h5p_handler import H5PHandler
@@ -530,6 +530,8 @@ class ContentChecker:
             grade_recovery=h5p_grade_recovery,
         )
         self._h5p.grade_all = h5p_grade_all
+        self._h5p._verify_saved_name = lambda page, course, module, name: self._verify_topic_in_module(
+            page, course, module, name, require_h5p=True, exact_title=True)
 
     def _debug_log_worker(self) -> None:
         """Background thread that writes log messages to disk."""
@@ -1909,6 +1911,7 @@ class ContentChecker:
     async def _verify_topic_in_module(
         self, bs_page, course_id: str, module_id, expected_name: str,
         require_h5p: bool = False,
+        exact_title: bool = False,
     ) -> bool:
         """Check via the in-browser D2L API whether a topic with this exact
         (normalized) title exists in the module. When *require_h5p* is true,
@@ -1932,7 +1935,8 @@ class ContentChecker:
             name_norm = re.sub(r'[^\w]', '', expected_name).lower()
             for topic in topics:
                 title_norm = re.sub(r'[^\w]', '', topic.get('Title', '')).lower()
-                if title_norm == name_norm:
+                matches = topic.get('Title', '') == expected_name if exact_title else title_norm == name_norm
+                if matches:
                     if not require_h5p or self._is_h5p_topic(topic):
                         return True
                     # Insert Stuff stores H5P inside an ordinary HTML page.
@@ -2875,50 +2879,89 @@ class ContentChecker:
 
     async def _enable_moodle_edit_mode(self, tab: Page) -> bool:
         """Enable Moodle editing and prove the post-navigation page is editable."""
+        selectors = ('#user-editing-switch, input[name="setmode"][type="checkbox"], '
+                     '.editmode-switch-form input[type="checkbox"]')
+        state_js = """() => {
+            const toggle = document.querySelector(
+                '#user-editing-switch, input[name="setmode"][type="checkbox"], '
+                + '.editmode-switch-form input[type="checkbox"]'
+            );
+            const enabled = !!document.body && (document.body.classList.contains('editing')
+                || !!document.querySelector('.editing_move, [data-action="editcmodule"]'));
+            return { enabled, checked: !!(toggle && toggle.checked), hasToggle: !!toggle,
+                     documentId: performance.timeOrigin, url: location.href };
+        }"""
+
+        def interrupted_by_navigation(exc):
+            message = str(exc).lower()
+            return any(fragment in message for fragment in (
+                'execution context was destroyed', 'cannot find context with specified id',
+                'frame was detached', 'element is not attached', 'element was detached',
+            ))
+
+        def check_stopped():
+            if self.stop_flag[0]:
+                raise asyncio.CancelledError()
+
         async def state() -> dict:
-            return await tab.evaluate("""() => {
-                const toggle = document.querySelector(
-                    '#user-editing-switch, input[name="setmode"][type="checkbox"], '
-                    + '.editmode-switch-form input[type="checkbox"]'
-                );
-                const enabled = document.body.classList.contains('editing')
-                    || !!(toggle && toggle.checked)
-                    || !!document.querySelector('.editing_move, [data-action="editcmodule"]');
-                return { enabled, hasToggle: !!toggle };
-            }""")
+            # Both the login redirect and the Edit-mode form can replace the
+            # document between DOMContentLoaded and a read of its state.
+            for attempt in range(4):
+                check_stopped()
+                try:
+                    await tab.wait_for_load_state('domcontentloaded', timeout=15000)
+                    return await tab.evaluate(state_js)
+                except Exception as exc:
+                    if not interrupted_by_navigation(exc) or attempt == 3:
+                        raise
+                    await tab.wait_for_timeout(250)
 
-        current = await state()
-        if current.get("enabled"):
-            self.log("  ✓ Moodle Edit mode is enabled", "success")
-            return True
-        if not current.get("hasToggle"):
-            self.log("✗ Moodle Edit mode toggle was not found", "error")
-            return False
-
-        self.log("  Enabling Moodle Edit mode…", "info")
         try:
-            await tab.evaluate("""() => {
-                const toggle = document.querySelector(
-                    '#user-editing-switch, input[name="setmode"][type="checkbox"], '
-                    + '.editmode-switch-form input[type="checkbox"]'
-                );
-                if (!toggle) throw new Error('edit toggle missing');
-                toggle.click();
-            }""")
+            check_stopped()
+            target = _moodle_scrape_target_url(self.moodle_url)
+            def on_target(url):
+                url = str(url)
+                return (_is_moodle_scrape_target(url, target)
+                        and urlparse(url).netloc == urlparse(target).netloc)
+            await tab.wait_for_url(on_target, wait_until='domcontentloaded', timeout=15000)
+            # A course can finish navigation before its switch is rendered.
+            await tab.wait_for_function(f"() => {{ const s = ({state_js})(); return s.enabled || s.hasToggle; }}",
+                                        timeout=10000)
+            current = await state()
+            if not on_target(current['url']):
+                self.log('✗ Moodle left the requested course before Edit mode could be checked', 'error')
+                return False
+            if current['enabled'] or current['checked']:
+                self.log('  ✓ Moodle Edit mode is enabled', 'success')
+                return True
+
+            self.log('  Enabling Moodle Edit mode…', 'info')
             try:
-                await tab.wait_for_load_state("domcontentloaded", timeout=15000)
-            except Exception:
-                pass
-            await tab.wait_for_timeout(1200)
-            verified = await state()
+                # check() is idempotent. A retry after a redirect must never
+                # click an already-enabled switch back off.
+                async with tab.expect_navigation(wait_until='domcontentloaded', timeout=15000):
+                    await tab.locator(selectors).first.check(force=True, timeout=8000)
+            except Exception as exc:
+                if not isinstance(exc, PlaywrightTimeoutError) and not interrupted_by_navigation(exc):
+                    raise
+                self.log('  Moodle is changing pages; checking whether Edit mode was enabled…', 'dim')
+
+            for _ in range(20):
+                check_stopped()
+                verified = await state()
+                # A checkbox can look checked in the old document before its
+                # form submission finishes. Only accept it after navigation,
+                # or accept actual editing controls for an AJAX-based theme.
+                if (on_target(verified['url']) and (verified['enabled']
+                        or (verified['checked'] and verified['documentId'] != current['documentId']))):
+                    self.log('  ✓ Moodle Edit mode enabled and verified', 'success')
+                    return True
+                await tab.wait_for_timeout(250)
         except Exception as exc:
             self.log(f"✗ Could not enable Moodle Edit mode: {str(exc).splitlines()[0]}", "error")
             return False
-        if not verified.get("enabled"):
-            self.log("✗ Moodle Edit mode did not become enabled; aborting before Brightspace writes", "error")
-            return False
-        self.log("  ✓ Moodle Edit mode enabled and verified", "success")
-        return True
+        self.log("✗ Moodle Edit mode did not become enabled; aborting before Brightspace writes", "error")
+        return False
 
     async def _moodle_dom_inventory(self, tab: Page) -> dict:
         return await tab.evaluate("""() => {
@@ -3196,6 +3239,11 @@ class ContentChecker:
                 return None
 
             if self.books_only or inventory_only:
+                if inventory_only:
+                    try:
+                        self.moodle_course_name = (await tab.locator('h1').first.inner_text(timeout=2000)).strip()
+                    except Exception:
+                        self.moodle_course_name = ''
                 await tab.close()
                 self.log("Moodle inventory complete; page, folder and H5P downloads skipped." if inventory_only
                          else "📘 Book-only run: Moodle page, folder and H5P scans skipped.", "dim")

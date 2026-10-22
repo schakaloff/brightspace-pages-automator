@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QStackedWidget,
-    QMessageBox,
+    QMessageBox, QScrollArea, QFrame, QLayout,
 )
 from PySide6.QtCore import Qt, QTimer, QEventLoop
 from PySide6.QtGui import QIcon, QPixmap
@@ -37,12 +37,37 @@ def _load_saved_theme() -> str:
         return json.loads(_CONFIG_PATH.read_text(encoding="utf-8")).get("theme", "dark")
     except Exception:
         return "dark"
+class PageStack(QStackedWidget):
+    """Only the visible page contributes to the scrollable content's size."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.layout().setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        self.currentChanged.connect(lambda _: self.updateGeometry())
+
+    def minimumSizeHint(self):
+        page = self.currentWidget()
+        return page.minimumSizeHint().expandedTo(page.minimumSize()) if page else super().minimumSizeHint()
+
+    def sizeHint(self):
+        page = self.currentWidget()
+        return page.sizeHint() if page else super().sizeHint()
+
+    def hasHeightForWidth(self):
+        # Each page owns wrapping/scrolling. QStackedLayout otherwise combines
+        # hidden pages' preferred heights and makes every screen scroll.
+        return False
+
+    def heightForWidth(self, width):
+        return -1
+
+
 class MainWindow(QMainWindow):
     def __init__(self, splash: StartupSplash | None = None):
         super().__init__()
         self._splash = splash
         self.setWindowTitle("MTB Writer")
-        self.setMinimumSize(720, 560)
+        self.setMinimumSize(560, 480)
         self.resize(1120, 800)
         self._claude_key   = ""
         self._claude_model = ""
@@ -98,11 +123,23 @@ class MainWindow(QMainWindow):
             button.set_show_dot(False)
         self._sidebar.step_clicked.connect(self._on_step)
         self._sidebar.settings_clicked.connect(self._on_settings)
+        self._sidebar_preferred_collapsed = bool(self.load_config().get('sidebar_collapsed', False))
+        self._compact_window = False
+        self._adapting_sidebar = False
+        self._sidebar.set_collapsed(self._sidebar_preferred_collapsed, animate=False)
+        self._sidebar.collapsed_changed.connect(self._sidebar_changed)
         root.addWidget(self._sidebar)
 
-        self._stack = QStackedWidget()
+        self._stack = PageStack()
         self._stack.setObjectName("content")
-        root.addWidget(self._stack, 1)
+        # Dense legacy panels may need scrolling, but must never dictate the
+        # width of the application or another hidden page's viewport.
+        self._content_scroll = QScrollArea()
+        self._content_scroll.setWidgetResizable(True)
+        self._content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._content_scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._content_scroll.setWidget(self._stack)
+        root.addWidget(self._content_scroll, 1)
 
         # Parented to the central widget so it floats over whichever page is
         # showing — see gui_update_badge for why this is not in the layout.
@@ -144,13 +181,13 @@ class MainWindow(QMainWindow):
         # hub instead of another sidebar entry, so the sidebar never grows.
         self._media_hub = WorkflowHub(
             "Media",
-            "Move interactive and video content from Moodle into Brightspace. "
-            "These tools use the course URLs from Check & fix.",
+            "Move interactive and video content from Moodle into Brightspace.",
             [
                 ("h5p", "H5P activities", "Download H5P activities from Moodle and place them in the matching Brightspace units."),
                 ("scorm", "SCORM packages", "Download original Moodle SCORM ZIPs, review their destination units, and transfer them to Brightspace."),
                 ("kaltura", "Kaltura videos", "Find Moodle's Kaltura videos and create matching Brightspace pages."),
             ],
+            hint="Uses the course URLs from Check & fix.",
         )
         from panels.workflow_hub import BuildStyleHub
         self._build_hub = BuildStyleHub()
@@ -172,6 +209,7 @@ class MainWindow(QMainWindow):
         self._checker.open_tool.connect(self._open_tool)
         self._build_hub.tool_selected.connect(self._open_tool)
         self._media_hub.tool_selected.connect(self._open_tool)
+        self._h5p.back_requested.connect(lambda: self._on_step(6))
 
         self._on_step(1)
         self._show_welcome_if_needed()
@@ -325,6 +363,8 @@ class MainWindow(QMainWindow):
         self._duplicate.refresh_theme()
         self._checker.refresh_theme()
         self._build_hub.refresh_theme()
+        self._media_hub.refresh_theme()
+        self._h5p.refresh_theme()
         # Refresh log widgets in each panel
         for panel in (self._checker, self._collector, self._restyle,
                       self._kaltura, self._h5p, self._cleanup):
@@ -604,11 +644,32 @@ class MainWindow(QMainWindow):
     # ── Overlay placement ────────────────────────────────────
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._adapt_sidebar()
         self._reposition_badge()
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._adapt_sidebar()
         self._reposition_badge()
+
+    def _sidebar_changed(self, collapsed):
+        if not self._adapting_sidebar:
+            self._sidebar_preferred_collapsed = collapsed
+            self.save_config({'sidebar_collapsed': collapsed})
+
+    def _adapt_sidebar(self):
+        if not hasattr(self, '_sidebar'):
+            return
+        # A small gap between thresholds avoids flicker near the breakpoint.
+        compact = self.width() < (820 if self._compact_window else 760)
+        if compact == self._compact_window:
+            return
+        self._compact_window = compact
+        self._adapting_sidebar = True
+        try:
+            self._sidebar.set_collapsed(compact or self._sidebar_preferred_collapsed, animate=False)
+        finally:
+            self._adapting_sidebar = False
 
     def _reposition_badge(self):
         badge = getattr(self, "_update_badge", None)
@@ -696,19 +757,9 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
-    # HiDPI fix: detect DPR/logical-DPI mismatch and re-launch with correct scale
-    if "QT_SCALE_FACTOR" not in os.environ:
-        _s = app.primaryScreen()
-        _dpr = _s.devicePixelRatio()
-        _ldpi = _s.logicalDotsPerInch()
-        if _dpr >= 1.5 and _ldpi < 120:
-            os.environ["QT_SCALE_FACTOR"] = "1.5"
-            app.quit()
-            del app
-            os.execv(sys.executable, [sys.executable] + sys.argv)
-    # Claimed after the HiDPI re-exec above so the handle belongs to the process
-    # that actually sticks around. Held for the lifetime of the app: the
-    # installer's AppMutex check is how it knows we are running.
+    # Qt 6 follows Windows' per-monitor scaling automatically. Adding a global
+    # QT_SCALE_FACTOR here would multiply the user's existing display scale.
+    # Hold the mutex for this process so the installer knows the app is running.
     _app_mutex, _already_running = _claim_app_mutex()
     if _already_running:
         # Second copies are almost always accidental — a double-clicked icon, or

@@ -18,7 +18,7 @@ from content_checker import ContentChecker, _extract_course_id
 from h5p_progress import H5PRun, clean_url
 
 
-async def _verify_topic_in_module_strict(bs_page, course_id, module_id, expected_name) -> bool:
+async def _verify_topic_in_module_strict(bs_page, course_id, module_id, expected_name, *, exact_title=False) -> bool:
     """Stricter replacement for ContentChecker._verify_topic_in_module.
 
     H5P has its own duplicate rule: exact normalized title *and* an H5P
@@ -41,9 +41,10 @@ async def _verify_topic_in_module_strict(bs_page, course_id, module_id, expected
         name_norm = re.sub(r'[^\w]', '', expected_name).lower()
         for topic in topics:
             title_norm = re.sub(r'[^\w]', '', topic.get('Title', '')).lower()
-            if title_norm == name_norm and ContentChecker._is_h5p_topic(topic):
+            matches = topic.get('Title', '') == expected_name if exact_title else title_norm == name_norm
+            if matches and ContentChecker._is_h5p_topic(topic):
                 return True
-            if title_norm == name_norm and str(topic.get('Url', '')).split('?')[0].lower().endswith(('.html', '.htm')):
+            if matches and str(topic.get('Url', '')).split('?')[0].lower().endswith(('.html', '.htm')):
                 from unit_overview import BrowserContentAPI
                 html = await BrowserContentAPI(bs_page, str(course_id), str(module_id)).get_topic_html(topic['Id'])
                 if ContentChecker._html_contains_h5p_embed(html): return True
@@ -75,6 +76,8 @@ async def run_h5p_only(
     stop_flag: Optional[list] = None,
     resume_id: Optional[str] = None,
     progress_directory=None,
+    review_fn: Optional[Callable] = None,
+    on_state: Optional[Callable] = None,
 ) -> None:
     from browser import launch_browser, wait_for_login
 
@@ -114,6 +117,8 @@ async def run_h5p_only(
     checker._h5p._summary = checker._summary
     # Override with the stricter exact-match check (see _verify_topic_in_module_strict).
     checker._h5p._verify_topic_in_module = _verify_topic_in_module_strict
+    checker._h5p._verify_saved_name = lambda page, course, module, name: _verify_topic_in_module_strict(
+        page, course, module, name, exact_title=True)
 
     course_id = _extract_course_id(bs_url)
     if not course_id:
@@ -126,6 +131,8 @@ async def run_h5p_only(
         raise ValueError('The saved H5P run belongs to a different course pair.')
     checker._h5p.progress = progress
     checker._h5p.grade_all = progress.data['grade_all']
+    if on_state:
+        progress.on_change = lambda data: on_state(dict(stage='progress', run=data))
 
     check_stopped()
     from transfer_runner import PlanLock
@@ -135,6 +142,8 @@ async def run_h5p_only(
     try:
         progress.data['status'] = 'running'
         progress.save()
+        if on_state:
+            on_state(dict(stage='connect', message='Connecting to Brightspace and Moodle'))
         p, browser, context, page = await launch_browser()
         check_stopped()
         await wait_for_login(
@@ -166,15 +175,40 @@ async def run_h5p_only(
             moodle_items = progress.data['moodle_items']
             log('Resuming the saved activity list — Moodle does not need to be scraped again.', 'info')
         else:
-            moodle_items = await checker._scrape_moodle(context)
+            moodle_items = await checker._scrape_moodle(context, inventory_only=True) if review_fn else await checker._scrape_moodle(context)
             if moodle_items: progress.capture_moodle(moodle_items)
+            if review_fn and isinstance(getattr(checker, 'moodle_course_name', None), str):
+                progress.data['moodle_course_name'] = checker.moodle_course_name
+                progress.save()
         if not moodle_items:
             return
 
         check_stopped()
         parsed = urlparse(bs_url)
         bs_base = f"{parsed.scheme}://{parsed.netloc}"
-        if not progress.data['activities']:
+        if review_fn:
+            from h5p_review import review_and_prepare
+
+            def on_download(key, state):
+                row = next((r for r in progress.data['activities'] if r['key'] == key), None)
+                if row:
+                    progress.checkpoint(row, 'download', state)
+
+            checker._h5p.on_download = on_download
+            bs_flat = await review_and_prepare(checker, context, page, moodle_items, bs_flat,
+                bs_base, course_id, progress, review_fn, on_state)
+            if not checker._h5p._download_stems(moodle_items):
+                progress.data['status'] = 'complete'
+                progress.save()
+                if on_complete:
+                    on_complete()
+                return
+            for row in progress.data['activities']:
+                if row.get('already_present'):
+                    checker._summary['h5p_already_present'].append((row['name'], row['bs_module_title']))
+                    if row['should_grade'] and not row.get('graded'):
+                        checker._summary['h5p_grade_failed'].append((row['name'], row['bs_module_title']))
+        elif not progress.data['activities']:
             bs_flat = await checker._ensure_h5p_destination_units(
                 context, page, bs_base, course_id, moodle_items, bs_flat
             )
@@ -191,6 +225,13 @@ async def run_h5p_only(
         failed = checker._summary.get("h5p_failed", [])
         already = checker._summary.get("h5p_already_present", [])
         rows = progress.data['activities']
+        failed_names = {name for name, _ in failed}
+        grade_issues = {name for name, _ in checker._summary.get('h5p_grade_failed', [])}
+        for row in rows:
+            if row['name'] in failed_names:
+                row['problem'] = row.get('problem') or 'Transfer needs attention. Resume to check existing work and retry.'
+            if row['name'] in grade_issues:
+                row['grade_attention'] = True
         remaining = progress.counts()[2]
         empty_course = bool(progress.data['moodle_items']) and not any(row['type'] == 'EXTERNAL' for row in progress.data['moodle_items'])
         completed = (bool(rows) or empty_course) and not remaining and not failed
@@ -220,6 +261,8 @@ async def run_h5p_only(
             if progress.data['status'] != 'complete':
                 progress.data['status'] = 'paused'
                 progress.save()
+            if on_state:
+                on_state(dict(stage='results', run=progress.data, summary=checker._summary))
         finally:
             try:
                 if browser and browser.is_connected(): await browser.close()

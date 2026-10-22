@@ -125,7 +125,7 @@ async def test_resume_after_course_switch_rechecks_lost_save_and_skips_moodle(tm
                 raise asyncio.CancelledError()
             return True
 
-    async def verify(page, course_id, module_id, name):
+    async def verify(page, course_id, module_id, name, *, exact_title=False):
         if disconnected[0]: raise RuntimeError('Could not verify destination')
         return (course_id, name) in pages
 
@@ -205,6 +205,9 @@ def test_resume_selector_restores_each_course_and_its_settings(qtbot, tmp_path, 
     panel._poll_timer.stop()
     recreated = H5PPanel(mw)
     qtbot.addWidget(recreated)
-    assert recreated._saved_courses.count() == 2
-    assert recreated._resume_btn.isEnabled()
+    assert recreated._saved_courses.count() == 3  # Blank choice plus both runs.
+    assert recreated._saved_courses.currentData() is None
+    assert not recreated._resume_btn.isEnabled()
+    recreated._resume_run()
+    assert started == [first.data['id'], second.data['id'], first.data['id']]
     recreated._poll_timer.stop()

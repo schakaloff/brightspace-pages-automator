@@ -1,6 +1,6 @@
 """Small task hub that keeps the main sidebar stable as tools are added."""
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QSize
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton, QFrame,
     QScrollArea, QSizePolicy,
@@ -10,53 +10,128 @@ from PySide6.QtGui import QIcon
 import gui_styles
 from gui_tool_icons import tool_pixmap
 
-from panels._shared import _section_header
+class MediaToolRow(QPushButton):
+    """One native button, including its icon, labels and surrounding whitespace."""
+
+    def __init__(self, name, description, parent=None):
+        super().__init__(parent)
+        self.setProperty('role', 'media-tool')
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName(name)
+        self.setAccessibleDescription(description)
+        self.setAutoDefault(False)
+        policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+        self.setMinimumWidth(0)
+
+    def sizeHint(self):
+        return self.layout().sizeHint().expandedTo(QSize(0, 96))
+
+    def minimumSizeHint(self):
+        return QSize(0, 96)
+
+    def heightForWidth(self, width):
+        return max(96, self.layout().totalHeightForWidth(width))
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if not event.isAutoRepeat():
+                self.click()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class WorkflowHub(QWidget):
-    """A page of tool cards. Adding a tool means adding a card, not a tab."""
+    """Media navigation, with one full-width click target per tool."""
 
     tool_selected = Signal(str)
 
     def __init__(self, title: str, description: str,
-                 tasks: list[tuple[str, str, str]], parent=None):
+                 tasks: list[tuple[str, str, str]], parent=None, *, hint=""):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
+        self.setObjectName('media_hub')
+        self.setProperty('design', 'modern')
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer.addWidget(self._scroll)
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(32, 28, 32, 20)
         layout.setSpacing(0)
-        layout.addWidget(_section_header(title))
+        heading = QLabel(title)
+        heading.setProperty('role', 'page-heading')
+        layout.addWidget(heading)
+        layout.addSpacing(4)
         intro = QLabel(description)
-        intro.setProperty("role", "dim")
+        intro.setProperty('role', 'media-intro')
         intro.setWordWrap(True)
         layout.addWidget(intro)
-        layout.addSpacing(20)
+        if hint:
+            layout.addSpacing(4)
+            note = QLabel(hint)
+            note.setProperty('role', 'media-hint')
+            note.setWordWrap(True)
+            layout.addWidget(note)
+        layout.addSpacing(24)
         self.buttons: dict[str, QPushButton] = {}
+        self._icons = []
+        icon_names = dict(h5p='puzzle', scorm='package', kaltura='movie')
         for key, name, explanation in tasks:
-            card = QFrame()
-            card.setProperty("role", "card")
-            row = QHBoxLayout(card)
-            row.setContentsMargins(18, 14, 14, 14)
+            button = MediaToolRow(name, explanation)
+            button.setObjectName(f'media_tool_{key}')
+            row = QHBoxLayout(button)
+            row.setContentsMargins(18, 16, 20, 16)
             row.setSpacing(16)
+            tile = QFrame()
+            tile.setProperty('role', 'media-icon-tile')
+            tile.setFixedSize(64, 64)
+            tile_layout = QVBoxLayout(tile)
+            tile_layout.setContentsMargins(16, 16, 16, 16)
+            icon = QLabel()
+            icon.setFixedSize(32, 32)
+            tile_layout.addWidget(icon)
+            self._icons.append((icon, icon_names.get(key, 'file'), 32))
+            row.addWidget(tile, 0, Qt.AlignmentFlag.AlignVCenter)
             text = QVBoxLayout()
-            text.setSpacing(3)
+            text.setSpacing(4)
             heading = QLabel(name)
-            heading.setStyleSheet("font-weight:600;font-size:14px;")
+            heading.setProperty('role', 'media-tool-heading')
+            heading.setWordWrap(True)
+            heading.setMinimumWidth(0)
             detail = QLabel(explanation)
-            detail.setProperty("role", "dim")
+            detail.setProperty('role', 'media-description')
             detail.setWordWrap(True)
+            detail.setMinimumWidth(0)
             text.addWidget(heading)
             text.addWidget(detail)
             row.addLayout(text, 1)
-            button = QPushButton("Open")
-            button.setProperty("variant", "secondary")
-            button.setFixedWidth(96)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            arrow = QLabel()
+            arrow.setFixedSize(20, 20)
+            self._icons.append((arrow, 'chevron-right', 20))
+            row.addWidget(arrow, 0, Qt.AlignmentFlag.AlignVCenter)
+            # Keep the whole surface as a single keyboard and pointer target.
+            for child in button.findChildren(QWidget):
+                child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                child.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.clicked.connect(lambda _checked=False, tool=key: self.tool_selected.emit(tool))
-            row.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
             self.buttons[key] = button
-            layout.addWidget(card)
-            layout.addSpacing(10)
+            layout.addWidget(button)
+            layout.addSpacing(12)
         layout.addStretch()
+        self._scroll.setWidget(content)
+        self.refresh_theme()
+
+    def refresh_theme(self):
+        for label, icon, size in self._icons:
+            label.setPixmap(tool_pixmap(icon, size, gui_styles.modern_colors()['muted']))
 
 
 class BuildStyleHub(QWidget):

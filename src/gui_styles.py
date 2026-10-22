@@ -427,6 +427,19 @@ QWidget#build_style_hub QPushButton[variant="hub-outline"] {{
     background: {c['surface']}; color: {c['focus']}; border-color: {c['focus']};
 }}
 QWidget#build_style_hub QPushButton[variant="hub-outline"]:hover {{ background: {c['selected']}; }}
+QWidget#media_hub {{ background: {current['BG']}; }}
+QWidget#media_hub QLabel[role="page-heading"] {{ font-size: 28px; }}
+QWidget#media_hub QLabel[role="media-intro"] {{ color: {c['muted']}; font-size: 15px; }}
+QWidget#media_hub QLabel[role="media-hint"] {{ color: {c['muted']}; font-size: 14px; }}
+QWidget#media_hub QPushButton[role="media-tool"] {{
+    background: {c['surface']}; border: 1px solid {c['border']}; border-radius: 12px; padding: 0;
+}}
+QWidget#media_hub QPushButton[role="media-tool"]:hover {{ background: {c['hover']}; border-color: {c['focus']}; }}
+QWidget#media_hub QPushButton[role="media-tool"]:focus {{ background: {c['hover']}; border: 2px solid {c['focus']}; }}
+QWidget#media_hub QPushButton[role="media-tool"]:pressed {{ background: {c['selected']}; }}
+QWidget#media_hub QLabel[role="media-tool-heading"] {{ color: {c['text']}; font-size: 18px; font-weight: 600; }}
+QWidget#media_hub QLabel[role="media-description"] {{ color: {c['muted']}; font-size: 15px; font-weight: 400; }}
+QWidget#media_hub QFrame[role="media-icon-tile"] {{ background: {c['soft']}; border: none; border-radius: 10px; }}
 {s} QLineEdit, {s} QPlainTextEdit, {s} QTextBrowser {{
     background: {c['surface']}; color: {c['text']}; border: 1px solid {c['border']};
     border-radius: 8px; padding: 10px 12px; font-size: 14px;
@@ -491,6 +504,11 @@ QWidget#build_style_hub QPushButton[variant="hub-outline"]:hover {{ background: 
 }}
 {s} QLabel[role="status"][state="created"] {{ background: {c['success_bg']}; color: {c['success']}; }}
 {s} QLabel[role="status"][state="review"] {{ background: {c['warning_bg']}; color: {c['warning']}; }}
+QWidget#h5p_workspace QFrame[role="h5p-step"] {{ background: transparent; border: none; border-radius: 10px; }}
+QWidget#h5p_workspace QFrame[role="h5p-step"][state="review"] {{ background: {c['selected']}; }}
+QWidget#h5p_workspace QLabel[role="h5p-step-title"] {{ color: {c['muted']}; font-size: 13px; font-weight: 600; }}
+QWidget#h5p_workspace QFrame[state="review"] QLabel[role="h5p-step-title"] {{ color: {c['focus']}; }}
+QWidget#h5p_workspace QFrame[state="created"] QLabel[role="h5p-step-title"] {{ color: {c['success']}; }}
 {s} QLabel#page_creator_activity_summary[state="error"] {{ color: {c['error']}; }}
 {s} QLabel#page_creator_activity_summary[state="warning"] {{ color: {c['warning']}; }}
 {s} QSplitter::handle {{ background: transparent; width: 12px; }}

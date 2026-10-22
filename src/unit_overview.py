@@ -248,6 +248,29 @@ class BrowserContentAPI:
             [self.course_id, str(topic_id), payload],
         )
 
+    async def rename_topic(self, topic_id: int | str, title: str) -> dict:
+        """Update the stored name while preserving the topic's content and settings."""
+        topic = await self.get_topic(topic_id)
+        payload = _topic_update_payload(topic, topic.get('IsHidden', False))
+        payload['Title'] = title
+        await self.page.evaluate(
+            """async ([courseId, topicId, payload]) => {
+                const xsrf = localStorage.getItem('XSRF.Token');
+                if (!xsrf) throw new Error('rename topic: no XSRF token');
+                const r = await fetch(`/d2l/api/le/1.0/${courseId}/content/topics/${topicId}`, {
+                    method: 'PUT', credentials: 'include',
+                    headers: { 'Content-Type': 'application/json', 'X-Csrf-Token': xsrf },
+                    body: JSON.stringify(payload)
+                });
+                if (!r.ok) throw new Error(`rename topic ${r.status}: ${(await r.text()).slice(0,200)}`);
+            }""",
+            [self.course_id, str(topic_id), payload],
+        )
+        saved = await self.get_topic(topic_id)
+        if saved.get('Title') != title:
+            raise RuntimeError('Brightspace did not keep the requested topic name.')
+        return saved
+
     async def move_topic_first(self, topic_id: int | str) -> None:
         await self.page.evaluate(
             """async ([courseId, topicId]) => {

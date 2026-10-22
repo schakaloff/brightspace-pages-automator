@@ -391,6 +391,12 @@ class FakeTitleInput:
     async def input_value(self):
         return self.value
 
+    async def dispatch_event(self, event):
+        return None
+
+    async def press(self, key):
+        return None
+
 
 class FakeTitleFrame:
     def is_detached(self):
@@ -421,7 +427,7 @@ def test_title_is_set_in_non_h5p_frame():
     inp = FakeTitleInput()
     tab = FakeTitleTab([
         FakeTitleFrame("https://learn.example/editor"),
-        FakeTitleFrame("about:blank", inp, matching=('input.h5peditor-text[maxlength="255"]',)),
+        FakeTitleFrame("about:blank", inp, matching=(H5PHandler.TITLE_SELECTORS[0],)),
     ])
 
     ok = asyncio.run(_handler()._set_content_title(tab, "Nervous System Flashcards"))
@@ -442,7 +448,7 @@ def test_title_failure_is_reported_not_swallowed():
 def test_title_that_does_not_stick_is_a_failure():
     inp = FakeTitleInput(sticks=False)
     tab = FakeTitleTab([
-        FakeTitleFrame("https://ocedtech.h5p.com/x", inp, matching=('input.h5peditor-text[maxlength="255"]',))
+        FakeTitleFrame("https://ocedtech.h5p.com/x", inp, matching=(H5PHandler.TITLE_SELECTORS[0],))
     ])
 
     ok = asyncio.run(_handler()._set_content_title(tab, "Nervous System Flashcards", attempts=2))
@@ -1007,6 +1013,7 @@ def test_finalize_clicks_named_save_and_close_button():
     handler = _handler()
 
     class TitleInput:
+        value = ''
         async def is_visible(self, **kwargs):
             return True
 
@@ -1020,7 +1027,19 @@ def test_finalize_clicks_named_save_and_close_button():
             return None
 
         async def fill(self, value, **kwargs):
-            assert value == "Practice"
+            self.value = value
+
+        async def press_sequentially(self, value, **kwargs):
+            self.value += value
+
+        async def dispatch_event(self, event):
+            return None
+
+        async def press(self, key):
+            return None
+
+        async def input_value(self):
+            return self.value
 
     class SaveButton:
         def __init__(self, tab):

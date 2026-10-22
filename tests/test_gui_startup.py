@@ -29,3 +29,21 @@ def test_startup_reports_ready_and_hands_off_to_window(qtbot, monkeypatch):
     window.show()
     splash.finish(window)
     assert window.isVisible() and not splash.isVisible()
+
+
+def test_sidebar_restores_preference_and_saves_only_user_changes(qtbot, monkeypatch):
+    from gui import MainWindow
+    for method in ('_set_window_icon', '_load_api_key', '_start_chromium_check',
+                   '_start_update_check', '_show_welcome_if_needed'):
+        monkeypatch.setattr(MainWindow, method, lambda self: None)
+    monkeypatch.setattr(MainWindow, 'closeEvent', lambda self, event: event.accept())
+    monkeypatch.setattr(MainWindow, 'load_config', lambda self: dict(welcomed=True, sidebar_collapsed=True))
+    writes = []
+    monkeypatch.setattr(MainWindow, 'save_config', lambda self, data: writes.append(data))
+    window = MainWindow()
+    qtbot.addWidget(window)
+    assert window._sidebar.is_collapsed()
+    assert window._sidebar.width() == window._sidebar.COLLAPSED_WIDTH
+    assert not any('sidebar_collapsed' in data for data in writes)
+    window._sidebar.set_collapsed(False, animate=False)
+    assert writes[-1] == dict(sidebar_collapsed=False)

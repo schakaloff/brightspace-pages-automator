@@ -151,12 +151,39 @@ else; a working one shows the activity itself.
 
 ## Doing a whole course
 
+The Moodle activity name is the display name used for new H5P uploads and
+Brightspace pages, including punctuation, accents and capitalization. The local
+download filename may lose punctuation; it is never used as the display name.
+If the package contains a different internal title, the app names a temporary
+upload copy and leaves the downloaded original and its questions unchanged.
+Newly saved page titles must match the Moodle name before the transfer is
+reported as confirmed. The app records the page it just created, corrects its
+stored title when needed, and reads it back to confirm. If that rename is
+interrupted, Resume retries the same page in its original unit. If the saved
+page cannot be identified safely, it asks for a manual title check before
+another insertion can be attempted.
+
 The H5P panel saves a separate run for each Moodle/Brightspace course pair.
-After an interrupted run, choose it under **Resume saved course**, then click
-**Resume saved course…**. Its course URLs and original gradebook choice are restored.
+Start with **Find activities**. This reads the Moodle activity list without
+downloading packages, enabling Allow download, creating units or uploading content.
+Confirm the Moodle course in the browser when asked, then continue in the app.
+
+In **Review**, select activities, choose a Brightspace unit for each, and set
+grading per activity. A missing unit can be created by explicitly choosing
+**Create unit: …**. Select a row and use **Use this destination for the same
+Moodle section** to apply its destination to related activities. Existing pages
+are labelled **Already in Brightspace** and keep their grading unchanged.
+**Transfer … activities** starts the selected downloads, uploads and page creation.
+The activity list shows progress; **Show activity details** opens the technical log.
+
+After an interrupted run, choose it under **Continue a saved transfer**, then click
+**Open saved transfer**. Its course URLs and original gradebook default are restored.
 You can work on another course and return to this one later, including after
 closing the app or computer. The list shows uploads, inserted pages and remaining
-activities. **Run H5P** starts a fresh scan and keeps earlier saved runs available.
+activities. **New transfer**, then **Find activities**, starts a fresh scan and
+keeps earlier saved runs available. **Stop & save** closes the running browser
+and keeps completed work. Results show what was added, already present or left
+for later. **Review remaining activities** reopens the saved transfer for review.
 
 A resume uses the saved activity list instead of scraping Moodle again. Each run
 keeps its own downloaded packages, so another course cannot overwrite them.
@@ -165,7 +192,9 @@ and checks the cloud library for uploads still needed by unfinished pages. An
 interrupted save is recorded before it is attempted, then verified before retrying;
 a failed destination read stops the run rather than treating the page as absent.
 Existing pages and their gradebook settings stay unchanged. Missing destination
-units or unavailable saved downloads are reported for a fresh scan.
+units can be reassigned in review. Missing downloads can be retried on resume,
+or replaced with local .h5p files through the recovery window. Activities left
+unchecked remain available in the saved transfer for later.
 
 Progress is stored locally under the app's user-data folder in `h5p-runs`, without
 credentials or login/session tokens. Runs made before this feature have no saved

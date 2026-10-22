@@ -87,6 +87,7 @@ async def test_finalize_waits_for_save_to_leave_the_editor(completes):
                 <button onclick="SAVE">Save and Close</button>'''.replace(
                     'SAVE', f"setTimeout(() => location.href='{target}', 3000)" if completes else 'void 0')
             await page.route('https://bs.example/**', lambda route: route.fulfill(body=body, content_type='text/html'))
+            await page.route('**/content/modules/2/structure/', lambda route: route.fulfill(body='[]', content_type='application/json'))
             await page.goto('https://bs.example/d2l/le/lessons/1/edit/2/loadActivity/file/2?isNew=true')
             navigation = handler()
             navigation._grade_choice_completed = True

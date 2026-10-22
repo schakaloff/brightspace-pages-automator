@@ -1,8 +1,8 @@
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QPushButton, QLabel, QHBoxLayout, QScrollArea, QFrame,
+    QWidget, QVBoxLayout, QPushButton, QLabel, QHBoxLayout, QScrollArea, QFrame, QToolButton,
 )
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont
-from PySide6.QtCore import Qt, Signal, QRect, QRectF
+from PySide6.QtCore import Qt, Signal, QRect, QRectF, QSize, QVariantAnimation, QEasingCurve
 
 import gui_styles
 
@@ -22,6 +22,8 @@ class StepButton(QPushButton):
         self._state     = self.LOCKED
         self._hovered   = False
         self._show_dot  = True
+        self._compact   = False
+        self.setAccessibleName(label)
         self.setFixedHeight(50)
         self.setProperty("class", "step-btn")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -41,6 +43,10 @@ class StepButton(QPushButton):
     def set_show_dot(self, show: bool):
         """Settings is not a workflow step, so it carries no status dot."""
         self._show_dot = show
+        self.update()
+
+    def set_compact(self, compact: bool):
+        self._compact = compact
         self.update()
 
     def set_state(self, state: str):
@@ -93,7 +99,7 @@ class StepButton(QPushButton):
         icon_color = accent if active else (
             c["TEXT_FAINT"] if locked else gui_styles.sidebar_label()
         )
-        tile = QRectF(pad + 14, (h - 28) / 2, 28, 28)
+        tile = QRectF(min(pad + 14, (w - 28) / 2), (h - 28) / 2, 28, 28)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(c["BG"] if active else c["PANEL"]))
         p.setOpacity(0.5 if locked else 1.0)
@@ -116,16 +122,24 @@ class StepButton(QPushButton):
         p.setPen(QPen(QColor(label_color)))
         p.setFont(lf)
         p.setOpacity(0.4 if locked else 1.0)
-        p.drawText(QRect(label_x, 0, w - label_x - 26, h),
-                   Qt.AlignmentFlag.AlignVCenter, self._label)
+        if not self._compact:
+            p.drawText(QRect(label_x, 0, w - label_x - 26, h),
+                       Qt.AlignmentFlag.AlignVCenter, self._label)
         p.setOpacity(1.0)
+
+        if self.hasFocus():
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor(c['BORDER_ACT']), 1.5))
+            p.drawRoundedRect(card.adjusted(1, 1, -1, -1), 8, 8)
 
         # Status indicator
         if not self._show_dot:
             p.end()
             return
         dot_x = w - 18
-        dot_y = h // 2
+        dot_y = 10 if self._compact else h // 2
+        if self._compact:
+            dot_x = w - 14
         dot_r = 4
         if self._state == self.DONE:
             p.setBrush(QBrush(QColor(gui_styles.status_done())))
@@ -152,11 +166,21 @@ class StepButton(QPushButton):
 class Sidebar(QWidget):
     step_clicked     = Signal(int)
     settings_clicked = Signal()
+    collapsed_changed = Signal(bool)
+
+    EXPANDED_WIDTH = 160
+    COLLAPSED_WIDTH = 64
 
     def __init__(self, steps: list, parent=None):
         super().__init__(parent)
         self.setObjectName("sidebar")
-        self.setFixedWidth(160)
+        self.setFixedWidth(self.EXPANDED_WIDTH)
+        self._collapsed = False
+        self._width_animation = QVariantAnimation(self)
+        self._width_animation.setDuration(180)
+        self._width_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._width_animation.valueChanged.connect(lambda value: self.setFixedWidth(int(value)))
+        self._width_animation.finished.connect(self._finish_resize)
         self._step_buttons: dict[int, StepButton] = {}
 
         outer_layout = QVBoxLayout(self)
@@ -181,20 +205,31 @@ class Sidebar(QWidget):
 
         # App header
         header = QWidget()
-        header.setFixedHeight(64)
+        header.setFixedHeight(56)
         hl = QHBoxLayout(header)
         hl.setContentsMargins(14, 10, 14, 10)
+        hl.setSpacing(8)
         info = QWidget()
-        iv = QVBoxLayout(info)
+        self._brand = info
+        iv = QHBoxLayout(info)
         iv.setContentsMargins(0, 0, 0, 0)
-        iv.setSpacing(1)
-        self._lbl_top = QLabel("MTB")
-        self._lbl_top.setStyleSheet(f"color:{gui_styles.current['TEXT_FAINT']};font-size:9px;font-weight:700;")
-        self._lbl_bot = QLabel("Writer")
-        self._lbl_bot.setStyleSheet(f"color:{gui_styles.current['TEXT_PRI']};font-size:13px;font-weight:700;")
-        iv.addWidget(self._lbl_top)
-        iv.addWidget(self._lbl_bot)
-        hl.addWidget(info)
+        iv.setSpacing(4)
+        self._brand_prefix = QLabel("MTB")
+        self._brand_name = QLabel("Writer")
+        iv.addWidget(self._brand_prefix)
+        iv.addWidget(self._brand_name)
+        iv.addStretch()
+        hl.addWidget(info, 1)
+        self._toggle_btn = QToolButton()
+        self._toggle_btn.setObjectName('sidebar_toggle')
+        self._toggle_btn.setFixedSize(28, 28)
+        self._toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._toggle_btn.setIconSize(QSize(16, 16))
+        self._update_toggle_icon()
+        self._toggle_btn.setToolTip('Collapse sidebar')
+        self._toggle_btn.setAccessibleName('Collapse sidebar')
+        self._toggle_btn.clicked.connect(lambda: self.set_collapsed(not self._collapsed))
+        hl.addWidget(self._toggle_btn)
         layout.addWidget(header)
 
         # Divider
@@ -234,7 +269,7 @@ class Sidebar(QWidget):
                 continue
 
             btn = StepButton(number, icon_name, label)
-            btn.setToolTip(_step_tooltips.get(number, ""))
+            btn.setToolTip(label + '\n' + _step_tooltips.get(number, ""))
             btn.clicked.connect(lambda _=False, n=number: self.step_clicked.emit(n))
             self._step_buttons[number] = btn
             layout.addWidget(btn)
@@ -253,15 +288,62 @@ class Sidebar(QWidget):
         self._settings_btn = StepButton(0, "settings", "Settings")
         self._settings_btn.set_state(StepButton.PENDING)
         self._settings_btn.set_show_dot(False)
-        self._settings_btn.setToolTip("Configure credentials, Claude API key, and app appearance.")
+        self._settings_btn.setToolTip("Settings\nConfigure credentials, Claude API key, and app appearance.")
         self._settings_btn.clicked.connect(self.settings_clicked)
         layout.addWidget(self._settings_btn)
         layout.addSpacing(8)
+        self.refresh_theme()
+
+    def is_collapsed(self) -> bool:
+        return self._collapsed
+
+    def set_collapsed(self, collapsed: bool, *, animate: bool = True):
+        if collapsed == self._collapsed:
+            return
+        self._collapsed = collapsed
+        self._width_animation.stop()
+        self._brand.hide()
+        for label in self._section_labels:
+            label.hide()
+        for button in (*self._step_buttons.values(), self._settings_btn):
+            button.set_compact(True)
+        action = 'Expand sidebar' if collapsed else 'Collapse sidebar'
+        self._toggle_btn.setToolTip(action)
+        self._toggle_btn.setAccessibleName(action)
+        self._update_toggle_icon()
+        target = self.COLLAPSED_WIDTH if collapsed else self.EXPANDED_WIDTH
+        if animate and self.isVisible():
+            self._width_animation.setStartValue(self.width())
+            self._width_animation.setEndValue(target)
+            self._width_animation.start()
+        else:
+            self.setFixedWidth(target)
+            self._finish_resize()
+        self.collapsed_changed.emit(collapsed)
+
+    def _finish_resize(self):
+        self._brand.setVisible(not self._collapsed)
+        for label in self._section_labels:
+            label.setVisible(not self._collapsed)
+        for button in (*self._step_buttons.values(), self._settings_btn):
+            button.set_compact(self._collapsed)
+
+    def _update_toggle_icon(self):
+        from gui_icons import make_icon
+        name = 'sidebar_expand' if self._collapsed else 'sidebar_collapse'
+        self._toggle_btn.setIcon(make_icon(name, gui_styles.sidebar_label(), 16))
 
     def refresh_theme(self):
         c = gui_styles.current
-        self._lbl_top.setStyleSheet(f"color:{c['TEXT_FAINT']};font-size:9px;font-weight:700;")
-        self._lbl_bot.setStyleSheet(f"color:{c['TEXT_PRI']};font-size:13px;font-weight:700;")
+        self._update_toggle_icon()
+        self._toggle_btn.setStyleSheet(f'''
+            QToolButton {{ background: transparent; color: {c['TEXT_SEC']};
+                border: 1px solid {c['BORDER']}; border-radius: 6px; padding: 0; }}
+            QToolButton:hover {{ background: {c['PANEL']}; color: {c['TEXT_PRI']}; }}
+            QToolButton:focus {{ border-color: {c['BORDER_ACT']}; }}
+        ''')
+        self._brand_prefix.setStyleSheet(f"color:{gui_styles.sidebar_label()};font-size:14px;font-weight:500;")
+        self._brand_name.setStyleSheet(f"color:{c['TEXT_PRI']};font-size:14px;font-weight:700;")
         self._div_top.setStyleSheet(f"background:{c['BORDER']};")
         self._div_bot.setStyleSheet(f"background:{c['BORDER']};")
         for div in self._section_dividers:

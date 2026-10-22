@@ -2,19 +2,16 @@ import asyncio
 import queue
 import threading
 
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit, QCheckBox, QComboBox,
-)
 from PySide6.QtCore import Signal, QTimer
 
-from gui_log import LogWidget
-from panels._shared import _form_label, _section_header, friendly_error
-from h5p_progress import H5PRun, saved_runs
+from panels.h5p_workspace import H5PWorkspace
+from panels._shared import friendly_error
+from h5p_progress import H5PRun, saved_runs, clean_url
 
 
-class H5PPanel(QWidget):
+class H5PPanel(H5PWorkspace):
     step_success = Signal()
+    back_requested = Signal()
 
     def __init__(self, main_window, parent=None):
         super().__init__(parent)
@@ -25,6 +22,7 @@ class H5PPanel(QWidget):
         self._h5p_skip_flag = [False]
         self._stop_flag = [False]
         self._task_active = False
+        self._back_to_courses_pending = False
         self._worker_loop = None
         self._worker_task = None
         self._active_dialogs = []
@@ -34,132 +32,25 @@ class H5PPanel(QWidget):
         self._poll_timer.timeout.connect(self._poll_log)
         self._poll_timer.start(100)
 
-    def _build(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 28, 32, 20)
-        layout.setSpacing(0)
-
-        layout.addWidget(_section_header("H5P"))
-        sub = QLabel(
-            "Download H5P activities from Moodle and paste them into the matching "
-            "Brightspace modules — no Moodle/Brightspace diff, just H5P."
-        )
-        sub.setProperty("role", "dim")
-        sub.setWordWrap(True)
-        layout.addWidget(sub)
-        layout.addSpacing(20)
-
-        layout.addWidget(_form_label('RESUME SAVED COURSE'))
-        saved_row = QHBoxLayout()
-        saved_row.setSpacing(8)
-        self._saved_courses = QComboBox()
-        self._saved_courses.setMinimumWidth(0)
-        self._saved_courses.setFixedHeight(40)
-        self._saved_courses.setMinimumContentsLength(24)
-        self._saved_courses.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self._resume_btn = QPushButton('Resume saved course…')
-        self._resume_btn.setFixedHeight(40)
-        self._resume_btn.setProperty('variant', 'secondary')
-        self._resume_btn.clicked.connect(self._resume_run)
-        saved_row.addWidget(self._saved_courses, 1)
-        saved_row.addWidget(self._resume_btn)
-        layout.addLayout(saved_row)
-        layout.addSpacing(12)
-
-        layout.addWidget(_form_label("BRIGHTSPACE COURSE URL"))
-        layout.addSpacing(4)
-        self._bs_entry = QLineEdit()
-        self._bs_entry.setPlaceholderText("https://learn.okanagancollege.ca/d2l/le/content/<id>/home")
-        self._bs_entry.setFixedHeight(40)
-        layout.addWidget(self._bs_entry)
-        layout.addSpacing(12)
-
-        layout.addWidget(_form_label("MOODLE COURSE URL"))
-        layout.addSpacing(4)
-        self._moodle_entry = QLineEdit()
-        self._moodle_entry.setPlaceholderText("https://mymoodle.okanagan.bc.ca/course/view.php?id=…")
-        self._moodle_entry.setFixedHeight(40)
-        layout.addWidget(self._moodle_entry)
-        layout.addSpacing(12)
-
-        self._gradebook_cb = QCheckBox("Add H5P activities to gradebook")
-        self._gradebook_cb.setChecked(False)
-        self._gradebook_cb.setToolTip(
-            "Checked: choose Add Grade Item for every H5P activity in this run. "
-            "Unchecked: proceed without grade items."
-        )
-        layout.addWidget(self._gradebook_cb)
-        layout.addSpacing(14)
-
-        self._run_btn = QPushButton("Run H5P")
-        self._run_btn.setFixedHeight(42)
-        self._run_btn.clicked.connect(self._start_run)
-        run_row = QHBoxLayout()
-        run_row.addWidget(self._run_btn, 1)
-        self._stop_btn = QPushButton("Stop")
-        self._stop_btn.setProperty("variant", "secondary")
-        self._stop_btn.setFixedHeight(42)
-        self._stop_btn.setToolTip(
-            "Stop the current H5P run and close its browser. Already saved activities remain."
-        )
-        self._stop_btn.clicked.connect(self._stop_run)
-        self._stop_btn.hide()
-        run_row.addWidget(self._stop_btn)
-        layout.addLayout(run_row)
-        layout.addSpacing(8)
-
-        # Pause-point buttons (hidden until needed)
-        self._ready_btn = QPushButton("Ready — Scrape Now")
-        self._ready_btn.setProperty("variant", "success")
-        self._ready_btn.setFixedHeight(38)
-        self._ready_btn.clicked.connect(self._moodle_ready)
-        self._ready_btn.hide()
-        layout.addWidget(self._ready_btn)
-
-        h5p_row = QHBoxLayout()
-        h5p_row.setSpacing(8)
-        self._h5p_ready_btn = QPushButton("Ready — Download H5P")
-        self._h5p_ready_btn.setProperty("variant", "success")
-        self._h5p_ready_btn.setFixedHeight(38)
-        self._h5p_ready_btn.clicked.connect(self._h5p_ready)
-        self._h5p_ready_btn.hide()
-        self._h5p_skip_btn = QPushButton("Skip H5P")
-        self._h5p_skip_btn.setProperty("variant", "secondary")
-        self._h5p_skip_btn.setFixedWidth(120)
-        self._h5p_skip_btn.setFixedHeight(38)
-        self._h5p_skip_btn.clicked.connect(self._h5p_skip)
-        self._h5p_skip_btn.hide()
-        h5p_row.addWidget(self._h5p_ready_btn, 1)
-        h5p_row.addWidget(self._h5p_skip_btn)
-        layout.addLayout(h5p_row)
-        layout.addSpacing(8)
-
-        layout.addWidget(_form_label("LOG"))
-        layout.addSpacing(4)
-
-        self._log = LogWidget()
-        layout.addWidget(self._log, 1)
-
-        # Load saved URLs
-        cfg = self._mw.load_config() if hasattr(self._mw, "load_config") else {}
-        if cfg.get("h5p_bs_url"):
-            self._bs_entry.setText(cfg["h5p_bs_url"])
-        if cfg.get("h5p_moodle_url"):
-            self._moodle_entry.setText(cfg["h5p_moodle_url"])
-        self._refresh_saved_runs()
-
     def _refresh_saved_runs(self):
         selected = self._saved_courses.currentData()
         self._saved_courses.clear()
+        self._saved_courses.addItem('', None)
+        self._saved_courses.setItemData(0, 'No saved transfer selected', 3)
         runs = saved_runs(self._progress_directory)
-        for run in runs: self._saved_courses.addItem(run.label(), run.data['id'])
-        if not runs: self._saved_courses.addItem('No saved H5P courses yet', None)
+        for run in runs:
+            self._saved_courses.addItem(run.label(), run.data['id'])
+            self._saved_courses.setItemData(self._saved_courses.count() - 1, run.label(), 3)
         index = self._saved_courses.findData(selected)
         if index >= 0: self._saved_courses.setCurrentIndex(index)
-        self._resume_btn.setEnabled(bool(runs) and not self._task_active)
+        self._saved_selection_changed()
+        self._saved_card.setVisible(bool(runs) and not self._task_active and getattr(self, '_stage', 0) == 0)
+
+    def _saved_selection_changed(self):
+        self._resume_btn.setEnabled(bool(self._saved_courses.currentData()) and not self._task_active)
 
     def _resume_run(self):
-        if self._task_active: return
+        if self._task_active or not self._saved_courses.currentData(): return
         try:
             run = H5PRun.load(self._saved_courses.currentData(), self._progress_directory)
         except (OSError, ValueError) as exc:
@@ -179,11 +70,39 @@ class H5PPanel(QWidget):
             "h5p_moodle_url": self._moodle_entry.text().strip(),
         })
 
+    def _update_back_navigation(self):
+        returning = self._back_to_courses_pending
+        to_courses = self._task_active or self._stage != 0
+        destination = 'course setup' if to_courses else 'Media'
+        self._back_btn.setText('Going back…' if returning else '← Back')
+        self._back_btn.setEnabled(not returning)
+        self._back_btn.setAccessibleName('Back to ' + destination)
+        self._back_btn.setToolTip(
+            'Stop the current work, keep saved progress, and return to course setup.'
+            if self._task_active else 'Return to ' + destination + '.')
+
+    def _go_back(self):
+        if self._back_to_courses_pending:
+            return
+        if self._task_active:
+            # Keep the current run on screen until its worker has saved and
+            # closed the browser. Resetting sooner could allow overlapping runs.
+            self._back_to_courses_pending = True
+            self._stop_run()
+            self._update_back_navigation()
+        elif self._stage != 0:
+            self._new_transfer()
+            self._moodle_entry.setFocus()
+        else:
+            self.save_state()
+            self.back_requested.emit()
+
     def _start_run(self, resume_id=None):
         if self._task_active:
             return
         if not self._mw.chromium_ready:
             self._log.append_log("Browser engine still installing — please wait.", "warning")
+            self._status_hint.setText('The browser engine is still installing. Please wait a moment, then try again.')
             return
 
         bs_url = self._bs_entry.text().strip()
@@ -191,6 +110,17 @@ class H5PPanel(QWidget):
         grade_all = self._gradebook_cb.isChecked()
         if not bs_url or not moodle_url:
             self._log.append_log("Enter both a Brightspace and a Moodle course URL.", "warning")
+            self._status_hint.setText('Enter both a Moodle source and a Brightspace destination course URL.')
+            return
+
+        try:
+            from content_checker import _extract_course_id
+            clean_url(bs_url)
+            clean_url(moodle_url)
+            if not _extract_course_id(bs_url):
+                raise ValueError('Enter a Brightspace course URL containing its course ID.')
+        except ValueError as exc:
+            self._status_hint.setText(str(exc))
             return
 
         self.save_state()
@@ -204,6 +134,22 @@ class H5PPanel(QWidget):
         stop_flag = [False]
         self._stop_flag = stop_flag
         self._task_active = True
+        self._back_to_courses_pending = False
+        self._resume_id = resume_id or None
+        self._run_data = None
+        self._plan = None
+        self._result_summary = {}
+        self._last_error = None
+        self._review_wait = None
+        self._furthest_stage = 0
+        self._set_stage(0)
+        self._workspace.hide()
+        self._saved_card.hide()
+        self._change_btn.hide()
+        self._new_btn.hide()
+        self._progress_bar.hide()
+        self._status_line.setText('Finding your H5P activities')
+        self._status_hint.setText('The browser will open to connect your courses. Course content changes wait until you approve the plan.')
         self._resume_btn.setEnabled(False)
         self._saved_courses.setEnabled(False)
         for field in (self._bs_entry, self._moodle_entry, self._gradebook_cb): field.setEnabled(False)
@@ -212,14 +158,25 @@ class H5PPanel(QWidget):
         self._h5p_ready_btn.hide()
         self._h5p_skip_btn.hide()
 
-        self._run_btn.setText("Running…")
+        self._run_btn.setText("Finding activities…")
         self._run_btn.setEnabled(False)
-        self._stop_btn.setText("Stop")
+        self._stop_btn.setText("Stop && save")
         self._stop_btn.setEnabled(True)
         self._stop_btn.show()
         self._log.clear_log()
 
         q = self._log_queue
+        credentials = {key: getattr(self._mw, key, '') for key in (
+            'bs_username', 'bs_password', 'sso_email', 'sso_password', 'moodle_username', 'moodle_password')}
+
+        def review(plan):
+            result = [None]
+            event = threading.Event()
+            q.put(('__H5P_REVIEW__', (plan, result, event)))
+            while not event.wait(0.1):
+                if stop_flag[0]:
+                    return None
+            return None if stop_flag[0] else result[0]
 
         def grade_recovery(item_name: str, should_grade: bool) -> str:
             result = ["skip"]
@@ -265,14 +222,11 @@ class H5PPanel(QWidget):
                     stop_flag=stop_flag,
                     h5p_grade_all=grade_all,
                     h5p_grade_recovery=grade_recovery,
-                    bs_username=self._mw.bs_username,
-                    bs_password=self._mw.bs_password,
-                    sso_email=self._mw.sso_email,
-                    sso_password=self._mw.sso_password,
-                    moodle_username=self._mw.moodle_username,
-                    moodle_password=self._mw.moodle_password,
+                    **credentials,
                     resume_id=resume_id or None,
                     progress_directory=self._progress_directory,
+                    review_fn=review,
+                    on_state=lambda state: q.put(('__H5P_STATE__', state)),
                 )
 
             try:
@@ -300,6 +254,8 @@ class H5PPanel(QWidget):
         self._stop_flag[0] = True
         self._stop_btn.setText("Stopping…")
         self._stop_btn.setEnabled(False)
+        self._run_btn.setEnabled(False)
+        self._status_line.setText('Stopping and saving progress…')
         self._log.append_log("Stopping H5P…", "warning")
         self._ready_btn.hide()
         self._h5p_ready_btn.hide()
@@ -315,6 +271,9 @@ class H5PPanel(QWidget):
         for event in (self._moodle_ready_event, self._h5p_ready_event):
             if event:
                 event.set()
+        if self._review_wait:
+            self._review_wait[1].set()
+            self._review_wait = None
         for dialog in list(self._active_dialogs):
             dialog.close()
 
@@ -329,6 +288,9 @@ class H5PPanel(QWidget):
                     on_finished()
             finally:
                 dialog.deleteLater()
+                if not self._stop_flag[0] and self._stage == 2:
+                    self._status_line.setText('Transferring your activities')
+                    self._status_hint.setText('Continuing with the available activities. Your progress is saved automatically.')
 
         dialog.finished.connect(finished)
         dialog.setModal(False)
@@ -339,8 +301,11 @@ class H5PPanel(QWidget):
             while True:
                 msg, tag = self._log_queue.get_nowait()
                 if self._stop_flag[0] and msg.startswith("__H5P_"):
-                    if msg in ("__H5P_GRADE_RECOVERY__", "__H5P_FILE_RECOVERY__"):
+                    if msg in ("__H5P_GRADE_RECOVERY__", "__H5P_FILE_RECOVERY__", "__H5P_REVIEW__"):
                         tag[-1].set()
+                    elif msg == '__H5P_STATE__' and tag.get('run'):
+                        self._run_data = tag['run']
+                        self._resume_id = self._run_data['id']
                     continue
                 if msg == "__DONE__":
                     for dialog in list(self._active_dialogs):
@@ -349,25 +314,64 @@ class H5PPanel(QWidget):
                     self._saved_courses.setEnabled(True)
                     for field in (self._bs_entry, self._moodle_entry, self._gradebook_cb): field.setEnabled(True)
                     self._refresh_saved_runs()
-                    self._run_btn.setText("Run H5P")
                     self._run_btn.setEnabled(True)
                     self._stop_btn.hide()
                     self._ready_btn.hide()
                     self._h5p_ready_btn.hide()
                     self._h5p_skip_btn.hide()
+                    self._show_results(bool(tag))
+                    if self._last_error:
+                        self._status_hint.setText(self._last_error)
                     if tag:
                         self.step_success.emit()
+                    if self._back_to_courses_pending:
+                        self._back_to_courses_pending = False
+                        self._new_transfer()
+                        self._status_hint.setText('Your progress is saved. Open a saved transfer to continue, or change the courses to start again.')
+                        self._moodle_entry.setFocus()
+                    else:
+                        self._update_back_navigation()
                 elif msg == "__COMPLETE__":
                     if not self._stop_flag[0]:
-                        self._run_btn.setText("Finished — close browser or Stop")
+                        self._run_btn.setText("Finishing…")
+                elif msg == '__H5P_REVIEW__':
+                    self._show_plan(*tag)
+                elif msg == '__H5P_STATE__':
+                    stage = tag['stage']
+                    if stage in ('progress', 'results'):
+                        self._show_progress(tag['run'])
+                    if stage == 'transfer':
+                        self._set_stage(2)
+                        self._status_line.setText('Transferring your activities')
+                        self._status_hint.setText(tag['message'])
+                        self._run_btn.setText('Transferring…')
+                        self._run_btn.setEnabled(False)
+                    elif stage == 'connect':
+                        self._status_line.setText('Connecting your courses')
+                        self._status_hint.setText('Sign in to Brightspace in the browser if asked. Next, confirm the Moodle course here.')
+                    elif stage == 'empty':
+                        self._status_hint.setText('No H5P activities were found in this Moodle course.')
+                    elif stage == 'results':
+                        self._result_summary = tag.get('summary', {})
+                        issues = tag.get('summary', {}).get('h5p_grade_failed', [])
+                        if issues:
+                            self._last_error = f'{len(issues)} activities need a gradebook check. Review their pages and gradebook settings in Brightspace.'
+                        elif tag['run'].get('status') == 'complete':
+                            self._last_error = None
                 elif msg == "__H5P_MOODLE_WAITING__":
-                    self._ready_btn.setText("Ready — Scrape Now")
+                    self._status_line.setText('Check the Moodle course in the browser')
+                    self._status_hint.setText('Sign in if needed and open the correct course or section. Then continue here to find its activities.')
+                    self._ready_btn.setText('I’m on the correct course — continue')
                     self._ready_btn.show()
                 elif msg == "__H5P_WAITING__":
+                    self._status_line.setText('Ready to download from Moodle')
+                    self._status_hint.setText('Check that the browser shows the correct course and that editing controls are available.')
                     self._h5p_ready_btn.show()
                     self._h5p_skip_btn.show()
                 elif msg == "__H5P_GRADE_RECOVERY__":
                     item_name, result_ref, event = tag
+                    self._status_line.setText('A gradebook choice needs your help')
+                    self._status_hint.setText(f'Check the open Brightspace dialog for {item_name}. Use the recovery window to retry or continue.')
                     from PySide6.QtWidgets import QMessageBox
                     dlg = QMessageBox(self)
                     dlg.setWindowTitle("H5P gradebook action needed")
@@ -395,17 +399,24 @@ class H5PPanel(QWidget):
                     self._show_prompt(dlg, grade_finished)
                 elif msg == "__H5P_FILE_RECOVERY__":
                     failures, result_ref, event = tag
+                    self._status_line.setText('Some downloads need your help')
+                    self._status_hint.setText('Choose replacement .h5p files in the recovery window, or continue with the available activities.')
                     from gui_dialogs import H5PRecoveryDialog
                     self._show_prompt(
                         H5PRecoveryDialog(failures, result_ref, event, self), event.set
                     )
                 else:
                     self._log.append_log(msg, tag)
+                    if tag == 'error':
+                        self._last_error = msg
+                        self._status_hint.setText(msg)
         except queue.Empty:
             pass
 
     def _moodle_ready(self):
         self._ready_btn.hide()
+        self._status_line.setText('Reading the Moodle activity list')
+        self._status_hint.setText('Preparing your transfer plan. Downloads and course content changes have not started.')
         if self._moodle_ready_event:
             self._moodle_ready_event.set()
 
