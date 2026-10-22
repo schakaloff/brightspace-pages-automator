@@ -24,7 +24,8 @@ from app_version import APP_VERSION
 from gui_splash import StartupSplash
 
 VERSION = APP_VERSION
-_CONFIG_PATH = Path(__file__).parent / "user_config.json"
+from config import gui_config_path
+_CONFIG_PATH = gui_config_path(Path(__file__).parent / "user_config.json")
 
 
 def _resource_path(*parts) -> Path:

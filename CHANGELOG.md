@@ -6,6 +6,13 @@ The matching section is pulled into the GitHub Release notes automatically,
 and shown to users in the in-app "Update available" dialog.
 
 ## 0.8.11
+- Mac updates now download and verify the matching Apple Silicon or Intel image,
+  prepare a signed replacement, and restart the app with rollback on failure.
+  Windows keeps its existing verified installer flow. Release checks now run on
+  Windows and both Mac architectures, including native Mac replacement tests.
+- Packaged app preferences move to the user-data folder so replacing the app
+  preserves settings. See `docs/MAC_UPDATES.md` for the one-time upgrade from
+  older Mac builds that open GitHub instead of installing updates.
 - Section dividers have a wider click area so instructors can select and delete
   them. Divider formatting preserves quoted attributes and embedded code.
 - Accept Brightspace's normalization of imported image-path separators during

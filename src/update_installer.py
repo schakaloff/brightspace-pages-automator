@@ -150,16 +150,17 @@ def wait_then_install_script(
 
 def launch_after_current_process_exits(installer_path: Path) -> None:
     """Start a detached helper that waits for this app, then runs Setup."""
+    if sys.platform == 'darwin':
+        from macos_updater import launch_update
+        launch_update(installer_path)
+        return
+    if sys.platform != 'win32':
+        raise RuntimeError('Automatic updates are supported on Windows and macOS.')
     record_update_result(
         "Applying update",
         detail="Installer helper started; the app will close and relaunch after Setup finishes.",
         extra={"installer_path": str(installer_path)},
     )
-    if sys.platform != "win32":
-        log_update_event(f"Launching installer directly: {installer_path}")
-        subprocess.Popen([str(installer_path)])
-        return
-
     relaunch_path = Path(sys.executable) if getattr(sys, "frozen", False) else None
     update_dir = _removable_update_dir(installer_path)
     # The helper lives beside the installer in the per-update directory so one

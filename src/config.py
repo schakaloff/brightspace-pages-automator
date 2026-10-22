@@ -1,4 +1,6 @@
 import os
+import json
+import sys
 from pathlib import Path
 
 if os.name == "nt":
@@ -7,6 +9,21 @@ else:
     USERDATA_DIR = Path.home() / ".local" / "share" / "BrightspaceAutomator"
 
 USERDATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def gui_config_path(legacy: Path) -> Path:
+    """Packaged app preferences must survive replacing a signed app bundle."""
+    if not getattr(sys, 'frozen', False):
+        return legacy
+    target = USERDATA_DIR / 'user_config.json'
+    if not target.exists() and legacy.is_file():
+        try:
+            data = json.loads(legacy.read_text(encoding='utf-8'))
+            if isinstance(data, dict):
+                target.write_text(json.dumps(data, indent=2), encoding='utf-8')
+        except (OSError, ValueError):
+            pass
+    return target
 
 # Shared with brightspace-quiz-automator — one login works for both tools
 SESSION_FILE = str(USERDATA_DIR / "session.json")

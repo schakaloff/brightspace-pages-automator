@@ -7,7 +7,7 @@ ROOT = Path(SPECPATH).parent
 SRC_MODULES = [
     "ai_styler", "app_version", "automator", "browser", "config",
     "style_migrator", "unit_collector", "chromium_setup", "icon_art", "single_instance",
-    "update_checker",
+    "update_checker", "update_installer", "macos_updater",
 ]
 
 # CI writes BUILD_VERSION (the exact release tag) before invoking PyInstaller so

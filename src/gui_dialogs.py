@@ -3,7 +3,6 @@ import difflib
 import re
 import sys
 import threading
-import webbrowser
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -633,9 +632,9 @@ class UpdateDialog(QDialog):
         self._update_btn.setFixedHeight(38)
         self._update_btn.clicked.connect(self._on_update)
 
-        if not self._release.get("asset_url") and sys.platform == "win32":
+        if not self._release.get("asset_url") or sys.platform not in ("win32", "darwin"):
             self._update_btn.setEnabled(False)
-            self._status_lbl.setText("No installer found in this release.")
+            self._status_lbl.setText("No compatible installer found in this release.")
 
         btn_row.addWidget(later_btn)
         btn_row.addWidget(self._update_btn)
@@ -643,9 +642,8 @@ class UpdateDialog(QDialog):
 
     def _on_update(self):
         release = self._release
-        if sys.platform != "win32" or not release.get("asset_url"):
-            webbrowser.open(release.get("html_url") or "")
-            self.accept()
+        if sys.platform not in ("win32", "darwin") or not release.get("asset_url"):
+            self._on_install_failed("No compatible installer found in this release.")
             return
 
         self._update_btn.setEnabled(False)
@@ -674,7 +672,10 @@ class UpdateDialog(QDialog):
             # path any other local process can predict and replace between the
             # download finishing and the installer being executed.
             update_dir = new_update_dir()
-            installer_path = update_dir / release["asset_name"]
+            asset_name = release.get("asset_name") or ""
+            if not asset_name or Path(asset_name).name != asset_name or '/' in asset_name or '\\' in asset_name:
+                raise ValueError("The release has an invalid installer filename.")
+            installer_path = update_dir / asset_name
             record_update_result(
                 "Update selected",
                 detail=f"Preparing installer download to {installer_path}",

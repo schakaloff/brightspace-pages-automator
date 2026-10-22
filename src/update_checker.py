@@ -15,6 +15,7 @@ offered as an update.
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import socket
@@ -162,7 +163,10 @@ def get_my_build_commit() -> str | None:
 
 def get_install_path() -> Path:
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
+        executable = Path(sys.executable).resolve()
+        if sys.platform == 'darwin':
+            return next((path for path in executable.parents if path.suffix == '.app'), executable.parent)
+        return executable.parent
     return _resource_path().resolve()
 
 
@@ -359,6 +363,7 @@ def consume_installer_result() -> dict | None:
     except OSError:
         pass
 
+    log_path = update_log_path() if sys.platform == 'darwin' else setup_log_path()
     if code == 0:
         result = "Update installed"
         detail = "Installer finished successfully (exit code 0)."
@@ -366,13 +371,13 @@ def consume_installer_result() -> dict | None:
         result = "Update failed"
         detail = (
             "The installer helper did not report an exit code. "
-            f"See the setup log at {setup_log_path()}."
+            f"See the installer log at {log_path}."
         )
     else:
         result = "Update failed"
         detail = (
             f"Installer exited with code {code} — the update was NOT applied. "
-            f"See the setup log at {setup_log_path()}."
+            f"See the installer log at {log_path}."
         )
 
     log_update_event(f"Installer result consumed: exit={code if code is not None else '(missing)'}")
@@ -485,11 +490,21 @@ def verify_installer_checksum(installer_path: Path, expected_sha256: str) -> str
 
 
 def _pick_asset(assets: list) -> dict | None:
-    suffix = ".exe" if sys.platform == "win32" else ".dmg"
     if sys.platform == "win32":
         for asset in assets:
             if asset.get("name") == LATEST_WINDOWS_INSTALLER:
                 return asset
+        suffix = '.exe'
+    elif sys.platform == 'darwin':
+        arch = 'arm64' if platform.machine().lower() in ('arm64', 'aarch64') else 'x86_64'
+        for asset in assets:
+            if asset.get('name', '').endswith(f'-{arch}.dmg'):
+                return asset
+        # Never fall back to an image explicitly labelled for the other CPU.
+        return next((asset for asset in assets if asset.get('name', '').endswith('.dmg')
+                     and not asset['name'].endswith(('-arm64.dmg', '-x86_64.dmg'))), None)
+    else:
+        return None
     for asset in assets:
         if asset.get("name", "").endswith(suffix):
             return asset

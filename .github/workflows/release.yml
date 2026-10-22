@@ -31,6 +31,10 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt pyinstaller
+      - name: Check updater and GUI startup
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest tests/test_update_checker.py tests/test_update_installer.py tests/test_update_integrity.py tests/test_update_dialog.py tests/test_update_ssl.py tests/test_update_versioning.py tests/test_update_fetch_errors.py tests/test_macos_update.py tests/test_gui_startup.py -q
       - name: Write build version
         shell: bash
         run: echo "v${{ needs.get-version.outputs.version }}-${{ github.run_number }}" > BUILD_VERSION
@@ -72,13 +76,25 @@ jobs:
 
   build-mac:
     needs: get-version
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt pyinstaller
+      - name: Check updater and GUI startup on Mac
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest tests/test_update_checker.py tests/test_update_installer.py tests/test_update_integrity.py tests/test_update_dialog.py tests/test_update_ssl.py tests/test_update_versioning.py tests/test_update_fetch_errors.py tests/test_macos_update.py tests/test_gui_startup.py -q
       - name: Write build version
         run: echo "v${{ needs.get-version.outputs.version }}-${{ github.run_number }}" > BUILD_VERSION
       - name: Write build commit
@@ -92,14 +108,14 @@ jobs:
             hdiutil create -volname "Brightspace Pages Automator" \
               -srcfolder "dist/Brightspace Pages Automator.app" \
               -ov -format UDZO \
-              "BrightspacePagesAutomator-${{ needs.get-version.outputs.version }}.dmg" && break
+              "BrightspacePagesAutomator-${{ needs.get-version.outputs.version }}-${{ matrix.arch }}.dmg" && break
             echo "hdiutil failed (attempt $i), retrying in 5s..."
             sleep 5
           done
-          test -f "BrightspacePagesAutomator-${{ needs.get-version.outputs.version }}.dmg"
+          test -f "BrightspacePagesAutomator-${{ needs.get-version.outputs.version }}-${{ matrix.arch }}.dmg"
       - uses: actions/upload-artifact@v4
         with:
-          name: mac-dmg
+          name: mac-dmg-${{ matrix.arch }}
           path: BrightspacePagesAutomator-*.dmg
 
   release:
@@ -129,8 +145,24 @@ jobs:
           path: dist-artifacts
       - uses: actions/download-artifact@v4
         with:
-          name: mac-dmg
+          pattern: mac-dmg-*
+          merge-multiple: true
           path: dist-artifacts
+      - name: Publish checksums for Windows and both Mac installers
+        run: |
+          python3 - <<'EOF'
+          import hashlib
+          from pathlib import Path
+          root = Path('dist-artifacts')
+          assets = sorted(p for p in root.iterdir() if p.suffix in ('.exe', '.dmg'))
+          if not assets or len(list(root.glob('*.dmg'))) != 2:
+              raise SystemExit('Both Mac architectures and Windows installers are required')
+          with (root / 'SHA256SUMS.txt').open('w', encoding='ascii') as out:
+              for path in assets:
+                  with path.open('rb') as src:
+                      digest = hashlib.file_digest(src, 'sha256').hexdigest()
+                  out.write(f'{digest}  {path.name}\n')
+          EOF
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.get-version.outputs.version }}-${{ github.run_number }}
