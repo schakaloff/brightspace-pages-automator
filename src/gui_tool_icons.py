@@ -22,6 +22,19 @@ def tool_pixmap(name: str, size: int, color: str, accent: str = "") -> QPixmap:
         paths = svg.findall("{http://www.w3.org/2000/svg}path")
         for index in _ACCENTS.get(name, ()):
             paths[index].set("stroke", accent)
+    return _render_svg(svg, size, source)
+
+
+def soft_tool_pixmap(name: str, size: int, color: str) -> QPixmap:
+    """Render pinned Phosphor duotone geometry with the shared muted color."""
+    root_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+    source = root_path / "assets" / "ui" / "phosphor" / f"{name}.svg"
+    svg = ET.fromstring(source.read_bytes())
+    svg.set('fill', color)
+    return _render_svg(svg, size, source)
+
+
+def _render_svg(svg, size, source):
     renderer = QSvgRenderer(QByteArray(ET.tostring(svg)))
     if not renderer.isValid():
         raise ValueError(f"Invalid tool icon: {source.name}")

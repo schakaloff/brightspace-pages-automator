@@ -370,3 +370,66 @@ final result: passed
 Added a persistent Back button at the left of the H5P footer, keeping Stop & save on the right. The saved-progress hint now sits above the actions so the buttons remain reachable in narrow windows. Back from an active scan, review or transfer cancels the worker, waits for its save/browser cleanup, then returns to editable course setup. Back from results returns to setup; Back from idle setup returns to Media. URLs stay populated and saved transfers remain available. Stop & save still opens the progress/results view.
 
 Native Qt screenshots inspected in light and dark themes: `test-results/h5p-design/app/light-624-connect-waiting.png` and `dark-1120-connect-waiting.png`. Back, Stop & save and the disabled scan action fit the narrow footer. Browser-course mutations were not needed for this UI check.
+
+## Build & style approved preview (2026-10-22) — first comparison
+
+Source: `C:/Users/Nick/.codex/generated_images/01a15f57-7d40-72c2-bff2-db97e2a04afb/exec-ffd7e3da-90c6-4e32-b2d4-67c6c399934a.png` (1604 x 981), normalized to the native 1120 x 685 panel. Native capture: `test-results/build-style/light-1120-panel.png`; combined evidence: `comparison.png` and `icons-comparison.png` in the same directory.
+
+[P2] Vertical rhythm pushes Remove topics partly below the viewport. Reduce the top/section gaps and bottom padding so all six rows fit the approved desktop size. [P2] The resting-state harness captured initial automatic keyboard focus; process initial events before clearing focus and keep a separate deliberate focus capture. Icons use pinned Phosphor duotone assets rather than rasterized mock geometry; minor symbol differences will be evaluated after layout repair.
+
+final result: blocked
+
+## Build & style approved preview (2026-10-22) — final comparison
+
+Reopened the approved reference and repaired native capture at matching 1120 x 685 panel size, then inspected them together in `test-results/build-style/comparison.png`. The six rows now fit, the resting state has no accidental keyboard focus, and the grouped surfaces, text hierarchy, muted slate icons, pale tiles and fine dividers follow the approved Media palette. The earlier two P2 findings are resolved.
+
+Native shell captures inspected: `light-bottom-shell.png` (560 x 480, scrolled to Remove topics), `dark-624-shell.png` (narrow layout and wrapping), and `dark-focus-shell.png` (1120 x 800 keyboard focus). The last action remains reachable, descriptions wrap without horizontal overflow, and focus has a visible teal outline. Grouped rows are native buttons with accessible names/descriptions, one focus target per row, and pointer hit-testing across icons, labels and whitespace.
+
+Remaining P3: Phosphor's pinned library symbols differ slightly from the generated reference (single file-plus rather than stacked pages, stacked folders rather than a folder-to-folder arrow, square copy corners). These retain the requested soft duotone appearance without custom drawn icon geometry. Platform font rendering can vary; this session verified Qt on Windows, not a running Mac build. Both packaging specifications include the existing assets tree, including the new icons and MIT license.
+
+Dependency audit: removed only the duplicate hub route and its unused `open_studio_in_app()` launcher. `TransferPanel` and its shared worker/state modules remain because browser Studio uses them for scanning, creation, credentials, progress and cancellation. No production or test references to the removed route/launcher remain.
+
+Validation: 43 tests passed across Build & style, Media, transfer controller, startup and window layout. After the spacing repair, the five narrow-layout, pointer-hit and keyboard cases passed again. `git diff --check` passed. No live course content, browser sessions or real app settings changed during verification.
+
+final result: passed
+
+## Checker four-stage workflow (2026-10-22) — first comparison
+
+Approved flow: generated Connect `exec-9de968be-5078-4c0e-ba70-fd81ee27fc30.png`, login `exec-1b36317c-0623-40df-9770-148427ce8f64.png`, corrected Review `exec-5eaa042e-8c0d-4012-a7fc-f8cb8d29ca50.png`, corrected confirmation `exec-8b439111-d552-400d-b80f-1ae62d230b6d.png`, Apply `exec-a4c57f61-7431-4e08-a6c0-1d1f27598ad7.png`, Results `exec-832ffcb4-8e0f-4386-a991-6698de2796db.png`, under `C:/Users/Nick/.codex/generated_images/01a15f57-7d40-72c2-bff2-db97e2a04afb/`.
+
+Native evidence: `test-results/checker-design/flow/final-light-1120-review.png`, `final-light-624-confirm.png`, `final-light-560-login.png`, `final-dark-624-results.png`. Combined Review comparison `comparison-first.png` normalizes the 1487 x 1058 reference to the 1120 x 800 native client area at 1x Qt density. The existing native sidebar is intentionally retained; its width differs from the generated mock.
+
+[P2] Review's row/icon padding and course-summary padding are too tall; lower rows fall below the matched desktop viewport. Tighten them to the normalized source density while retaining readable fonts. [P1] Repeated Results renders leave obsolete outcome labels painting until deferred deletion; hide and detach removed labels before deleting them. [P2, resolved before comparison] Stage label colors needed descendant repolishing after a stage change. Fixed and verified in the current captures.
+
+final result: blocked
+
+### Checker comparison follow-up
+
+The repaired Review now shows all six choices and activity details at 1120 x 800. Removed outcome labels no longer overlap. Combined evidence: `comparison-review.png`, focused `comparison-review-detail.png`, plus `comparison-connect.png`, `comparison-login.png`, `comparison-confirm.png`, `comparison-apply.png`, and `comparison-results.png` under `test-results/checker-design/flow/`.
+
+[P2] Confirmation and Results still flatten the mock's selected-fix/outcome rows into plain text. Restore distinct icon rows and Completed/Needs attention headings with the actual recorded data. [P2] Change courses remains visually link-like while disabled during work; hide it during an active task. Keep this pass blocked until recaptured.
+
+Intentional adaptations: native sidebar width retained; first Connect has no previous page, so Back is disabled there. Running progress uses real worker messages plus selected fix types and an indeterminate indicator because the backend supplies no reliable per-fix completion states. Results cannot invent missing-page creation totals; only recorded counts are shown.
+
+final result: blocked
+
+## Checker four-stage workflow (2026-10-22) — final review
+
+All earlier P1/P2 findings are resolved. Review's row, tile, stage and course-summary spacing now keeps all six fix choices plus activity details visible in the matched desktop viewport. Removed outcome widgets are hidden and detached before deferred deletion. Confirmation and Results now use structured icon rows; Results separates Completed from Needs attention. Change courses is hidden during active work. Back during scanning cancels the worker, waits for browser cleanup, and returns to setup with URLs preserved; it stays disabled during writes.
+
+Source truth: the six generated images listed above (1487 x 1058 pixels, except corrected Review at 1486 x 1058). Final native evidence from `tools/preview_checker.py --label final`: `test-results/checker-design/flow/final-light-1120-{connect,login,review,confirm,apply,results}.png`, native Qt client size 1120 x 800, device density 1x. The source is normalized to 1120 x 800 with Lanczos resampling. Final paired full-view evidence is `comparison-{connect,login,review,confirm,apply,results}.png` in the same directory. Focused typography, controls and outcome comparisons: `comparison-review-detail.png`, `comparison-confirm-detail.png`, `comparison-results-detail.png`. Inspected all six states and their paired comparisons, plus light/dark narrow captures at 624 x 640 and 560 x 480 (including login attention, findings, partial report and results). Large narrow content scrolls while stage context and task actions remain outside the scroll.
+
+Required fidelity review:
+- Typography: existing Segoe UI/system fallback retained; 28px heading, 18px section headings, 16px fix titles, 14px body, 13px short hints. Wrapping and keyboard focus remain readable in both themes. The native type is slightly larger than some normalized generated subtitles, intentionally preserving app readability.
+- Layout: four icon-led stages, white grouped surfaces, inline attention, course context, explicit confirmation and persistent footer follow the approved flow. Existing sidebar width is retained. No lower desktop fix rows are hidden. Narrow surfaces scroll without horizontal overflow; footer buttons remain reachable.
+- Colors: existing neutral Media/H5P tokens, pale active teal stage, slate icon tiles, muted secondary text, restrained green completed states and amber attention icons. No new blue theme or mock gradients introduced.
+- Assets: existing pinned Tabler SVG library, rendered sharply at high density; no handcrafted icon shapes or rasterized UI screenshots are shipped. Different library glyphs and the absence of tiny decorative disclosure arrows/column labels are P3 refinements, not missing functionality.
+- Copy and behavior: current course IDs/scope and URLs are shown without guessing names. Fix types are never preselected on a fresh scan. Failed file checks say Not checked and cannot enable repair. Choices persist through evidence review and Back. Course changes invalidate scans and confirmation. Fix application still requires an explicit confirmation click. Optional Book/order choices are distinguished from findings.
+
+Intentional constraints: running progress shows real worker messages, selected fix types and an indeterminate indicator rather than invented per-fix completed/waiting states. Results displays only recorded outcomes; unsupported page-creation totals from the mock are omitted and users can scan again to verify. No saved/resumable Checker run is claimed. The initial Connect Back button is disabled because it has no preceding workflow screen. This verification ran on Windows Qt; it did not execute a Mac build or mutate live Moodle/Brightspace courses. All runtime controls use the existing cross-platform Qt/assets setup.
+
+Validation: 36 Checker workflow/layout/cancellation tests passed, including keyboard confirmation, inline Moodle wait, scan Back cleanup, stale report rejection, changed-course invalidation, partial-check honesty, preserved choices and repeated results. Another 16 existing link-review/navigation/window-layout tests passed (52 total). `git diff --check` passed. Scan and repair backend modules were not changed. Preview/test harnesses use local sample reports and mock workers and do not change real settings or courses.
+
+No actionable P0/P1/P2 findings remain. P3 follow-up: library symbol differences and minor native typography/spacing differences from generated pixels.
+
+final result: passed

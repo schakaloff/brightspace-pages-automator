@@ -10,7 +10,6 @@ from panels.workflow_hub import BuildStyleHub
     ("create_pages", "_page_creator"), ("collect", "_collector"),
     ("restyle", "_restyle"), ("cleanup", "_cleanup"),
     ("duplicate_content", "_duplicate"),
-    ("structured_transfer_qt", "_transfer"),
 ])
 def test_grouped_hub_opens_the_existing_tool(qtbot, monkeypatch, tool, panel):
     from gui import MainWindow
@@ -65,3 +64,53 @@ def test_narrow_hub_keeps_all_actions_reachable(qtbot):
     hub.resize(960, 800)
     QApplication.processEvents()
     assert hub._scroll.horizontalScrollBar().maximum() == 0
+
+
+@pytest.mark.parametrize('region', ['text', 'icon', 'whitespace'])
+def test_entire_rows_navigate_once_including_labels_and_icons(qtbot, region):
+    from PySide6.QtCore import Qt, QPoint
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QLabel, QFrame
+    import gui_styles
+    hub = BuildStyleHub()
+    qtbot.addWidget(hub)
+    hub.setStyleSheet(gui_styles.get_stylesheet())
+    hub.resize(960, 800)
+    hub.show()
+    opened = []
+    hub.tool_selected.connect(opened.append)
+    for key, row in hub.buttons.items():
+        hub._scroll.ensureWidgetVisible(row)
+        QApplication.processEvents()
+        if region == 'text':
+            target = next(label for label in row.findChildren(QLabel)
+                          if label.property('role') == 'hub-tool-heading')
+            point = target.mapTo(hub, target.rect().center())
+        elif region == 'icon':
+            target = row.findChild(QFrame)
+            point = target.mapTo(hub, target.rect().center())
+        else:
+            point = row.mapTo(hub, QPoint(row.width() // 2, 6))
+        QTest.mouseClick(hub.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
+        assert opened[-1] == key
+    assert opened == ['create_pages', 'collect', 'duplicate_content', 'structured_transfer', 'restyle', 'cleanup']
+
+
+def test_keyboard_navigation_crosses_groups_without_extra_buttons(qtbot):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+    hub = BuildStyleHub()
+    qtbot.addWidget(hub)
+    hub.resize(900, 800)
+    hub.show()
+    QApplication.processEvents()
+    opened = []
+    hub.tool_selected.connect(opened.append)
+    transfer = hub.buttons['structured_transfer']
+    transfer.setFocus()
+    qtbot.keyClick(transfer, Qt.Key.Key_Return)
+    qtbot.keyClick(transfer, Qt.Key.Key_Tab)
+    restyle = hub.buttons['restyle']
+    assert restyle.hasFocus()
+    qtbot.keyClick(restyle, Qt.Key.Key_Space)
+    assert opened == ['structured_transfer', 'restyle']

@@ -2,6 +2,7 @@
 import json
 import sys
 import zipfile
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -53,6 +54,76 @@ def test_already_named_package_is_reused(tmp_path):
     source = package(tmp_path, MOODLE_NAME)
     with named_upload_package(source, MOODLE_NAME) as upload:
         assert upload == source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('package_title', ['Internal package title', MOODLE_NAME])
+async def test_upload_keeps_selected_package_readable_until_use_and_cleans_up_after_save(tmp_path, monkeypatch, package_title):
+    """Chromium reads file paths at Use, after the file chooser has returned."""
+    source = package(tmp_path, package_title)
+    before = source.read_bytes()
+    selected_paths = []
+    @contextmanager
+    def track_upload_copy(*args):
+        with named_upload_package(*args) as upload:
+            selected_paths.append(upload)
+            yield upload
+    monkeypatch.setattr('h5p_titles.named_upload_package', track_upload_copy)
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(channel='msedge', headless=True)
+        try:
+            page = await browser.new_page()
+            # All cloud UI and requests stay local. Use really reads the selected
+            # file through Chromium, so deleting the named copy too early fails.
+            await page.route('https://fixture.h5p.com/**', lambda route: route.fulfill(
+                body='''<a class="create-content" href="#" onclick="event.preventDefault()">Add Content</a>
+                    <label class="save-action" onclick="window.saved=true">Save</label>
+                    <a class="btn-white btn-folder" href="#" onclick="event.preventDefault()">Folder</a>
+                    <table><tr class="content-item"><td>Saved item</td></tr></table>
+                    <iframe></iframe>''', content_type='text/html'))
+            await page.goto('https://fixture.h5p.com/content')
+            hub = page.frames[1]
+            await hub.set_content('''<a id="h5p-hub-upload" href="#" onclick="event.preventDefault()">Upload</a>
+                <input type="file" accept=".h5p" hidden>
+                <button class="h5p-hub-upload-button" onclick="document.querySelector('input').click()">Choose file</button>
+                <button class="h5p-hub-use-button">Use</button>
+                <script>
+                    window.importFinished=false;
+                    document.querySelector('.h5p-hub-use-button').onclick=async()=>{
+                        try {
+                            const bytes=await document.querySelector('input').files[0].arrayBuffer();
+                            window.uploadBytes=bytes.byteLength;
+                            document.body.innerHTML='<div class="h5peditor-form"><div class="tree"><div class="field-name-extraTitle"><input class="h5peditor-text"></div></div></div>';
+                        } catch(error) {window.importError=error.name;}
+                        window.importFinished=true;
+                    };
+                </script>''')
+            transfer = handler()
+            logs = []
+            transfer.log = lambda message, tag='info': logs.append(message)
+            transfer._auto_dismiss = AsyncMock(return_value=False)
+            transfer._collect_cloud_titles = AsyncMock(return_value=[MOODLE_NAME])
+            wait = page.wait_for_timeout
+            async def wait_for_import(ms):
+                if ms == 6000:
+                    await hub.wait_for_function('window.importFinished === true', timeout=5000)
+                else:
+                    await wait(1)
+            page.wait_for_timeout = wait_for_import
+            assert await transfer.upload_one(page, page.main_frame, source, MOODLE_NAME, known_cloud_titles=[]), '\n'.join(logs)
+            assert await hub.evaluate('window.importError || null') is None
+            assert await hub.evaluate('window.uploadBytes') > 0
+            assert await page.evaluate('window.saved') is True
+            assert transfer._last_verified_upload == MOODLE_NAME
+            assert source.read_bytes() == before
+            assert len(selected_paths) == 1
+            if package_title == MOODLE_NAME:
+                assert selected_paths[0] == source
+            else:
+                assert selected_paths[0] != source
+                assert not selected_paths[0].exists()
+        finally:
+            await browser.close()
 
 
 @pytest.mark.asyncio

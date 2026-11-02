@@ -323,13 +323,9 @@ class MainWindow(QMainWindow):
         if name == "structured_transfer":
             self._transfer.open_studio()
             return
-        if name == "structured_transfer_qt":
-            self._transfer.open_studio_in_app()
-            self._on_step(11)
-            return
         target = {"collect": 2, "restyle": 3, "kaltura": 4,
                   "h5p": 5, "scorm": 13, "cleanup": 8, "create_pages": 9,
-                  "link_review_preview": 10, "structured_transfer": 11, "duplicate_content": 12}.get(name)
+                  "link_review_preview": 10, "duplicate_content": 12}.get(name)
         if target is not None:
             self._on_step(target)
 

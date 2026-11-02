@@ -38,6 +38,7 @@ class CheckerPanel(CheckerReview, QWidget):
         self._worker_loop        = None
         self._worker_task        = None
         self._task_active        = False
+        self._back_to_courses_pending = False
         self._active_dialogs     = []
         self._scan_report        = None
         self._scan_urls          = None
@@ -97,9 +98,31 @@ class CheckerPanel(CheckerReview, QWidget):
 
         self._stop_flag[0] = False
         self._task_active = True
+        self._back_to_courses_pending = False
         self._run_mode = "scan" if scan_only else "apply"
-        self._subtitle.setText("Scanning your course pair." if scan_only else "Applying the selected fix types.")
         self._last_run_result = None
+        self._apply_succeeded = False
+        self._completed_stages = set() if scan_only else {0, 1}
+        if scan_only:
+            self._scan_report = None
+            self._scan_urls = None
+            for box in self._fix_boxes.values():
+                box.setChecked(False)
+        self._set_stage(0 if scan_only else 2)
+        self._progress_bar.show()
+        self._connection_steps.hide()
+        self._attention_title.hide()
+        chosen_keys = [key for key, value in self._selected_fixes().items() if value]
+        chosen = [title for key, title, _ in self.FIXES if self._selected_fixes()[key]]
+        if books_only:
+            chosen = ["Split Moodle Books"]
+            chosen_keys = ["books"]
+        elif order_only:
+            chosen = ["Match Moodle page order"]
+            chosen_keys = ["order"]
+        self._render_running_choices(chosen_keys)
+        self._progress_hint.setText("Reading Brightspace and Moodle, then comparing course content."
+                                    if scan_only else "Selected fix types: " + "; ".join(chosen))
         self._run_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
         self._stop_btn.show()
@@ -310,13 +333,18 @@ class CheckerPanel(CheckerReview, QWidget):
                     self._progress.hide()
                     self._moodle_hint.hide()
                     self._ready_btn.hide()
+                    self._connection_steps.hide()
+                    self._attention_title.hide()
                     self._h5p_hint.hide()
                     self._h5p_ready_btn.hide(); self._h5p_skip_btn.hide()
                     dl = Path(__file__).parent.parent.parent / "downloads"
                     self._dl_label.setText(f"Downloads: {dl}")
                     self._dl_label.show()
                     result = getattr(self, "_last_run_result", None)
-                    if result:
+                    if self._back_to_courses_pending:
+                        self._back_to_courses_pending = False
+                        self._invalidate_scan()
+                    elif result:
                         self._show_run_result(result)
                     else:
                         self.show_review()
@@ -330,24 +358,14 @@ class CheckerPanel(CheckerReview, QWidget):
                     self._continue_btn.show()
                     self.step_success.emit()
                 elif msg == "__CHK_MOODLE_WAITING__":
-                    self._ready_btn.setText("I'm signed in — continue")
-                    self._status_line.setText("Waiting for Moodle login")
+                    self._status_line.setText("Checking your courses")
+                    self._connection_steps.show()
+                    self._attention_title.show()
+                    self._progress_hint.setText("Waiting for your course confirmation.")
+                    self._progress_bar.hide()
                     self._moodle_hint.show()
                     self._ready_btn.show()
-                    # Front-most popup too — in-app buttons are easy to miss
-                    from PySide6.QtWidgets import QMessageBox
-                    dlg = QMessageBox(self)
-                    dlg.setWindowTitle("Action needed — Moodle")
-                    dlg.setText(
-                        "A browser window has opened your Moodle course.\n\n"
-                        "Verify you are logged in and the correct course is "
-                        "shown, then click Ready."
-                    )
-                    ready = dlg.addButton("I'm signed in — continue", QMessageBox.ButtonRole.AcceptRole)
-                    dlg.addButton("I'll use the app buttons", QMessageBox.ButtonRole.RejectRole)
-                    dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-                    self._show_prompt(dlg, lambda: self._moodle_ready()
-                                      if not self._stop_flag[0] and dlg.clickedButton() is ready else None)
+                    self._ensure_visible(self._ready_btn)
                 elif msg == "__CHK_H5P_WAITING__":
                     self._status_line.setText("Waiting for H5P download access")
                     self._h5p_hint.show()
@@ -431,7 +449,7 @@ class CheckerPanel(CheckerReview, QWidget):
                     self._show_prompt(H5PRecoveryDialog(failures, result_ref, event, self))
                 else:
                     self._log.append_log(msg, tag)
-                    if tag in {"step", "warning", "error", "success"}:
+                    if self._task_active and not self._stop_flag[0] and not self._ready_btn.isVisible() and tag in {"step", "warning", "error", "success"}:
                         self._status_line.setText(msg)
         except queue.Empty:
             pass
@@ -440,7 +458,11 @@ class CheckerPanel(CheckerReview, QWidget):
         self._close_prompt("Action needed — Moodle")
         self._moodle_hint.hide()
         self._ready_btn.hide()
+        self._connection_steps.hide()
+        self._attention_title.hide()
         self._status_line.setText("Reading Moodle content…")
+        self._progress_hint.setText("Comparing your course content. No action is needed right now.")
+        self._progress_bar.show()
         if self._moodle_ready_event:
             self._moodle_ready_event.set()
 

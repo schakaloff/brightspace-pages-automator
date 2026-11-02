@@ -59,8 +59,9 @@ class H5PRun:
                 raise ValueError('A saved H5P activity is incomplete.')
         return cls(path, data)
 
-    def save(self):
-        self.data['updated'] = datetime.now(timezone.utc).isoformat()
+    def save(self, *, touch=True):
+        if touch:
+            self.data['updated'] = datetime.now(timezone.utc).isoformat()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp = self.path.with_suffix('.json.tmp')
         with temp.open('w', encoding='utf-8') as file:
@@ -139,9 +140,12 @@ class H5PRun:
         return f"{self.data['course_name']} ({self.data['course_id']}) ← Moodle {moodle_id} — {progress}"
 
 
-def saved_runs(directory=None):
+def saved_runs(directory=None, *, include_removed=False):
     result = []
     for path in Path(directory or RUNS_DIR).glob('*.json'):
-        try: result.append(H5PRun.load(path.stem, directory))
+        try:
+            run = H5PRun.load(path.stem, directory)
+            if include_removed or not run.data.get('removed_at'):
+                result.append(run)
         except (OSError, ValueError, KeyError, TypeError): continue
     return sorted(result, key=lambda run: run.data.get('updated', ''), reverse=True)

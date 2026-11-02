@@ -46,6 +46,16 @@ class H5PHandler:
         self.grade_all = False
         self._DEEP_FIND_JS = DEEP_FIND_JS
         self._last_cloud_scan_complete = False
+        self.browser_guide = None
+
+    async def _watch(self, message, **details):
+        if self.browser_guide is not None:
+            context = {key: self.browser_guide.state[key] for key in ('activity', 'current', 'total')}
+            await self.browser_guide.status(message, **(context | details))
+
+    async def _point(self, locator, label):
+        if self.browser_guide is not None:
+            await self.browser_guide.point(locator, label)
 
     @staticmethod
     def activity_key(item: dict) -> str:
@@ -273,6 +283,7 @@ class H5PHandler:
                 observer(safe_name, 'pending')
             name      = item["name"]
             url       = item["href"]
+            await self._watch('Downloading from Moodle…', activity=name, current=idx, total=len(pending_items))
 
             self.log(
                 f"  [{idx}/{len(pending_items)}] Downloading missing H5P: {name}",
@@ -295,6 +306,7 @@ class H5PHandler:
 
                 # Step 2: navigate to Settings (strip &return=1 so Save and display goes to view.php)
                 self.log(f"    → Going to Settings…", "dim")
+                await self._watch('Opening Moodle activity settings…')
                 settings = tab.locator('a[href*="modedit.php?update="]')
                 settings_count = await settings.count()
                 self.log(f"      settings links found: {settings_count}", "detail")
@@ -314,6 +326,7 @@ class H5PHandler:
                 # whether the section is collapsed (checkbox is in DOM either way).
                 # Covers all three known field IDs across Moodle H5P module types.
                 self.log(f"    → Checking Allow download checkbox…", "dim")
+                await self._watch('Checking Allow download in Moodle…')
                 cb_result = await tab.evaluate("""() => {
                     const ids = ['id_export', 'id_enabledownload', 'id_displayopt_export'];
                     for (const id of ids) {
@@ -352,6 +365,8 @@ class H5PHandler:
                         failure_reason = "Save and display button was not found"
                         continue
                     await save_btn.first.scroll_into_view_if_needed()
+                    await self._watch('Saving the Moodle download setting…')
+                    await self._point(save_btn.first, 'Save and display')
                     await tab.wait_for_timeout(500)
                     # Do not let Playwright's implicit navigation wait impose
                     # its shorter default; the explicit wait below owns the
@@ -398,6 +413,8 @@ class H5PHandler:
                     try:
                         btn = frame.locator('li.h5p-export button')
                         if await btn.count() > 0:
+                            await self._watch('Opening the H5P download menu…')
+                            await self._point(btn.first, 'Reuse activity')
                             await btn.first.click()
                             reuse_clicked = True
                             break
@@ -432,12 +449,15 @@ class H5PHandler:
                 else:
                     try:
                         async with tab.expect_download(timeout=15000) as dl_info:
+                            await self._watch('Downloading the H5P package…')
+                            await self._point(dl_frame.locator('.h5p-download-button').first, 'Download H5P package')
                             await dl_frame.locator('.h5p-download-button').first.click()
                         download = await dl_info.value
                         await download.save_as(str(save_path))
                         self.log(f"    💾 Saved: {safe_name}.h5p", "success")
                         success += 1
                         downloaded = True
+                        await self._watch('H5P package downloaded', kind='success')
                     except Exception as e:
                         self.log(f"    ✗ Download failed: {e}", "error")
                         failure_reason = f"browser download failed: {e}"
@@ -449,6 +469,7 @@ class H5PHandler:
                 if observer:
                     observer(safe_name, 'confirmed' if downloaded else 'failed')
                 if not downloaded:
+                    await self._watch('Download needs a retry or replacement file', kind='attention')
                     failures.append({
                         "activity_key": self.activity_key(item),
                         "name": name,
@@ -479,6 +500,7 @@ class H5PHandler:
         return failures
 
     async def open_interactives(self, tab, for_quiz: bool = False) -> bool:
+        await self._watch('Opening the H5P library…')
         df = self._DEEP_FIND_JS
         try:
             # Use Playwright native click so the browser properly fires focus/blur events.
@@ -951,6 +973,7 @@ class H5PHandler:
             if not await loc.is_enabled(timeout=2000):
                 self.log(f"  ✗ {label} is visible but disabled", "error")
                 return False
+            await self._point(loc, label)
             await loc.click(timeout=timeout)
             return True
         except Exception as e:
@@ -979,6 +1002,7 @@ class H5PHandler:
                 if not await frame.locator(selector + ':visible').count():
                     continue
                 await loc.wait_for(state="visible", timeout=3000)
+                await self._point(loc, label)
                 await loc.click(timeout=5000)
                 self.log(f"  ✓ {label}: native click", "dim")
                 return True
@@ -1071,15 +1095,28 @@ class H5PHandler:
         'input.h5peditor-text[name="title"]',
     )
 
-    async def _set_content_title(self, tab, item_name: str, attempts: int = 10) -> bool:
+    async def _set_content_title(self, tab, item_name: str, attempts: int = 60) -> bool:
         """Fill the H5P editor's title field, verifying the value stuck.
 
         Polls: the editor renders asynchronously after "Use", so a single scan
         right after a fixed wait can run before the field exists. Searches every
         frame, not just h5p.com ones — the editor's inner frame is sometimes
         about:blank/srcdoc and was being skipped entirely.
+
+        Older presentations upgrade their nested question libraries before the
+        form appears. Organic Naming was verified live to exceed the old 15s
+        polling budget, so allow up to 90s while keeping Stop responsive.
         """
         for attempt in range(attempts):
+            if self._should_stop():
+                return False
+            if attempt == 10:
+                await self._watch('H5P is still preparing the editor · older activities can take longer', kind='waiting')
+                self.log(
+                    "  … H5P is still preparing the editor; older activities may need "
+                    "extra time to upgrade their content types.",
+                    "info",
+                )
             # Try semantic title selectors across all frames before any fallback.
             # A generic text input can be an activity question or the outer page title.
             for sel in self.TITLE_SELECTORS:
@@ -1216,6 +1253,8 @@ class H5PHandler:
             await tab.wait_for_timeout(800)
 
             from h5p_titles import named_upload_package
+            # Chromium reads the selected path lazily when Use sends the file.
+            # Keep the temporary named copy alive until import/save finishes.
             with named_upload_package(h5p_file, item_name) as upload_file:
                 try:
                     async with tab.expect_file_chooser(timeout=5000) as fc_info:
@@ -1232,93 +1271,97 @@ class H5PHandler:
                     self.log("  → Upload button did not open file chooser; setting hidden file input directly", "dim")
                     await hub_frame.locator('input[type="file"][accept=".h5p"]').first.set_input_files(str(upload_file))
 
-            await tab.wait_for_timeout(1000)
-            self.log("  → Clicking Use…", "dim")
-            if not await self._click_when_ready(
-                hub_frame,
-                'button.h5p-hub-use-button',
-                "Clicking H5P Use button",
-            ):
-                return False
-            self.log("  → Waiting for H5P editor to load after Use…", "dim")
-            await tab.wait_for_timeout(6000)
+                await tab.wait_for_timeout(1000)
+                self.log("  → Clicking Use…", "dim")
+                if not await self._click_when_ready(
+                    hub_frame,
+                    'button.h5p-hub-use-button',
+                    "Clicking H5P Use button",
+                ):
+                    return False
+                self.log("  → Waiting for H5P editor to load after Use…", "dim")
+                await self._watch('Waiting for H5P to prepare the uploaded activity…', kind='waiting')
+                await tab.wait_for_timeout(6000)
 
-            # Check for validation error (missing H5P library on the cloud platform)
-            for frame in tab.frames:
-                if frame.is_detached():
-                    continue
-                try:
-                    err = await frame.evaluate("""() => {
-                        var el = document.querySelector('.h5p-error-report, .error-report, [class*="error"]');
-                        return el ? el.textContent.trim() : null;
-                    }""")
-                    if err and ("validat" in err.lower() or "missing" in err.lower() or "library" in err.lower()):
-                        # Parse the missing library name from the error if possible
-                        lib_match = re.search(r'missing main library\s+([\w\.\s]+\d+\.\d+)', err, re.IGNORECASE)
-                        missing_lib = lib_match.group(1).strip() if lib_match else "unknown library"
-                        self.log(f"  ✗ H5P upload failed — missing content type: {missing_lib}", "error")
-                        self.log(f"    Fix: Brightspace Admin → H5P → Content Type Hub → install '{missing_lib}' → re-run Phase A", "warning")
-                        await self._recover_list(tab, h5p_frame, list_url)
+                # Check for validation error (missing H5P library on the cloud platform)
+                for frame in tab.frames:
+                    if frame.is_detached():
+                        continue
+                    try:
+                        err = await frame.evaluate("""() => {
+                            var el = document.querySelector('.h5p-error-report, .error-report, [class*="error"]');
+                            return el ? el.textContent.trim() : null;
+                        }""")
+                        if err and ("validat" in err.lower() or "missing" in err.lower() or "library" in err.lower()):
+                            # Parse the missing library name from the error if possible
+                            lib_match = re.search(r'missing main library\s+([\w\.\s]+\d+\.\d+)', err, re.IGNORECASE)
+                            missing_lib = lib_match.group(1).strip() if lib_match else "unknown library"
+                            self.log(f"  ✗ H5P upload failed — missing content type: {missing_lib}", "error")
+                            self.log(f"    Fix: Brightspace Admin → H5P → Content Type Hub → install '{missing_lib}' → re-run Phase A", "warning")
+                            await self._recover_list(tab, h5p_frame, list_url)
+                            return False
+                    except Exception:
+                        pass
+
+                dismissed = await self._auto_dismiss(tab, ["skip", "proceed without"])
+                if dismissed:
+                    self.log("  → Dismissed skip/grade dialog", "dim")
+                    await tab.wait_for_timeout(500)
+
+                # Set content title. This MUST succeed: Phase B finds the item in
+                # the cloud list by title, and so does the duplicate check — an
+                # untitled upload is invisible to both, so it can never be inserted
+                # and gets re-uploaded on every later run.
+                self.log("  → Setting title…", "dim")
+                await self._watch('Naming the uploaded H5P activity…')
+                title_set = await self._set_content_title(tab, item_name)
+                if not title_set:
+                    if self._should_stop():
                         return False
+                    self.log(
+                        f"  ✗ Title input never appeared — abandoning upload of {item_name} "
+                        "rather than saving it untitled",
+                        "error",
+                    )
+                    self.log(
+                        "    An untitled item cannot be found by Phase B and would be "
+                        "re-uploaded every run.",
+                        "warning",
+                    )
+                    await self._recover_list(tab, h5p_frame, list_url)
+                    return False
+
+                self.log("  → Clicking Save…", "dim")
+                if not await self._click_when_ready(
+                    editor_frame,
+                    'label.save-action',
+                    "Clicking H5P Save",
+                ):
+                    return False
+                await tab.wait_for_timeout(2000)
+
+                if not await self._click_when_ready(
+                    editor_frame,
+                    'a.btn-white.btn-folder',
+                    "Returning to H5P content list",
+                ):
+                    return False
+                # Wait for content list to fully reload before returning — prevents
+                # "Execution context was destroyed" on the next upload's evaluate call
+                try:
+                    await editor_frame.wait_for_url("**/content**", timeout=8000)
+                    await editor_frame.locator('tr.content-item').first.wait_for(timeout=8000)
                 except Exception:
-                    pass
+                    await tab.wait_for_timeout(3000)
 
-            dismissed = await self._auto_dismiss(tab, ["skip", "proceed without"])
-            if dismissed:
-                self.log("  → Dismissed skip/grade dialog", "dim")
-                await tab.wait_for_timeout(500)
-
-            # Set content title. This MUST succeed: Phase B finds the item in
-            # the cloud list by title, and so does the duplicate check — an
-            # untitled upload is invisible to both, so it can never be inserted
-            # and gets re-uploaded on every later run.
-            self.log("  → Setting title…", "dim")
-            title_set = await self._set_content_title(tab, item_name)
-            if not title_set:
-                self.log(
-                    f"  ✗ Title input never appeared — abandoning upload of {item_name} "
-                    "rather than saving it untitled",
-                    "error",
-                )
-                self.log(
-                    "    An untitled item cannot be found by Phase B and would be "
-                    "re-uploaded every run.",
-                    "warning",
-                )
-                await self._recover_list(tab, h5p_frame, list_url)
-                return False
-
-            self.log("  → Clicking Save…", "dim")
-            if not await self._click_when_ready(
-                editor_frame,
-                'label.save-action',
-                "Clicking H5P Save",
-            ):
-                return False
-            await tab.wait_for_timeout(2000)
-
-            if not await self._click_when_ready(
-                editor_frame,
-                'a.btn-white.btn-folder',
-                "Returning to H5P content list",
-            ):
-                return False
-            # Wait for content list to fully reload before returning — prevents
-            # "Execution context was destroyed" on the next upload's evaluate call
-            try:
-                await editor_frame.wait_for_url("**/content**", timeout=8000)
-                await editor_frame.locator('tr.content-item').first.wait_for(timeout=8000)
-            except Exception:
-                await tab.wait_for_timeout(3000)
-
-            saved_frame = await self.find_list_frame(tab)
-            saved_titles = await self._collect_cloud_titles(tab, saved_frame) if saved_frame else []
-            if item_name not in saved_titles:
-                self.log(f"  ✗ The uploaded H5P title did not match the Moodle name: {item_name!r}", 'error')
-                return False
-            self._last_verified_upload = item_name
-            self.log(f"  ✓ Uploaded: {item_name}", "success")
-            return True
+                saved_frame = await self.find_list_frame(tab)
+                saved_titles = await self._collect_cloud_titles(tab, saved_frame) if saved_frame else []
+                if item_name not in saved_titles:
+                    self.log(f"  ✗ The uploaded H5P title did not match the Moodle name: {item_name!r}", 'error')
+                    return False
+                self._last_verified_upload = item_name
+                self.log(f"  ✓ Uploaded: {item_name}", "success")
+                return True
         except Exception as e:
             # First line only — full Playwright call logs drown the GUI log
             self.log(f"  ✗ Upload failed for {item_name}: {str(e).splitlines()[0]}", "error")
@@ -1587,6 +1630,7 @@ class H5PHandler:
             return False
 
     async def finalize(self, tab, title: str, is_quiz: bool, should_grade: bool = False) -> bool:
+        await self._watch('Setting the Brightspace page title…', activity=title)
         editor_url = getattr(tab, 'url', '')
         try:
             from h5p_titles import new_page_target, saved_page_id, ensure_owned_page_title
@@ -1641,7 +1685,9 @@ class H5PHandler:
             # Save the named action. A generic d2l-desktop selector can match a
             # different control on the New Page screen.
             self.log("  → Clicking Save and Close…", "dim")
+            await self._watch('Saving the Brightspace page…')
             try:
+                await self._point(tab.get_by_role("button", name="Save and Close", exact=True).first, 'Save and Close')
                 await tab.get_by_role("button", name="Save and Close", exact=True).first.click(timeout=8000)
             except Exception as exc:
                 self.log(
@@ -2011,8 +2057,10 @@ class H5PHandler:
             # A lost Save response may still have created the page. Check the
             # live destination before touching either the cloud or the editor.
             remaining = []
-            for item in matched:
+            for index, item in enumerate(matched, 1):
                 if self._should_stop(): return
+                await self._watch('Checking existing Brightspace pages…', activity=item['name'],
+                    current=index, total=len(matched))
                 if item.get('name_check_required') and item.get('saved_topic_id'):
                     from h5p_titles import ensure_owned_page_title
                     from unit_overview import BrowserContentAPI
@@ -2028,6 +2076,7 @@ class H5PHandler:
                 if item.get('name_check_required') and not present:
                     raise RuntimeError(f"{item['name']}: check and correct the previously saved page title in Brightspace before retrying. A second page will not be created.")
                 if present:
+                    await self._watch('Already in Brightspace · keeping the existing page', kind='success')
                     self._checkpoint(item, 'insertion', 'confirmed', name_check_required=False)
                     self._summary['h5p_already_present'].append((item['name'], item['bs_module_title']))
                     if item['should_grade'] and not item.get('graded'):
@@ -2052,6 +2101,7 @@ class H5PHandler:
         else:
             self.log("", "dim")
             self.log("Phase A — checking H5P cloud…", "step")
+            await self._watch('Checking the H5P library for existing uploads…', activity='', current=0, total=0)
             self.log("  Opening Brightspace Page editor → Insert Stuff → H5P library…", "info")
 
         if not phase_b_only:
@@ -2118,6 +2168,7 @@ class H5PHandler:
                 for item in this_course:
                     found, key, matched_title = _in_cloud(item["name"])
                     if found:
+                        await self._watch('Already uploaded · reusing the H5P activity', activity=item['name'], kind='success')
                         self.log(
                             f"  ✓ Already in H5P cloud: {item['name']} "
                             f"(key='{key}', matched='{matched_title[:100]}') — skipping upload",
@@ -2138,6 +2189,7 @@ class H5PHandler:
                 if not to_upload:
                     self.log("  ✓ All files already in cloud — nothing to upload", "success")
                 else:
+                    await self._watch('Ready to upload · confirm in the app if asked', activity='', kind='waiting')
                     if not await self._confirm(
                         f"{len(to_upload)} of {len(this_course)} H5P file(s) still need "
                         "uploading. Upload them now?"
@@ -2160,6 +2212,8 @@ class H5PHandler:
                                 self.log("⏸ Stopped by user — aborting H5P upload phase", "warning")
                                 return
                             self.log(f"  [{idx}/{len(to_upload)}] Uploading: {item['name']}…", "info")
+                            await self._watch('Uploading to the H5P library…', activity=item['name'],
+                                current=idx, total=len(to_upload))
                             if progress and not Path(item['file']).is_file():
                                 self._checkpoint(item, 'problem', 'Download missing. Resume to retry or choose a replacement file.')
                                 item['upload_failed'] = True
@@ -2176,10 +2230,12 @@ class H5PHandler:
                                 verified = await self._collect_cloud_titles(upload_tab, live) if live else []
                                 ok = item['name'] in verified
                             if not ok:
+                                await self._watch('Upload could not be verified · activity needs attention', kind='attention')
                                 self.log(f"    ✗ Upload failed — will skip insert for this item", "warning")
                                 item["upload_failed"] = True
                             else:
                                 self._checkpoint(item, 'upload', 'confirmed', cloud_title=item['name'])
+                                await self._watch('H5P library upload verified', kind='success')
                             if ok and known_cloud_titles is not None and not self._title_in_cloud(
                                 item["name"], known_cloud_titles
                             ):
@@ -2222,6 +2278,7 @@ class H5PHandler:
             name = item["name"]
             bs_module_title = item["bs_module_title"]
             bs_module_id = item["bs_module_id"]
+            await self._watch('Checking the destination before placement…', activity=name, current=idx, total=N)
             self.log(f"  [{idx}/{N}] {name}  →  {bs_module_title}", "detail")
 
             # Check live via API — stale bs_flat misses topics added in earlier iterations
@@ -2229,6 +2286,7 @@ class H5PHandler:
                 page, course_id, bs_module_id, name
             )
             if already_in_bs:
+                await self._watch('Already in Brightspace · keeping the existing page', kind='success')
                 consecutive_save_failures = 0
                 already_present_count += 1
                 self._summary["h5p_already_present"].append((name, bs_module_title))
@@ -2240,6 +2298,7 @@ class H5PHandler:
                 continue
 
             self.log(f"  [{idx}/{N}] Inserting: {name} → {bs_module_title}", "info")
+            await self._watch(f'Placing activity in {bs_module_title}…')
 
             tab = await context.new_page()
             try:
@@ -2254,6 +2313,7 @@ class H5PHandler:
 
                 self._last_grade_status = None
                 self._grade_choice_completed = False
+                await self._watch('Selecting the activity from the H5P library…')
                 ok = await self.insert_from_list(tab, h5p_frame, name, item["should_grade"])
                 if not ok:
                     if self._last_grade_status in ("skip", "stop"):
@@ -2297,6 +2357,7 @@ class H5PHandler:
                 # editor closes. Poll the API rather than assuming a fixed
                 # delay is enough, or treating one early miss as a failure.
                 confirmed = False
+                await self._watch('Checking the saved page and its title…')
                 for attempt in range(4):
                     verify_saved_name = getattr(self, '_verify_saved_name', self._verify_topic_in_module)
                     confirmed = await verify_saved_name(
@@ -2307,6 +2368,7 @@ class H5PHandler:
                     if attempt < 3:
                         await tab.wait_for_timeout(750)
                 if confirmed:
+                    await self._watch('Brightspace page saved and verified', kind='success')
                     consecutive_save_failures = 0
                     self.log(f"    ✓ Done + verified: {name} → {bs_module_title}", "success")
                     self._summary["h5p_inserted"].append((name, bs_module_title))
@@ -2315,6 +2377,7 @@ class H5PHandler:
                     self._summary[bucket].append((name, bs_module_title))
                     self._checkpoint(item, 'insertion', 'confirmed', graded=item['should_grade'], name_check_required=False)
                 else:
+                    await self._watch('Saved page could not be verified · check the results', kind='attention')
                     self.log("    ✗ Saved H5P page could not be confirmed with its Moodle name in the destination unit", "error")
                     if getattr(self, '_verify_saved_name', None):
                         self._checkpoint(item, 'name_check_required', True,
@@ -2331,6 +2394,7 @@ class H5PHandler:
                         break
             except Exception as e:
                 self.log(f"    ✗ Error on {name}: {e}", "error")
+                await self._watch('Activity needs attention · see details in the app', kind='attention')
                 self._summary["h5p_failed"].append((name, bs_module_title))
             finally:
                 try:

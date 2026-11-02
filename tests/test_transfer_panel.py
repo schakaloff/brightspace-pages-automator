@@ -27,7 +27,7 @@ def panel(qtbot, tmp_path, monkeypatch):
     result.close_studio()
 
 
-def test_studio_launch_reuses_server_and_fallback_opens_draft(panel, monkeypatch):
+def test_studio_launch_reuses_server_and_saves_draft(panel, monkeypatch):
     from panels import transfer_panel as module
     urls = []
     monkeypatch.setattr(module.webbrowser, "open", lambda url: urls.append(url) or True)
@@ -45,8 +45,7 @@ def test_studio_launch_reuses_server_and_fallback_opens_draft(panel, monkeypatch
     monkeypatch.setattr(panel, "_worker", worker)
     panel._poll()
     assert not panel._busy and panel._studio.path.exists()
-    panel.open_studio_in_app()
-    assert panel._plan["id"] == panel._studio.plan["id"] and panel._step == 2
+    assert module.load_plan(panel._studio.path)["id"] == panel._studio.plan["id"]
 
 
 def test_studio_scan_is_rejected_while_app_worker_is_busy(panel, monkeypatch):
@@ -99,7 +98,9 @@ def test_desktop_state_save_cannot_overwrite_browser_edits(panel, monkeypatch, s
                         "target_url": "https://learn.okanagancollege.ca/d2l/home/2"})
     panel._queue.get_nowait()  # Finish this scan directly, without a live worker.
     panel._studio.finish_scan((source_course(), target_course()))
-    panel.open_studio_in_app()
+    # Previously saved desktop state can still coexist with the web planner;
+    # saving the app must never overwrite newer edits made in the browser.
+    panel.set_plan(module.load_plan(panel._studio.path), panel._studio.path, save=False)
     studio = panel._studio
     studio.edit({"plan_id": studio.plan["id"], "revision": studio.revision, "action": "rename",
                  "entries": [{"side": "destination", "id": studio.plan["outline"][0]["id"]}],

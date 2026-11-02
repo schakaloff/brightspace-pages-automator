@@ -78,8 +78,12 @@ async def run_h5p_only(
     progress_directory=None,
     review_fn: Optional[Callable] = None,
     on_state: Optional[Callable] = None,
+    watch_browser: bool = True,
 ) -> None:
     from browser import launch_browser, wait_for_login
+    from h5p_browser_guide import H5PBrowserGuide
+
+    guide = H5PBrowserGuide(on_state, enabled=watch_browser)
 
     checker = ContentChecker(
         bs_url=bs_url,
@@ -115,6 +119,7 @@ async def run_h5p_only(
         "h5p_already_present": [],
     }
     checker._h5p._summary = checker._summary
+    checker._h5p.browser_guide = guide
     # Override with the stricter exact-match check (see _verify_topic_in_module_strict).
     checker._h5p._verify_topic_in_module = _verify_topic_in_module_strict
     checker._h5p._verify_saved_name = lambda page, course, module, name: _verify_topic_in_module_strict(
@@ -145,7 +150,9 @@ async def run_h5p_only(
         if on_state:
             on_state(dict(stage='connect', message='Connecting to Brightspace and Moodle'))
         p, browser, context, page = await launch_browser()
+        await guide.install(context)
         check_stopped()
+        await guide.status('Connecting to Brightspace · sign in if asked', kind='waiting')
         await wait_for_login(
             page, context,
             bs_username or None, bs_password or None,
@@ -154,6 +161,7 @@ async def run_h5p_only(
 
         log("─" * 52, "dim")
         check_stopped()
+        await guide.status('Reading the Brightspace course structure…')
         bs_flat = await checker._fetch_bs_toc(page, course_id)
         if not bs_flat:
             return
@@ -172,9 +180,11 @@ async def run_h5p_only(
         log("─" * 52, "dim")
         check_stopped()
         if resume_id and progress.data['moodle_items']:
+            await guide.status('Loading your saved Moodle activity list…')
             moodle_items = progress.data['moodle_items']
             log('Resuming the saved activity list — Moodle does not need to be scraped again.', 'info')
         else:
+            await guide.status('Checking the Moodle course · continue in the app when ready', kind='waiting')
             moodle_items = await checker._scrape_moodle(context, inventory_only=True) if review_fn else await checker._scrape_moodle(context)
             if moodle_items: progress.capture_moodle(moodle_items)
             if review_fn and isinstance(getattr(checker, 'moodle_course_name', None), str):
@@ -237,6 +247,8 @@ async def run_h5p_only(
         completed = (bool(rows) or empty_course) and not remaining and not failed
         progress.data['status'] = 'complete' if completed else 'paused'
         progress.save()
+        await guide.status('Transfer complete · saved pages verified' if completed else
+            'Progress saved · some activities need attention', kind='success' if completed else 'attention')
         log(
             f"{'✓ H5P done' if completed else '⚠ H5P incomplete'}: {len(inserted)} newly inserted, "
             f"{len(already)} already present, {len(failed)} failed",

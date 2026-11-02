@@ -1,7 +1,6 @@
-"""Dev launcher: restarts gui.py automatically when any .py file changes."""
+"""Restart gui.py on code changes; stop watching when the app exits."""
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 WATCH_DIR = Path(__file__).parent
@@ -14,24 +13,63 @@ def get_mtimes():
     return {f: f.stat().st_mtime for f in files}
 
 
-if __name__ == "__main__":
-    print(f"Watching {WATCH_DIR} for .py changes  (Ctrl+C to stop)")
-    proc = subprocess.Popen(ENTRY)
-    mtimes = get_mtimes()
+def stop_app(proc):
+    """Stop and reap our app, including its Windows launcher/browser children."""
+    if proc.poll() is not None:
+        return
+    if sys.platform == "win32":
+        # A venv's python.exe can be a launcher for another Python process.
+        # Terminating only the launcher would leave the actual app running.
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    else:
+        proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+def main():
+    print(f"Watching {WATCH_DIR} for .py changes  (close the app or press Ctrl+C to stop)")
+    proc = None
 
     try:
+        mtimes = get_mtimes()
+        proc = subprocess.Popen(ENTRY)
         while True:
-            time.sleep(POLL_INTERVAL)
+            try:
+                returncode = proc.wait(timeout=POLL_INTERVAL)
+            except subprocess.TimeoutExpired:
+                pass  # Still open: check whether a saved edit needs a restart.
+            else:
+                print(f"App exited (code {returncode}). Stopped watching.")
+                return returncode
+
             new_mtimes = get_mtimes()
             changed = [f.name for f, t in new_mtimes.items() if mtimes.get(f) != t]
             if changed:
+                # Closing the app takes priority over a simultaneous file edit.
+                returncode = proc.poll()
+                if returncode is not None:
+                    print(f"App exited (code {returncode}). Stopped watching.")
+                    return returncode
                 print(f"-- changed: {changed} -- restarting gui.py --")
                 mtimes = new_mtimes
-                if proc.poll() is None:
-                    proc.terminate()
-                    proc.wait()
+                stop_app(proc)
                 proc = subprocess.Popen(ENTRY)
     except KeyboardInterrupt:
-        if proc.poll() is None:
-            proc.terminate()
         print("\nStopped.")
+        return 0
+    finally:
+        if proc is not None:
+            stop_app(proc)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -102,6 +102,23 @@ loads and is the right one.
 
 ## When something goes wrong
 
+**Every upload reports "Title input never appeared" after successful downloads.**
+The October 22 title-preservation change could delete a temporary upload copy
+before the browser read it when clicking **Use**. The import failed before the
+title editor opened, so the message described the later symptom. The source app
+now keeps that file until the upload finishes. This affected packages whose
+internal title differs from their Moodle activity name.
+
+Restart the updated source app with `dev.bat` or `run.bat`, then resume the saved
+transfer. Its course-specific downloads can be reused. An already-running app
+or an installed build needs the fix loaded before retrying.
+
+An individual older presentation can also take longer to prepare its editor
+while H5P upgrades its nested question types. This was confirmed with **Organic
+Naming**: its title field appeared after the previous 15-second polling limit.
+The app now allows 90 seconds for that field and reports that it is still
+preparing the editor. **Stop & save** remains available during the wait.
+
 **The automator reports "Page tile not found" before uploading.**
 This happens before the H5P library opens. "Already cached" means the local
 download is ready; it does not mean the activity has been uploaded or inserted.
@@ -163,7 +180,7 @@ interrupted, Resume retries the same page in its original unit. If the saved
 page cannot be identified safely, it asks for a manual title check before
 another insertion can be attempted.
 
-The H5P panel saves a separate run for each Moodle/Brightspace course pair.
+Each saved H5P transfer belongs to a Moodle/Brightspace course pair.
 Start with **Find activities**. This reads the Moodle activity list without
 downloading packages, enabling Allow download, creating units or uploading content.
 Confirm the Moodle course in the browser when asked, then continue in the app.
@@ -176,14 +193,36 @@ are labelled **Already in Brightspace** and keep their grading unchanged.
 **Transfer … activities** starts the selected downloads, uploads and page creation.
 The activity list shows progress; **Show activity details** opens the technical log.
 
-After an interrupted run, choose it under **Continue a saved transfer**, then click
-**Open saved transfer**. Its course URLs and original gradebook default are restored.
+**Show browser cursor and live messages** is enabled by default in course setup.
+The browser shows a smooth pointer at actual controls and short messages for
+downloads, uploads, background checks and saved-page verification. The cursor uses
+a dark navy arrow with a pale outline, switching to a matching hand at clickable
+controls. It stays visible during background checks and waits; short action labels
+fade after each action. Activity counters describe the current phase. The pointer does not control your own mouse,
+and the overlay lets clicks pass through. It respects the system's reduced-motion
+preference. Uncheck the option before starting to hide the browser visuals; live
+status messages remain available in the app. The preference is saved for later
+transfers, including resumed transfers. Visuals are optional: if a page cannot
+display them, the transfer continues normally.
+
+After an interrupted run, click **Browse saved transfers**, select an entry, then
+click **Continue transfer**. Completed entries offer **Review transfer** instead.
+Its course URLs and original gradebook default are restored. Search by course name
+or ID, or filter by progress. Last-saved dates and short transfer IDs distinguish
+separate attempts for the same course.
 You can work on another course and return to this one later, including after
 closing the app or computer. The list shows uploads, inserted pages and remaining
 activities. **New transfer**, then **Find activities**, starts a fresh scan and
 keeps earlier saved runs available. **Stop & save** closes the running browser
 and keeps completed work. Results show what was added, already present or left
 for later. **Review remaining activities** reopens the saved transfer for review.
+
+To tidy up the list, select an entry and click **Remove from list**. Hold Ctrl or
+Shift to select several entries. **Undo** restores the most recent removal; the
+**Removed** filter lets you restore entries later, including after restarting the
+app. Removal only changes the local saved list. Progress records, downloaded
+packages, H5P uploads and Moodle/Brightspace content are kept. A transfer currently
+running in another app window cannot be removed.
 
 A resume uses the saved activity list instead of scraping Moodle again. Each run
 keeps its own downloaded packages, so another course cannot overwrite them.

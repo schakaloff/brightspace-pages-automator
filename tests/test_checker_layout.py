@@ -66,7 +66,7 @@ def test_standard_window_keeps_main_actions_visible(checker):
     report(panel)
     assert panel._group_rows["content"].isVisible()
     assert not panel._findings.isVisible()  # detail stays out of the overview
-    assert fully_visible(panel._review_btn, panel)
+    assert fully_visible(panel._apply_btn, panel)
     panel._group_rows["content"].click()
     panel._fix_boxes["content"].setChecked(True)
     settled()
@@ -82,12 +82,13 @@ def test_small_window_keeps_fixes_and_activity_reachable(checker):
     assert panel._compact_courses
     assert panel._scroll.horizontalScrollBar().maximum() == 0
     report(panel)
-    panel._review_btn.click()
+    panel.show_transfer()
     settled()
     viewport = panel._scroll.viewport()
     assert fully_visible(panel._apply_btn, panel)
     for group, keys in (("links", ("repair_files",)), ("content", ("content", "files", "activities")), ("books", ("books",)), ("other", ("order",))):
         panel._open_group(group)
+        settled()
         for key in keys:
             box = panel._fix_boxes[key]
             panel._scroll.ensureWidgetVisible(box)

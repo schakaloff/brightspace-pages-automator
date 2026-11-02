@@ -152,16 +152,6 @@ class TransferPanel(QWidget):
         except Exception as exc:
             self.notify(f"Transfer Studio could not open: {exc}")
 
-    def open_studio_in_app(self):
-        """Explicit fallback action: open the web draft in the existing editor."""
-        path = self._studio.path if self._studio else self._studio_saved_path
-        if path and not self._busy and not (self._studio and self._studio.scanning):
-            try:
-                self.set_plan(load_plan(path), path, save=False)
-                self.go(self.resume_step())
-            except Exception as exc:
-                self.notify(f"The Studio draft could not be opened: {exc}")
-
     def close_studio(self):
         if self._studio:
             self._stop.set()

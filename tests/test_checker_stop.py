@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 
-@pytest.mark.parametrize("mode", ["browser_wait", "moodle_prompt", "confirmation"])
+@pytest.mark.parametrize("mode", ["browser_wait", "moodle_prompt", "moodle_back", "confirmation"])
 def test_checker_stop_cancels_worker_and_restores_button(
     qtbot, monkeypatch, mode
 ):
@@ -23,7 +23,7 @@ def test_checker_stop_cancels_worker_and_restores_button(
 
         async def run(self):
             try:
-                if mode == "moodle_prompt":
+                if mode in ("moodle_prompt", "moodle_back"):
                     self.kwargs["on_moodle_waiting"]()
                     started.set()
                     loop = asyncio.get_running_loop()
@@ -50,12 +50,19 @@ def test_checker_stop_cancels_worker_and_restores_button(
     panel._start_run()
 
     qtbot.waitUntil(started.is_set, timeout=3000)
-    if mode != "browser_wait":
+    if mode in ("moodle_prompt", "moodle_back"):
+        qtbot.waitUntil(lambda: not panel._ready_btn.isHidden(), timeout=3000)
+        assert not panel._active_dialogs  # Moodle attention is inline, like H5P.
+        assert panel._stop_btn.isEnabled()
+    elif mode == "confirmation":
         qtbot.waitUntil(lambda: bool(panel._active_dialogs), timeout=3000)
         assert panel._stop_btn.isEnabled()
 
-    panel._stop_btn.click()
+    (panel._back_btn if mode == "moodle_back" else panel._stop_btn).click()
     qtbot.waitUntil(cancelled.is_set, timeout=3000)
     qtbot.waitUntil(lambda: panel._run_btn.isEnabled(), timeout=3000)
     assert not panel._active_dialogs
     qtbot.waitUntil(lambda: not panel._worker_thread.is_alive(), timeout=3000)
+    if mode == "moodle_back":
+        assert panel._stage == 0 and not panel._course_form.isHidden()
+        assert panel._moodle_entry.text() == "https://example.org/course/view.php?id=123"

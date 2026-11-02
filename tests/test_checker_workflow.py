@@ -1,5 +1,6 @@
 """Review never writes until confirmed, and course/run state stays truthful."""
 import asyncio
+import sys
 import threading
 from unittest.mock import MagicMock
 
@@ -8,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QLabel
 
+sys.path.insert(0, "src")
 from panels.checker_workflow import course_context
 
 URLS = ("https://learn.example/d2l/le/lessons/123", "https://moodle.example/course/view.php?id=456")
@@ -156,7 +158,7 @@ def test_stopped_result_keeps_recorded_changes_and_requires_new_scan(panel):
     scan(panel)
     panel._show_run_result(dict(mode="apply", status="stopped", summary={"files_uploaded": [("Outline.pdf", "Week 1")]}, errors=[]))
     assert panel._result_title.text() == "Run stopped"
-    assert "Files uploaded: 1" in panel._result_body.text()
+    assert "Files uploaded: 1" in " ".join(item.text() for item in panel._outcome_list.findChildren(QLabel))
     assert "does not undo" in panel._result_body.text()
     assert panel._scan_report is None
     assert not panel._apply_btn.isEnabled()
@@ -191,3 +193,93 @@ def test_worker_callback_cannot_unlock_ui_before_worker_finishes(panel, qtbot, m
     assert panel._change_btn.isEnabled()
     assert panel._view == "overview"
     assert panel._scan_current()
+
+
+def test_review_exposes_all_choices_without_a_choose_fixes_detour(panel, monkeypatch):
+    worker = MagicMock()
+    monkeypatch.setattr(panel, "_run_worker", worker)
+    scan(panel)
+    assert panel._stage == 1
+    assert all(row.isVisible() for row in panel._fix_rows.values())
+    assert not any(box.isChecked() for box in panel._fix_boxes.values())
+    assert not panel._apply_btn.isEnabled()
+    panel._fix_boxes["content"].click()
+    panel._apply_btn.click()
+    assert panel._stage == 1 and panel._view == "confirm"
+    worker.assert_not_called()
+    panel._back_btn.click()
+    assert panel._view == "overview" and panel._fix_boxes["content"].isChecked()
+
+
+def test_moodle_attention_is_inline_and_waits_for_deliberate_continue(panel):
+    panel._task_active = True
+    panel._run_mode = "scan"
+    panel._workspace.hide()
+    panel._progress.show()
+    event = panel._moodle_ready_event = threading.Event()
+    panel._log_queue.put(("__CHK_MOODLE_WAITING__", ""))
+    panel._log_queue.put(("Background log message", "step"))
+    panel._poll_log()
+    assert panel._ready_btn.isVisible()
+    assert not panel._active_dialogs and not event.is_set()
+    assert "Moodle course" in panel._attention_title.text()
+    assert panel._connection_steps.isVisible()
+    panel._ready_btn.click()
+    assert event.is_set() and not panel._ready_btn.isVisible()
+    panel._task_active = False
+
+
+def test_editing_unchanged_courses_can_return_to_review(panel):
+    scan(panel)
+    panel._fix_boxes["content"].click()
+    panel._change_btn.click()
+    assert panel._stage == 0 and panel._course_form.isVisible()
+    panel._back_btn.click()
+    assert panel._stage == 1 and panel._fix_boxes["content"].isChecked()
+
+
+@pytest.mark.parametrize("summary,errors", [
+    ({"files_failed": [("Missing.pdf", "Week 1")]}, []),
+    ({"file_link_check": "failed"}, []),
+    ({"broken_links_found": 2, "broken_links_repaired": 1}, []),
+    ({}, ["An operation failed"]),
+])
+def test_partial_apply_never_paints_apply_as_completed(panel, summary, errors):
+    scan(panel)
+    panel._show_run_result(dict(mode="apply", status="finished", summary=summary, errors=errors))
+    assert panel._stage == 3
+    assert panel._steps[2].property("state") != "complete"
+    assert "issues" in panel._result_title.text()
+    assert not panel._scan_current() and not panel._apply_btn.isEnabled()
+
+
+def test_failed_scan_does_not_mark_review_or_apply_complete(panel):
+    panel._completed_stages = set()
+    panel._show_run_result(dict(mode="scan", status="failed", summary={}, errors=["Sign-in failed"]))
+    assert panel._stage == 3
+    assert all(panel._steps[index].property("state") != "complete" for index in (0, 1, 2))
+
+
+def test_replacing_results_removes_visible_old_outcomes(panel):
+    panel._show_run_result(dict(mode="apply", status="stopped", summary={"files_uploaded": [("old.pdf", "Week 1")]}, errors=[]))
+    old = panel._outcome_list.findChildren(QLabel)
+    panel._show_run_result(dict(mode="apply", status="finished", summary={"broken_links_repaired": 2}, errors=[]))
+    assert all(not item.isVisible() for item in old)
+    assert "Files uploaded" not in " ".join(item.text() for item in panel._outcome_list.findChildren(QLabel))
+
+
+def test_keyboard_review_and_back_never_apply_without_confirmation(panel, qtbot, monkeypatch):
+    worker = MagicMock()
+    monkeypatch.setattr(panel, "_run_worker", worker)
+    scan(panel)
+    box = panel._fix_boxes["repair_files"]
+    box.setFocus()
+    qtbot.keyClick(box, Qt.Key.Key_Space)
+    assert box.isChecked()
+    panel._apply_btn.setFocus()
+    qtbot.keyClick(panel._apply_btn, Qt.Key.Key_Space)
+    assert panel._view == "confirm" and panel._back_btn.hasFocus()
+    qtbot.keyClick(panel, Qt.Key.Key_Return)
+    worker.assert_not_called()
+    qtbot.keyClick(panel._back_btn, Qt.Key.Key_Space)
+    assert panel._view == "overview" and box.isChecked()

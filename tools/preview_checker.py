@@ -15,8 +15,8 @@ import keyring
 import update_checker
 from gui import MainWindow
 
-URLS = ("https://learn.okanagancollege.ca/d2l/le/lessons/123",
-        "https://mymoodle.okanagan.bc.ca/course/view.php?id=456")
+URLS = ("https://learn.okanagancollege.ca/d2l/le/lessons/25707",
+        "https://mymoodle.okanagan.bc.ca/course/view.php?id=187689")
 REPORT = dict(missing=3, books=1, files=2, h5p=1, broken_links=2, activities=1,
               moodle_links=2, findings=[
                   dict(status="missing", name="Welcome and course overview", type="Page", section="Getting started"),
@@ -54,81 +54,80 @@ def main():
     panel._run_worker = lambda *args, **kwargs: None
     panel._poll_timer.stop()
     window.show()
-    destination = ROOT / "test-results" / "checker-design"
+    destination = ROOT / "test-results" / "checker-design" / "flow"
     destination.mkdir(parents=True, exist_ok=True)
     def capture(name):
         for _ in range(3): app.processEvents()
+        if app.focusWidget(): app.focusWidget().clearFocus()
+        app.processEvents()
         window.grab().save(str(destination / f"{args.label}-{name}.png"))
-    for theme in ("dark", "light"):
+    for theme in ("light", "dark"):
         window.set_theme(theme)
-        for width, height in ((1487, 1058), (900, 720), (720, 560)):
+        for width, height in ((1120, 800), (624, 640), (560, 480)):
             window.resize(width, height)
-            panel._invalidate_scan()
-            panel._summary.setText("No scan yet. Start here to see what needs attention.")
-            panel.show_review()
+            panel._task_active = False
+            panel._progress.hide()
+            panel._moodle_hint.hide()
+            panel._ready_btn.hide()
+            panel._connection_steps.hide()
+            panel._attention_title.hide()
             panel._details_btn.setChecked(False)
-            for box in panel._fix_boxes.values(): box.setChecked(False)
-            if hasattr(panel, "_scroll"): panel._scroll.verticalScrollBar().setValue(0)
-            capture(f"{theme}-{width}x{height}-empty")
+            panel._invalidate_scan()
+            capture(f"{theme}-{width}-connect")
+
+            panel._task_active = True
+            panel._run_mode = "scan"
+            panel._set_stage(0)
+            panel._course_form.hide()
+            panel._course_summary.show()
+            panel._workspace.hide()
+            panel._progress.show()
+            panel._log_queue.put(("__CHK_MOODLE_WAITING__", ""))
+            panel._poll_log()
+            panel._update_apply_enabled()
+            capture(f"{theme}-{width}-login")
+
+            panel._task_active = False
+            panel._progress.hide()
+            panel._moodle_hint.hide()
+            panel._ready_btn.hide()
+            panel._connection_steps.hide()
+            panel._attention_title.hide()
             panel._show_scan_report(REPORT, URLS)
-            capture(f"{theme}-{width}x{height}-results")
-            for group in ("links", "content", "books", "other"):
-                panel._open_group(group)
-                capture(f"{theme}-{width}x{height}-{group}")
-            panel._open_group("content")
             panel._fix_boxes["repair_files"].setChecked(True)
             panel._fix_boxes["content"].setChecked(True)
-            capture(f"{theme}-{width}x{height}-fix")
+            capture(f"{theme}-{width}-review")
+            panel._open_group("content")
+            capture(f"{theme}-{width}-findings")
+            panel._go_back()
             panel._preview_selected()
-            capture(f"{theme}-{width}x{height}-confirm")
-        window.resize(900, 720)
-        panel._show_scan_report(dict(REPORT, file_link_check="failed", broken_links=0, broken_pages=[]), URLS)
-        capture(f"{theme}-partial-scan")
-        panel._task_active = True
-        panel._run_mode = "scan"
-        panel._subtitle.setText("Scanning your course pair.")
-        panel._workspace.hide()
-        panel._progress.show()
-        panel._status_line.setText("Waiting for Moodle login")
-        panel._moodle_hint.show()
-        panel._ready_btn.show()
-        panel._update_apply_enabled()
-        capture(f"{theme}-login-pause")
-        panel._task_active = False
-        panel._progress.hide()
-        panel._moodle_hint.hide()
-        panel._ready_btn.hide()
-        panel._show_run_result(dict(mode="apply", status="stopped", summary={"files_uploaded": [("Example.pdf", "Week 1")]}, errors=[]))
-        capture(f"{theme}-stopped")
-        panel._show_run_result(dict(mode="apply", status="finished", summary={"files_uploaded": [], "files_failed": [("Example.pdf", "Week 1")], "broken_links_repaired": 1}, errors=["A file upload needs attention."]))
-        capture(f"{theme}-outcome")
-        panel._show_scan_report(REPORT, URLS)
-        panel.show_review()
-        panel._log.clear_log()
-        panel._details_btn.setChecked(True)
-        panel._log.append_log("Sample warning: a file link needs review.", "warning")
-        if hasattr(panel, "_ensure_visible"): panel._ensure_visible(panel._log)
-        capture(f"{theme}-activity")
+            capture(f"{theme}-{width}-confirm")
+
+            panel._task_active = True
+            panel._run_mode = "apply"
+            panel._completed_stages = {0, 1}
+            panel._set_stage(2)
+            panel._workspace.hide()
+            panel._course_summary.show()
+            panel._progress.show()
+            panel._progress_bar.show()
+            panel._status_line.setText("Updating file links in Lesson 1 resources")
+            panel._render_running_choices(["repair_files", "content"])
+            panel._progress_hint.setText("Selected fix types: Repair broken file links; Add missing pages and units")
+            panel._update_apply_enabled()
+            capture(f"{theme}-{width}-apply")
+
+            panel._task_active = False
+            panel._progress.hide()
+            panel._show_run_result(dict(mode="apply", status="finished", summary={
+                "files_uploaded": [("Example.pdf", "Week 1")],
+                "files_failed": [("Missing.pdf", "Before you begin")],
+                "broken_links_found": 2, "broken_links_repaired": 1,
+            }, errors=["Before you begin: the source file was unavailable."]))
+            capture(f"{theme}-{width}-results")
+            panel._show_scan_report(dict(REPORT, file_link_check="failed", broken_links=0, broken_pages=[]), URLS)
+            capture(f"{theme}-{width}-partial")
         panel._details_btn.setChecked(False)
-    source = QImage(str(ROOT.parent / "checker-ux-review" / "checker-concept-v2.png"))
-    implementation = QImage(str(destination / f"{args.label}-dark-1487x1058-results.png"))
-    if not source.isNull():
-        comparison = QImage(source.width() + implementation.width(), max(source.height(), implementation.height()), QImage.Format.Format_RGB32)
-        comparison.fill(0x10161f)
-        painter = QPainter(comparison)
-        painter.drawImage(0, 0, source)
-        painter.drawImage(source.width(), 0, implementation)
-        painter.end()
-        comparison.save(str(destination / "comparison-overview.png"))
-        source_region = source.copy(292, 290, 1148, 464)
-        implementation_region = implementation.copy(204, 205, 1239, 480)
-        comparison = QImage(source_region.width() + implementation_region.width(), 480, QImage.Format.Format_RGB32)
-        comparison.fill(0x10161f)
-        painter = QPainter(comparison)
-        painter.drawImage(0, 0, source_region)
-        painter.drawImage(source_region.width(), 0, implementation_region)
-        painter.end()
-        comparison.save(str(destination / "comparison-findings.png"))
     window.close()
     print(destination)
 

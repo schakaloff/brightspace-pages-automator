@@ -90,9 +90,11 @@ async def review_and_prepare(checker, context, page, moodle_items, bs_flat,
             on_state(dict(stage=stage, **values))
 
     plan = build_plan(progress, moodle_items, bs_flat)
-    for row in plan['activities']:
+    for index, row in enumerate(plan['activities'], 1):
         if checker.stop_flag[0]:
             raise asyncio.CancelledError()
+        await checker._h5p._watch('Checking for an existing Brightspace activity…',
+            activity=row['name'], current=index, total=len(plan['activities']))
         if row.get('duplicate_title'):
             row.update(already_present=False, selected=False, insertion='ready')
             continue
@@ -112,6 +114,8 @@ async def review_and_prepare(checker, context, page, moodle_items, bs_flat,
     if not plan['activities']:
         emit('empty', plan=plan)
         return None
+    await checker._h5p._watch('Review the activities in the app, then choose Transfer',
+        activity='', current=0, total=0, kind='waiting')
     choices = await asyncio.get_running_loop().run_in_executor(None, review_fn, copy.deepcopy(plan))
     if checker.stop_flag[0]:
         raise asyncio.CancelledError()
@@ -126,6 +130,7 @@ async def review_and_prepare(checker, context, page, moodle_items, bs_flat,
     new_units = list(dict.fromkeys(r['moodle_section'] for r in rows
                      if r['selected'] and str(r['bs_module_id']).startswith('new:')))
     if new_units:
+        await checker._h5p._watch('Creating the destination units you selected…')
         await checker._create_missing_units(context, bs_base, course_id, new_units)
         bs_flat = await checker._fetch_bs_toc(page, course_id)
         for row in rows:
@@ -171,6 +176,7 @@ async def review_and_prepare(checker, context, page, moodle_items, bs_flat,
             await tab.close()
         failures = await checker._h5p.enable_downloads(context, moodle_items, activity_keys=activity_keys)
         if failures and checker.h5p_recovery:
+            await checker._h5p._watch('Some downloads need your help · check the app', kind='attention')
             selections = await asyncio.get_running_loop().run_in_executor(None, checker.h5p_recovery, failures)
             checker._h5p.recover_downloads(failures, selections or [])
         for row in rows:

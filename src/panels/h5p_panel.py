@@ -33,28 +33,35 @@ class H5PPanel(H5PWorkspace):
         self._poll_timer.start(100)
 
     def _refresh_saved_runs(self):
-        selected = self._saved_courses.currentData()
-        self._saved_courses.clear()
-        self._saved_courses.addItem('', None)
-        self._saved_courses.setItemData(0, 'No saved transfer selected', 3)
-        runs = saved_runs(self._progress_directory)
-        for run in runs:
-            self._saved_courses.addItem(run.label(), run.data['id'])
-            self._saved_courses.setItemData(self._saved_courses.count() - 1, run.label(), 3)
-        index = self._saved_courses.findData(selected)
-        if index >= 0: self._saved_courses.setCurrentIndex(index)
-        self._saved_selection_changed()
+        runs = saved_runs(self._progress_directory, include_removed=True)
+        active = sum(not run.data.get('removed_at') for run in runs)
+        self._saved_count.setText(f'{active} saved')
+        self._saved_hint.setText('Find a course, resume a transfer, or remove old scans.' if active else
+            'Your saved list is clear. You can restore removed entries in Browse saved transfers.')
+        self._resume_btn.setEnabled(bool(runs) and not self._task_active)
         self._saved_card.setVisible(bool(runs) and not self._task_active and getattr(self, '_stage', 0) == 0)
 
-    def _saved_selection_changed(self):
-        self._resume_btn.setEnabled(bool(self._saved_courses.currentData()) and not self._task_active)
+    def _browse_saved_transfers(self):
+        if self._task_active:
+            return
+        from panels.h5p_saved_transfers import SavedH5PTransfersDialog
+        dialog = SavedH5PTransfersDialog(self._progress_directory, self)
+        accepted = dialog.exec()
+        run_id = dialog.selected_run_id
+        dialog.deleteLater()
+        self._refresh_saved_runs()
+        if accepted and run_id:
+            self._resume_run(run_id)
 
-    def _resume_run(self):
-        if self._task_active or not self._saved_courses.currentData(): return
+    def _resume_run(self, run_id=None):
+        if self._task_active or not run_id: return
         try:
-            run = H5PRun.load(self._saved_courses.currentData(), self._progress_directory)
+            run = H5PRun.load(run_id, self._progress_directory)
+            if run.data.get('removed_at'):
+                raise ValueError('Restore this transfer to the saved list before continuing it.')
         except (OSError, ValueError) as exc:
             self._log.append_log(str(exc), 'warning')
+            self._status_hint.setText(str(exc))
             self._refresh_saved_runs()
             return
         self._bs_entry.setText(run.data['bs_url'])
@@ -68,6 +75,7 @@ class H5PPanel(H5PWorkspace):
         self._mw.save_config({
             "h5p_bs_url": self._bs_entry.text().strip(),
             "h5p_moodle_url": self._moodle_entry.text().strip(),
+            "h5p_watch_browser": self._watch_browser_cb.isChecked(),
         })
 
     def _update_back_navigation(self):
@@ -108,6 +116,7 @@ class H5PPanel(H5PWorkspace):
         bs_url = self._bs_entry.text().strip()
         moodle_url = self._moodle_entry.text().strip()
         grade_all = self._gradebook_cb.isChecked()
+        watch_browser = self._watch_browser_cb.isChecked()
         if not bs_url or not moodle_url:
             self._log.append_log("Enter both a Brightspace and a Moodle course URL.", "warning")
             self._status_hint.setText('Enter both a Moodle source and a Brightspace destination course URL.')
@@ -151,8 +160,7 @@ class H5PPanel(H5PWorkspace):
         self._status_line.setText('Finding your H5P activities')
         self._status_hint.setText('The browser will open to connect your courses. Course content changes wait until you approve the plan.')
         self._resume_btn.setEnabled(False)
-        self._saved_courses.setEnabled(False)
-        for field in (self._bs_entry, self._moodle_entry, self._gradebook_cb): field.setEnabled(False)
+        for field in (self._bs_entry, self._moodle_entry, self._gradebook_cb, self._watch_browser_cb): field.setEnabled(False)
 
         self._ready_btn.hide()
         self._h5p_ready_btn.hide()
@@ -227,6 +235,7 @@ class H5PPanel(H5PWorkspace):
                     progress_directory=self._progress_directory,
                     review_fn=review,
                     on_state=lambda state: q.put(('__H5P_STATE__', state)),
+                    watch_browser=watch_browser,
                 )
 
             try:
@@ -311,8 +320,7 @@ class H5PPanel(H5PWorkspace):
                     for dialog in list(self._active_dialogs):
                         dialog.close()
                     self._task_active = False
-                    self._saved_courses.setEnabled(True)
-                    for field in (self._bs_entry, self._moodle_entry, self._gradebook_cb): field.setEnabled(True)
+                    for field in (self._bs_entry, self._moodle_entry, self._gradebook_cb, self._watch_browser_cb): field.setEnabled(True)
                     self._refresh_saved_runs()
                     self._run_btn.setEnabled(True)
                     self._stop_btn.hide()
@@ -346,6 +354,10 @@ class H5PPanel(H5PWorkspace):
                         self._status_hint.setText(tag['message'])
                         self._run_btn.setText('Transferring…')
                         self._run_btn.setEnabled(False)
+                    elif stage == 'watch':
+                        count = f"Activity {tag['current']} of {tag['total']} · " if tag.get('total') else ''
+                        activity = f"\n{tag['activity']}" if tag.get('activity') else ''
+                        self._status_hint.setText(count + tag['message'] + activity)
                     elif stage == 'connect':
                         self._status_line.setText('Connecting your courses')
                         self._status_hint.setText('Sign in to Brightspace in the browser if asked. Next, confirm the Moodle course here.')

@@ -420,14 +420,24 @@ QWidget#checker_panel QCheckBox:disabled {{ color: {c['disabled']}; }}
 QWidget#checker_panel QToolButton#checker_details_toggle {{ color: {c['muted']}; }}
 QWidget#checker_panel QToolButton#checker_details_toggle:hover {{ color: {c['text']}; background: {c['soft']}; }}
 QWidget#build_style_hub QLabel[role="hub-section"] {{ font-size: 20px; font-weight: 700; }}
-QWidget#build_style_hub QLabel[role="hub-intro"] {{ color: {c['muted']}; font-size: 14px; }}
-QWidget#build_style_hub QLabel[role="hub-tool-heading"] {{ font-size: 17px; font-weight: 600; }}
-QWidget#build_style_hub QLabel[role="hub-description"] {{ color: {c['muted']}; font-size: 14px; }}
-QWidget#build_style_hub QPushButton[variant="hub-outline"] {{
-    background: {c['surface']}; color: {c['focus']}; border-color: {c['focus']};
+QWidget#build_style_hub QLabel[role="page-heading"] {{ font-size: 28px; }}
+QWidget#build_style_hub QLabel[role="hub-intro"] {{ color: {c['muted']}; font-size: 15px; }}
+QWidget#build_style_hub QLabel[role="hub-tool-heading"] {{ font-size: 18px; font-weight: 600; }}
+QWidget#build_style_hub QLabel[role="hub-description"] {{ color: {c['muted']}; font-size: 15px; font-weight: 400; }}
+QWidget#build_style_hub QFrame[role="hub-group"] {{
+    background: {c['surface']}; border: 1px solid {c['border']}; border-radius: 12px;
 }}
-QWidget#build_style_hub QPushButton[variant="hub-outline"]:hover {{ background: {c['selected']}; }}
-QWidget#media_hub {{ background: {current['BG']}; }}
+QWidget#build_style_hub QFrame[role="hub-divider"] {{ background: {c['border']}; border: none; }}
+QWidget#build_style_hub QFrame[role="hub-icon-tile"] {{ background: {c['soft']}; border: none; border-radius: 10px; }}
+QWidget#build_style_hub QPushButton[role="build-tool"] {{
+    background: transparent; border: 2px solid transparent; border-radius: 0; padding: 0;
+}}
+QWidget#build_style_hub QPushButton[role="build-tool"][position="first"] {{ border-top-left-radius: 11px; border-top-right-radius: 11px; }}
+QWidget#build_style_hub QPushButton[role="build-tool"][position="last"] {{ border-bottom-left-radius: 11px; border-bottom-right-radius: 11px; }}
+QWidget#build_style_hub QPushButton[role="build-tool"]:hover {{ background: {c['hover']}; }}
+QWidget#build_style_hub QPushButton[role="build-tool"]:focus {{ border-color: {c['focus']}; background: {c['hover']}; }}
+QWidget#build_style_hub QPushButton[role="build-tool"]:pressed {{ background: {c['selected']}; }}
+QWidget#media_hub, QWidget#build_style_hub {{ background: {current['BG']}; }}
 QWidget#media_hub QLabel[role="page-heading"] {{ font-size: 28px; }}
 QWidget#media_hub QLabel[role="media-intro"] {{ color: {c['muted']}; font-size: 15px; }}
 QWidget#media_hub QLabel[role="media-hint"] {{ color: {c['muted']}; font-size: 14px; }}

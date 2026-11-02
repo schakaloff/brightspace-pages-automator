@@ -196,8 +196,7 @@ def test_resume_selector_restores_each_course_and_its_settings(qtbot, tmp_path, 
     started = []
     panel._start_run = lambda id_: started.append(id_)
     for run in (first, second, first):
-        panel._saved_courses.setCurrentIndex(panel._saved_courses.findData(run.data['id']))
-        panel._resume_btn.click()
+        panel._resume_run(run.data['id'])
         assert panel._bs_entry.text() == run.data['bs_url']
         assert panel._moodle_entry.text() == run.data['moodle_url']
         assert panel._gradebook_cb.isChecked() == run.data['grade_all']
@@ -205,9 +204,8 @@ def test_resume_selector_restores_each_course_and_its_settings(qtbot, tmp_path, 
     panel._poll_timer.stop()
     recreated = H5PPanel(mw)
     qtbot.addWidget(recreated)
-    assert recreated._saved_courses.count() == 3  # Blank choice plus both runs.
-    assert recreated._saved_courses.currentData() is None
-    assert not recreated._resume_btn.isEnabled()
+    assert recreated._saved_count.text() == '2 saved'
+    assert recreated._resume_btn.isEnabled()  # Browse first; no transfer is preselected.
     recreated._resume_run()
     assert started == [first.data['id'], second.data['id'], first.data['id']]
     recreated._poll_timer.stop()

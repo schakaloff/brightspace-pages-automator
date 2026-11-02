@@ -164,7 +164,7 @@ async def test_stopping_review_does_not_start_downloads(course):
 
 def test_review_ui_releases_approved_choices_and_applies_destination_to_section(course, qtbot, monkeypatch):
     import panels.h5p_panel as panel_module
-    monkeypatch.setattr(panel_module, 'saved_runs', lambda *args: [])
+    monkeypatch.setattr(panel_module, 'saved_runs', lambda *args, **kwargs: [])
     mw = MagicMock()
     mw.load_config.return_value = {}
     panel = panel_module.H5PPanel(mw)
@@ -189,7 +189,7 @@ def test_review_ui_releases_approved_choices_and_applies_destination_to_section(
 
 def test_review_ui_stop_releases_worker_wait(course, qtbot, monkeypatch):
     import panels.h5p_panel as panel_module
-    monkeypatch.setattr(panel_module, 'saved_runs', lambda *args: [])
+    monkeypatch.setattr(panel_module, 'saved_runs', lambda *args, **kwargs: [])
     mw = MagicMock()
     mw.load_config.return_value = {}
     panel = panel_module.H5PPanel(mw)
@@ -260,7 +260,7 @@ async def test_reviewed_runner_uses_inventory_then_transfers_only_approved_rows(
 def test_review_approval_is_cancelled_with_the_worker(course, qtbot, monkeypatch):
     import h5p_runner
     import panels.h5p_panel as panel_module
-    monkeypatch.setattr(panel_module, 'saved_runs', lambda *args: [])
+    monkeypatch.setattr(panel_module, 'saved_runs', lambda *args, **kwargs: [])
     mw = MagicMock()
     mw.chromium_ready = True
     mw.load_config.return_value = {}
@@ -291,7 +291,7 @@ def test_review_approval_is_cancelled_with_the_worker(course, qtbot, monkeypatch
 def test_back_waits_for_worker_cleanup_then_returns_to_courses_with_saved_progress(course, qtbot, monkeypatch, phase):
     import h5p_runner
     import panels.h5p_panel as panel_module
-    monkeypatch.setattr(panel_module, 'saved_runs', lambda directory: [H5PRun.load(course.run.data['id'], course.run.path.parent)])
+    monkeypatch.setattr(panel_module, 'saved_runs', lambda directory, **kwargs: [H5PRun.load(course.run.data['id'], course.run.path.parent)])
     mw = MagicMock()
     mw.chromium_ready = True
     mw.load_config.return_value = {}
@@ -356,7 +356,8 @@ def test_back_waits_for_worker_cleanup_then_returns_to_courses_with_saved_progre
     assert panel._bs_entry.text() == course.run.data['bs_url']
     assert panel._moodle_entry.text() == course.run.data['moodle_url']
     assert H5PRun.load(course.run.data['id'], course.run.path.parent).data['status'] == 'paused'
-    assert panel._saved_courses.findData(course.run.data['id']) > 0
+    assert panel._saved_count.text() == '1 saved'
+    assert panel._resume_btn.isEnabled()
     navigated.assert_not_called()
 
 
@@ -392,7 +393,7 @@ async def test_missing_download_does_not_block_available_activities(course):
 
 def test_results_filter_keeps_gradebook_issues_visible(course, qtbot, monkeypatch):
     import panels.h5p_panel as panel_module
-    monkeypatch.setattr(panel_module, 'saved_runs', lambda *args: [])
+    monkeypatch.setattr(panel_module, 'saved_runs', lambda *args, **kwargs: [])
     mw = MagicMock()
     mw.load_config.return_value = {}
     panel = panel_module.H5PPanel(mw)

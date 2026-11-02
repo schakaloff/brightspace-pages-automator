@@ -445,6 +445,31 @@ def test_title_failure_is_reported_not_swallowed():
     assert tab.waits == 2  # it polled rather than giving up on the first look
 
 
+def test_title_waits_for_old_presentation_libraries_to_finish_upgrading():
+    """Organic Naming's form appears after the old ten-poll timeout."""
+    inp = FakeTitleInput()
+    tab = FakeTitleTab([])
+    class UpgradingFrame(FakeTitleFrame):
+        def locator(self, selector):
+            if tab.waits < 12:
+                return FakeLocator(0)
+            return super().locator(selector)
+    tab.frames = [UpgradingFrame('about:blank', inp, matching=(H5PHandler.TITLE_SELECTORS[0],))]
+
+    assert asyncio.run(_handler()._set_content_title(tab, 'Organic Naming'))
+    assert inp.value == 'Organic Naming'
+    assert tab.waits == 12
+
+
+def test_stop_interrupts_the_extended_editor_wait():
+    tab = FakeTitleTab([FakeTitleFrame('about:blank')])
+    handler = _handler()
+    handler._should_stop = lambda: tab.waits >= 2
+
+    assert not asyncio.run(handler._set_content_title(tab, 'Organic Naming'))
+    assert tab.waits == 2
+
+
 def test_title_that_does_not_stick_is_a_failure():
     inp = FakeTitleInput(sticks=False)
     tab = FakeTitleTab([
