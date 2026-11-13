@@ -4,6 +4,7 @@ The guide never clicks, types, reads field values, or changes transfer decisions
 Every browser operation is bounded; cancellation still propagates normally.
 """
 import asyncio
+import html
 
 
 GUIDE_SCRIPT = r"""(() => {
@@ -191,11 +192,12 @@ GUIDE_SCRIPT = r"""(() => {
 })();"""
 
 
-class H5PBrowserGuide:
-    def __init__(self, on_state=None, enabled=True):
+class BrowserGuide:
+    def __init__(self, on_state=None, enabled=True, label='H5P TRANSFER · LIVE'):
         self.on_state = on_state
         self.enabled = enabled
         self.context = None
+        self.script = GUIDE_SCRIPT.replace('H5P TRANSFER · LIVE', html.escape(label))
         self.state = dict(message='Connecting your courses…', activity='', current=0, total=0, kind='working')
 
     async def install(self, context):
@@ -203,9 +205,9 @@ class H5PBrowserGuide:
             return
         try:
             await asyncio.wait_for(context.expose_binding('__h5pGuideState', lambda source: dict(self.state)), 1)
-            await asyncio.wait_for(context.add_init_script(script=GUIDE_SCRIPT), 1)
+            await asyncio.wait_for(context.add_init_script(script=self.script), 1)
             self.context = context
-            await asyncio.gather(*(self._evaluate(page, GUIDE_SCRIPT) for page in context.pages))
+            await asyncio.gather(*(self._evaluate(page, self.script) for page in context.pages))
         except Exception:
             # Visuals must never stop a real transfer (including unsupported pages).
             self.context = None
@@ -242,3 +244,7 @@ class H5PBrowserGuide:
                     dict(x=box['x']+box['width']/2, y=box['y']+box['height']/2, label=label, kind=kind))
         except Exception:
             pass
+
+
+# Existing H5P callers keep their public import and default appearance.
+H5PBrowserGuide = BrowserGuide

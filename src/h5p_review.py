@@ -98,7 +98,7 @@ async def review_and_prepare(checker, context, page, moodle_items, bs_flat,
         if row.get('duplicate_title'):
             row.update(already_present=False, selected=False, insertion='ready')
             continue
-        verifier = getattr(checker._h5p, '_verify_saved_name', checker._h5p._verify_topic_in_module) if row.get('name_check_required') else checker._h5p._verify_topic_in_module
+        verifier = checker._h5p._saved_name_verifier() if row.get('name_check_required') else checker._h5p._verify_topic_in_module
         row['already_present'] = bool(row['bs_module_id']) and await verifier(
             page, course_id, row['bs_module_id'], row['name'])
         if row.get('name_check_required') and not row['already_present']:

@@ -15,6 +15,8 @@ from typing import Callable, Optional
 from urllib.parse import urlparse
 
 from content_checker import ContentChecker, _extract_course_id
+from h5p_detect import html_contains_h5p_embed, is_h5p_topic
+from h5p_handler import SUMMARY_KEYS
 from h5p_progress import H5PRun, clean_url
 
 
@@ -42,15 +44,92 @@ async def _verify_topic_in_module_strict(bs_page, course_id, module_id, expected
         for topic in topics:
             title_norm = re.sub(r'[^\w]', '', topic.get('Title', '')).lower()
             matches = topic.get('Title', '') == expected_name if exact_title else title_norm == name_norm
-            if matches and ContentChecker._is_h5p_topic(topic):
+            if matches and is_h5p_topic(topic):
                 return True
             if matches and str(topic.get('Url', '')).split('?')[0].lower().endswith(('.html', '.htm')):
                 from unit_overview import BrowserContentAPI
                 html = await BrowserContentAPI(bs_page, str(course_id), str(module_id)).get_topic_html(topic['Id'])
-                if ContentChecker._html_contains_h5p_embed(html): return True
+                if html_contains_h5p_embed(html): return True
         return False
     except Exception as exc:
         raise RuntimeError(f"Cannot check whether {expected_name} is already saved. No new page will be created: {exc}") from exc
+
+
+async def run_h5p_manual(
+    bs_url: str,
+    unit_id: str,
+    files: list,
+    grade: bool,
+    log: Callable[[str, str], None],
+    on_complete: Optional[Callable] = None,
+    h5p_grade_recovery: Optional[Callable] = None,
+    bs_username: str = "",
+    bs_password: str = "",
+    sso_email: str = "",
+    sso_password: str = "",
+    stop_flag: Optional[list] = None,
+    on_state: Optional[Callable] = None,
+    watch_browser: bool = True,
+    **_ignored,  # the panel passes Moodle credentials too; a manual run has no Moodle
+) -> None:
+    """Upload local .h5p files to the H5P library and place each on a new page in one unit.
+
+    `files` is [{'path': Path, 'title': str}]. Reuses the Moodle pipeline's upload,
+    insert, save and verify steps; only the list of work comes from the user.
+    """
+    from browser import launch_browser, wait_for_login
+    from h5p_browser_guide import H5PBrowserGuide
+
+    course_id = _extract_course_id(bs_url)
+    if not course_id:
+        log(f"✗ Could not extract course ID from: {bs_url}", "error")
+        return
+    guide = H5PBrowserGuide(on_state, enabled=watch_browser)
+    checker = ContentChecker(
+        bs_url=bs_url, moodle_url="", log=log,
+        h5p_grade_all=grade, h5p_grade_recovery=h5p_grade_recovery,
+        h5p_verify=_verify_topic_in_module_strict,
+        bs_username=bs_username, bs_password=bs_password,
+        sso_email=sso_email, sso_password=sso_password,
+    )
+    if stop_flag is not None:
+        checker.stop_flag = stop_flag
+    summary = checker._summary = {k: [] for k in SUMMARY_KEYS}
+    handler = checker._h5p
+    handler._summary = summary
+    handler.browser_guide = guide
+    assignments = [{
+        "file": f["path"], "name": f["title"], "should_grade": grade, "belongs_to_course": True,
+        "moodle_section": "", "bs_module_title": "the selected unit", "bs_module_id": str(unit_id),
+    } for f in files]
+
+    p = browser = None
+    try:
+        p, browser, context, page = await launch_browser()
+        await guide.install(context)
+        await guide.status('Connecting to Brightspace · sign in if asked', kind='waiting')
+        await wait_for_login(page, context, bs_username or None, bs_password or None,
+                             sso_email or None, sso_password or None)
+        parsed = urlparse(bs_url)
+        bs_base = f"{parsed.scheme}://{parsed.netloc}"
+        # Open the unit first so the API checks run on the Brightspace domain.
+        await page.goto(f"{bs_base}/d2l/le/lessons/{course_id}/units/{unit_id}",
+                        wait_until="domcontentloaded", timeout=30000)
+        await handler.embed_in_brightspace(context, page, [], [], bs_base, course_id, assignments=assignments)
+        bad = summary["h5p_failed"] or summary["h5p_grade_failed"] or summary["h5p_skipped"]
+        log(f"{'⚠ Needs attention' if bad else '✓ Done'}: {len(summary['h5p_inserted'])} added, "
+            f"{len(summary['h5p_failed'])} failed, {len(summary['h5p_graded'])} graded with a verified "
+            f"gradebook link, {len(summary['h5p_grade_failed'])} to check in Manage Grades.",
+            "warning" if bad else "success")
+        await guide.status('Pages added and verified' if not bad else 'Some files need attention',
+                           kind='attention' if bad else 'success')
+        if on_complete and not bad:
+            on_complete()
+    finally:
+        try:
+            if browser and browser.is_connected(): await browser.close()
+        finally:
+            if p: await p.stop()
 
 
 async def run_h5p_only(
@@ -96,6 +175,7 @@ async def run_h5p_only(
         h5p_recovery=h5p_recovery,
         h5p_grade_all=h5p_grade_all,
         h5p_grade_recovery=h5p_grade_recovery,
+        h5p_verify=_verify_topic_in_module_strict,
         confirm_fn=confirm_fn,
         bs_username=bs_username,
         bs_password=bs_password,
@@ -113,17 +193,9 @@ async def run_h5p_only(
             raise asyncio.CancelledError()
 
     checker.do_h5p_embed = True
-    checker._summary = {
-        "h5p_inserted": [], "h5p_failed": [], "h5p_graded": [],
-        "h5p_ungraded": [], "h5p_skipped": [], "h5p_grade_failed": [],
-        "h5p_already_present": [],
-    }
+    checker._summary = {k: [] for k in SUMMARY_KEYS}
     checker._h5p._summary = checker._summary
     checker._h5p.browser_guide = guide
-    # Override with the stricter exact-match check (see _verify_topic_in_module_strict).
-    checker._h5p._verify_topic_in_module = _verify_topic_in_module_strict
-    checker._h5p._verify_saved_name = lambda page, course, module, name: _verify_topic_in_module_strict(
-        page, course, module, name, exact_title=True)
 
     course_id = _extract_course_id(bs_url)
     if not course_id:

@@ -515,6 +515,16 @@ QWidget#media_hub QFrame[role="media-icon-tile"] {{ background: {c['soft']}; bor
 {s} QLabel[role="status"][state="created"] {{ background: {c['success_bg']}; color: {c['success']}; }}
 {s} QLabel[role="status"][state="review"] {{ background: {c['warning_bg']}; color: {c['warning']}; }}
 QWidget#h5p_workspace QFrame[role="h5p-step"] {{ background: transparent; border: none; border-radius: 10px; }}
+QWidget#kaltura_workspace QFrame[role="transfer-step"] {{ background: transparent; border: none; border-radius: 10px; }}
+QWidget#kaltura_workspace QFrame[role="transfer-step"][state="review"] {{ background: {c['selected']}; }}
+QWidget#kaltura_workspace QLabel[role="h5p-step-title"] {{ color: {c['muted']}; font-size: 13px; font-weight: 600; }}
+QWidget#kaltura_workspace QFrame[state="review"] QLabel[role="h5p-step-title"] {{ color: {c['focus']}; }}
+QWidget#kaltura_workspace QFrame[state="created"] QLabel[role="h5p-step-title"] {{ color: {c['success']}; }}
+QWidget#kaltura_workspace QFrame#video_group_widget {{ background: {c['surface']}; border: 1px solid {c['border']}; border-radius: 10px; }}
+QWidget#kaltura_workspace QFrame[role="video-row"] {{ background: transparent; border: none; border-top: 1px solid {c['soft']}; border-radius: 0; }}
+QWidget#kaltura_workspace QFrame[role="stat-tile"] {{ background: {c['soft']}; border: none; border-radius: 8px; }}
+QWidget#kaltura_workspace QLabel[role="stat-value"] {{ font-size: 20px; font-weight: 700; }}
+QWidget#kaltura_workspace QLabel#needs_review_badge {{ background: {c['warning_bg']}; color: {c['warning']}; }}
 QWidget#h5p_workspace QFrame[role="h5p-step"][state="review"] {{ background: {c['selected']}; }}
 QWidget#h5p_workspace QLabel[role="h5p-step-title"] {{ color: {c['muted']}; font-size: 13px; font-weight: 600; }}
 QWidget#h5p_workspace QFrame[state="review"] QLabel[role="h5p-step-title"] {{ color: {c['focus']}; }}

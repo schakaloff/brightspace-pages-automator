@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Quiz Repair · MTB Writer</title><link rel="stylesheet" href="/quiz.css"><script src="/quiz.js" defer></script></head>
+<body>
+<header><a class="brand" href="/">MTB Writer <span>Quiz Repair</span></a><span class="local">Saved on this computer</span><button id="open-draft" data-drop="draft">Continue a saved review…</button><input id="file-draft" type="file" accept=".json" hidden></header>
+<main>
+<section id="connect" class="connect" aria-labelledby="page-title">
+<h1 id="page-title">Fix your Brightspace quizzes</h1>
+<p class="intro">Add your course files below. Everything stays on this computer, and the original files stay intact. Keep MTB Writer open while you work.</p>
+<div class="file-row dropzone" data-drop="candidate"><div><h2>Brightspace course to fix <span class="required">required</span></h2><p class="hint">A full-course ZIP or a smaller export with Quizzes and Question Library.</p><p id="candidate-path" class="path">Drop your Brightspace ZIP here.</p></div><button data-file="candidate">Choose Brightspace file…</button><input id="file-candidate" type="file" accept=".zip" hidden></div>
+<div class="file-row dropzone" data-drop="reference"><div><h2>Original course <span class="optional">optional</span></h2><p class="hint">Your original Moodle backup (.mbz) or Brightspace export (.zip), for comparison. Moodle pictures are recovered when possible.</p><p id="reference-path" class="path">Drop the original course here, or leave this empty.</p></div><div class="actions"><button data-clear="reference" hidden>Remove original</button><button data-file="reference">Choose original file…</button></div><input id="file-reference" type="file" accept=".mbz,.zip" hidden></div>
+<div class="file-row dropzone" data-drop="pictures"><div><h2>Extra pictures <span class="optional">only if pictures are missing</span></h2><p class="hint">A ZIP containing the missing pictures. You can start checking without it; missing local pictures must be supplied before downloading the fixed ZIP.</p><p id="pictures-path" class="path">Drop a ZIP with pictures here, if needed.</p></div><div class="actions"><button data-clear="pictures" hidden>Remove extra pictures</button><button data-file="pictures">Choose pictures ZIP…</button></div><input id="file-pictures" type="file" accept=".zip" hidden></div>
+<div id="upload-status" role="status" aria-live="polite" hidden><p id="upload-text"></p><progress id="upload-progress" max="100" value="0" aria-label="Adding local file"></progress></div>
+<div class="connect-action"><p class="hint">You only need the Brightspace ZIP to start. Files you choose or drop are copied into a local review folder. Nothing is sent online.</p><button class="primary" id="load">Start checking</button></div>
+</section>
+<div id="message" role="status" aria-live="polite" hidden></div>
+<section id="workspace" hidden aria-label="Quiz review workspace">
+<div class="workspace-heading"><div><h1>Check the questions that need a decision</h1><p id="counts" class="hint"></p></div><div class="actions"><button id="change-files">Change files</button><button id="save-review">Save review for later</button><button id="export" class="primary">Download fixed quizzes</button><button id="download-last" hidden>Download again</button></div></div>
+<section id="remaining" class="remaining" aria-labelledby="remaining-title"><h2 id="remaining-title"></h2><p id="remaining-help">You do not need to approve every question. Fix the problems listed here, and choose between different versions only when asked.</p><ul id="remaining-list"></ul><button id="show-problems">Show the next problem</button></section>
+<div class="review-grid">
+<aside aria-label="Question list"><label for="quiz-filter">Quiz</label><select id="quiz-filter"></select><label for="issue-filter">Show</label><select id="issue-filter"><option value="attention">Must fix</option><option value="versions">Choose a version</option><option value="notes">Layout notes (optional)</option><option value="edited">My saved changes</option><option value="all">All questions</option></select><label for="search">Find a question</label><input id="search" type="search" placeholder="Search question titles"><p id="list-count" class="hint"></p><div id="questions"></div></aside>
+<div class="question-area"><div id="empty" class="empty"><h2>Choose a question</h2><p>Choose a problem from the list. Questions without blocking problems do not need an approval tick.</p></div>
+<article id="question" hidden>
+<div class="question-heading"><div><p id="quiz-title" class="hint"></p><h2 id="question-title"></h2></div><span id="question-state" class="badge"></span></div>
+<ul id="findings" class="findings"></ul><details id="layout-notes" hidden><summary>Layout notes (optional)</summary><ul id="layout-list"></ul></details>
+<div class="version-control"><label for="version">Show another version</label><select id="version"></select><p id="version-note" class="hint"></p><details class="provenance"><summary>Technical details (optional)</summary><p id="source-id" class="hint"></p></details></div>
+<p id="decision-help" class="hint"></p>
+<div class="compare"><section><h3 id="source-label">Other version</h3><iframe id="before" title="Selected stored version preview" sandbox=""></iframe><div class="decide"><button id="use-version">Use this question</button><p id="use-reason" class="reason" hidden></p></div></section><section><h3>Question for your download</h3><iframe id="after" title="Working question preview" sandbox=""></iframe><div class="decide"><button id="keep">Keep this question</button><p id="keep-reason" class="reason" hidden></p></div></section></div>
+<p class="hint preview-note">Scroll inside a preview to see longer questions. These previews approximate the export; Brightspace may display it differently.</p>
+<details id="editor"><summary>Edit this question yourself</summary><p class="hint">Edit the HTML below to adjust wording or spacing. Existing answer feedback stays attached to its answer position. Matching answers are shown for review; their rows cannot be added here.</p>
+<label for="prompt">Question HTML</label><textarea id="prompt" rows="5" spellcheck="false"></textarea>
+<label for="context">Material before this question</label><textarea id="context" rows="3" spellcheck="false"></textarea>
+<div class="points"><label for="points">Question points</label><input id="points" type="number" min="0" max="1000000" step="any"></div>
+<div id="answers"></div><button id="add-answer">Add answer</button>
+</details>
+<div class="save-row"><div class="actions"><button id="next">Next problem</button><button id="reset">Undo my changes</button><button id="save" class="primary">Save my edits</button></div></div>
+</article></div></div>
+<div class="export-note"><strong>Before downloading</strong><p>Blank answers and missing local pictures block export. Multi-select questions use Correct Answers, Limited Selections. Matching pairs receive equal credit. Original files remain intact.</p><p id="draft-path" class="hint"></p></div>
+</section>
+</main>
+<footer>Local exports only · No course changes are made in Brightspace</footer>
+</body></html>

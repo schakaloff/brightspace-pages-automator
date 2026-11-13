@@ -7,9 +7,11 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QProgressBar)
 
 from gui_log import LogWidget
+from panels.h5p_manual_card import H5PManualCard
 import gui_styles
 from gui_tool_icons import tool_pixmap
-from panels._shared import NoScrollComboBox
+from panels._shared import (NoScrollComboBox, TechnicalDetailsToggle,
+                            BROWSER_GUIDE_LABEL, BROWSER_GUIDE_HINT)
 
 
 class H5PWorkspace(QWidget):
@@ -116,8 +118,8 @@ class H5PWorkspace(QWidget):
         self._gradebook_cb = QCheckBox('Add H5P activities to gradebook')
         self._gradebook_cb.setToolTip('Default for new activities. You can change each activity during review. Existing pages are kept as they are.')
         form.addWidget(self._gradebook_cb)
-        self._watch_browser_cb = QCheckBox('Show browser cursor and live messages')
-        self._watch_browser_cb.setToolTip('Watch real browser actions with a smooth cursor and short status messages. Your own mouse stays free. Change this before starting a transfer.')
+        self._watch_browser_cb = QCheckBox(BROWSER_GUIDE_LABEL)
+        self._watch_browser_cb.setToolTip(BROWSER_GUIDE_HINT)
         form.addWidget(self._watch_browser_cb)
         form.addWidget(self._label('Find activities reads the course list. Downloads and course content changes start only after you review the plan.', 'hint'))
         course.addWidget(self._connection)
@@ -135,6 +137,10 @@ class H5PWorkspace(QWidget):
         self._resume_btn = self._button('Browse saved transfers', self._browse_saved_transfers, True)
         saved.addWidget(self._resume_btn)
         content.addWidget(self._saved_card)
+
+        self._manual_card = H5PManualCard()
+        self._manual_card.run_requested.connect(self._start_manual)
+        content.addWidget(self._manual_card)
 
         self._attention, attention = self._card()
         self._status_line = self._label('Ready to find your activities', 'section-heading')
@@ -191,9 +197,7 @@ class H5PWorkspace(QWidget):
         workspace.addWidget(self._review_note)
         self._workspace.hide()
         content.addWidget(self._workspace)
-        self._details_btn = QPushButton('Show activity details')
-        self._details_btn.setProperty('variant', 'ghost')
-        self._details_btn.setCheckable(True)
+        self._details_btn = TechnicalDetailsToggle()
         self._details_btn.toggled.connect(self._toggle_details)
         content.addWidget(self._details_btn, 0, Qt.AlignmentFlag.AlignLeft)
         self._log = LogWidget()
@@ -245,16 +249,14 @@ class H5PWorkspace(QWidget):
 
     def refresh_theme(self):
         colors = gui_styles.modern_colors()
+        self._details_btn.refresh_theme()
         for step, (icon, name) in zip(self._steps, self._step_icons):
             state = step.property('state')
             color = colors['focus'] if state == 'review' else colors['success'] if state == 'created' else colors['muted']
             icon.setPixmap(tool_pixmap(name, 24, color))
 
     def _toggle_details(self, checked):
-        self._log.setVisible(checked)
-        self._details_btn.setText('Hide activity details' if checked else 'Show activity details')
-        if checked:
-            self._scroll.ensureWidgetVisible(self._log)
+        self._details_btn.reveal_log(self._log, self._scroll, checked)
 
     def _new_transfer(self):
         if self._task_active:

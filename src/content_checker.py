@@ -13,7 +13,6 @@ Testable modes:
 import asyncio
 import difflib
 import hashlib
-import html as html_module
 import json as _json_mod
 import os
 import queue
@@ -30,6 +29,7 @@ from playwright.async_api import BrowserContext, Page, TimeoutError as Playwrigh
 from config import SESSION_FILE
 from js_helpers import DEEP_FIND_JS
 from h5p_handler import H5PHandler
+from h5p_detect import is_h5p_topic, html_contains_h5p_embed
 from content_matcher import _norm, _detect_external_tool, _compare_items
 from activity_linker import ACTIVITY_TYPES, resolve_existing_activity_links
 from rebuild_helpers import (
@@ -468,6 +468,7 @@ class ContentChecker:
         scan_only:            bool              = False,
         on_report:            Optional[Callable] = None,
         operations:           Optional[dict]    = None,
+        h5p_verify:           Optional[Callable] = None,
     ):
         self.bs_url                 = bs_url.strip()
         self.moodle_url             = moodle_url.strip()
@@ -512,6 +513,10 @@ class ContentChecker:
         self._debug_log_thread.start()
 
         self._debug_log_path        = self._init_debug_log()
+        # How H5P decides a page already exists: callable(page, course, module, name, *, exact_title=False).
+        h5p_verify = h5p_verify or (lambda page, course_id, module_id, name, exact_title=False:
+            self._verify_topic_in_module(page, course_id, module_id, name,
+                                         require_h5p=True, exact_title=exact_title))
         self._h5p = H5PHandler(
             log=self.log,
             eval_in_any_frame=self._eval_in_any_frame,
@@ -521,17 +526,15 @@ class ContentChecker:
             # H5P must not share the ordinary file/topic duplicate check.  A
             # PDF and an H5P activity can legitimately have the same title.
             verify_topic_in_module=lambda page, course_id, module_id, name:
-                self._verify_topic_in_module(
-                    page, course_id, module_id, name, require_h5p=True
-                ),
+                h5p_verify(page, course_id, module_id, name),
+            verify_saved_name=lambda page, course_id, module_id, name:
+                h5p_verify(page, course_id, module_id, name, exact_title=True),
             summary=self._summary,
             notify=self._notify,
             should_stop=lambda: self.stop_flag[0],
             grade_recovery=h5p_grade_recovery,
         )
         self._h5p.grade_all = h5p_grade_all
-        self._h5p._verify_saved_name = lambda page, course, module, name: self._verify_topic_in_module(
-            page, course, module, name, require_h5p=True, exact_title=True)
 
     def _debug_log_worker(self) -> None:
         """Background thread that writes log messages to disk."""
@@ -1937,7 +1940,7 @@ class ContentChecker:
                 title_norm = re.sub(r'[^\w]', '', topic.get('Title', '')).lower()
                 matches = topic.get('Title', '') == expected_name if exact_title else title_norm == name_norm
                 if matches:
-                    if not require_h5p or self._is_h5p_topic(topic):
+                    if not require_h5p or is_h5p_topic(topic):
                         return True
                     # Insert Stuff stores H5P inside an ordinary HTML page.
                     # Its module URL is the page file, not the H5P launch URL.
@@ -1949,50 +1952,13 @@ class ContentChecker:
                             html = await BrowserContentAPI(
                                 bs_page, str(course_id), str(module_id)
                             ).get_topic_html(topic_id)
-                            if self._html_contains_h5p_embed(html):
+                            if html_contains_h5p_embed(html):
                                 return True
                         except Exception:
                             pass
             return False
         except Exception:
             return False
-
-    @staticmethod
-    def _is_h5p_topic(topic: dict) -> bool:
-        """Return true only for a module topic that points to H5P content.
-
-        The module-structure API exposes the H5P launch URL and, depending on
-        the Brightspace version, a textual type identifier.  Do not infer H5P
-        from its title: course PDFs frequently use the activity's title.
-        """
-        values = (
-            topic.get("Url", ""), topic.get("url", ""),
-            topic.get("TypeIdentifier", ""), topic.get("typeIdentifier", ""),
-            topic.get("TopicType", ""), topic.get("topicType", ""),
-        )
-        return any(
-            "h5p" in str(value).lower()
-            for value in values if value is not None
-        )
-
-    @staticmethod
-    def _html_contains_h5p_embed(html: str) -> bool:
-        """Recognize the H5P or LTI iframe format saved by Insert Stuff."""
-        if re.search(
-            r'<(?:iframe|embed|object)\b[^>]*(?:h5p\.com|h5p\.org)',
-            html or "", re.IGNORECASE,
-        ):
-            return True
-        # Brightspace rewrites H5P embeds to an internal QuickLink iframe.
-        # The exact page title is checked before this method is called.
-        for source in re.findall(
-            r'<iframe\b[^>]*\bsrc=["\']([^"\']+)["\']', html or "", re.IGNORECASE
-        ):
-            parsed = urlparse(html_module.unescape(source))
-            if (parsed.path.lower().endswith("/quicklink.d2l")
-                    and "lti" in [v.lower() for v in parse_qs(parsed.query).get("type", [])]):
-                return True
-        return False
 
     # Previous UI upload implementation, kept as reference. Do not delete.
     # async def _upload_files_to_bs_module_ui(

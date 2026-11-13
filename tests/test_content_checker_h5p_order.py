@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, "src")
 
 from content_checker import ContentChecker
+from h5p_detect import html_contains_h5p_embed
 
 
 class StructurePage:
@@ -61,7 +62,7 @@ def test_brightspace_lti_quicklink_page_is_recognized():
     ))
 
     assert found is True
-    assert ContentChecker._html_contains_h5p_embed(
+    assert html_contains_h5p_embed(
         '<iframe src="https://learn.example/d2l/common/dialogs/quickLink/quickLink.d2l'
         '?type=content&amp;rCode=example"></iframe>'
     ) is False

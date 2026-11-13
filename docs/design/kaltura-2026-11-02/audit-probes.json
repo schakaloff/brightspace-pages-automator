@@ -1,0 +1,17 @@
+{
+  "login_failure_reports_session_saved": true,
+  "unselected_modules_reach_create": [
+    "Empty unit"
+  ],
+  "selected_entries": [
+    "Selected video",
+    "Unmapped video"
+  ],
+  "resolved_mapping": {
+    "A": "10",
+    "C": "30"
+  },
+  "changed_course_used_with_old_mapping": "https://bs.example/d2l/home/999",
+  "primary_button_after_run": "Create Pages for 2 Selected Videos",
+  "selections_remaining": 2
+}

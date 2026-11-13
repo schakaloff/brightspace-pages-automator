@@ -8,6 +8,7 @@ sys.path.insert(0, "src")
 
 from h5p_handler import H5PHandler
 from content_checker import ContentChecker
+from h5p_detect import is_h5p_topic
 
 
 # Mirrors the live ocedtech.h5p.com content list captured 2026-07-30:
@@ -80,7 +81,7 @@ def _handler():
 
 
 def test_h5p_duplicate_check_rejects_same_named_pdf():
-    assert not ContentChecker._is_h5p_topic({
+    assert not is_h5p_topic({
         "Title": "Introduction to Leadership - Part 1",
         "Url": "/content/enforced/123/part-1.pdf",
         "TypeIdentifier": "File",
@@ -89,7 +90,7 @@ def test_h5p_duplicate_check_rejects_same_named_pdf():
 
 
 def test_h5p_duplicate_check_accepts_h5p_lti_topic():
-    assert ContentChecker._is_h5p_topic({
+    assert is_h5p_topic({
         "Title": "Introduction to Leadership - Part 1",
         "Url": "https://ocedtech.h5p.com/lti/1p3-123/content/456",
         "TypeIdentifier": "ExternalLearningTool",
@@ -97,7 +98,7 @@ def test_h5p_duplicate_check_accepts_h5p_lti_topic():
 
 
 def test_h5p_duplicate_check_rejects_same_named_non_h5p_lti_assignment():
-    assert not ContentChecker._is_h5p_topic({
+    assert not is_h5p_topic({
         "Title": "Introduction to Leadership - Part 1",
         "Url": "https://publisher.example/lti/launch/456",
         "TypeIdentifier": "ExternalLearningTool",

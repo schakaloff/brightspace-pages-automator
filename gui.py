@@ -164,6 +164,7 @@ class MainWindow(QMainWindow):
         from panels.link_review_panel import LinkReviewPanel
         from panels.transfer_panel import TransferPanel
         from panels.duplicate_panel import DuplicatePanel
+        from panels.quiz_repair_panel import QuizRepairPanel
 
         self._checker   = CheckerPanel(self)
         self._collector = CollectorPanel(self)
@@ -177,6 +178,7 @@ class MainWindow(QMainWindow):
         self._link_review = LinkReviewPanel()
         self._transfer = TransferPanel(self)
         self._duplicate = DuplicatePanel(self)
+        self._quiz_repair = QuizRepairPanel(self)
         self._link_review.open_checker.connect(lambda: self._on_step(1))
         # The sidebar holds three stable areas. New tools become a card in a
         # hub instead of another sidebar entry, so the sidebar never grows.
@@ -196,8 +198,8 @@ class MainWindow(QMainWindow):
         for panel in (self._checker, self._collector, self._restyle,
                       self._kaltura, self._h5p, self._settings,
                       self._build_hub, self._media_hub, self._cleanup,
-                      self._page_creator, self._link_review, self._transfer, self._duplicate, self._scorm):
-            self._stack.addWidget(panel)  # indices 0-13
+                      self._page_creator, self._link_review, self._transfer, self._duplicate, self._scorm, self._quiz_repair):
+            self._stack.addWidget(panel)  # indices 0-14
 
         for n in (1, 6, 7):
             self._sidebar.set_step_state(n, StepButton.PENDING)
@@ -211,6 +213,7 @@ class MainWindow(QMainWindow):
         self._build_hub.tool_selected.connect(self._open_tool)
         self._media_hub.tool_selected.connect(self._open_tool)
         self._h5p.back_requested.connect(lambda: self._on_step(6))
+        self._kaltura.back_requested.connect(lambda: self._on_step(6))
 
         self._on_step(1)
         self._show_welcome_if_needed()
@@ -299,7 +302,7 @@ class MainWindow(QMainWindow):
     #   1 Check & fix   2 Collect   3 Restyle   4 Kaltura   5 H5P
     #   6 Media hub     7 Build & style hub   8 Cleanup   9 Create pages
     _PAGES = {1: (0, 1), 2: (1, 7), 3: (2, 7), 4: (3, 6), 5: (4, 6),
-              6: (7, 6), 7: (6, 7), 8: (8, 7), 9: (9, 7), 10: (10, 1), 11: (11, 7), 12: (12, 7), 13: (13, 6)}
+              6: (7, 6), 7: (6, 7), 8: (8, 7), 9: (9, 7), 10: (10, 1), 11: (11, 7), 12: (12, 7), 13: (13, 6), 14: (14, 7)}
 
     def _on_step(self, n: int):
         page = self._PAGES.get(n)
@@ -320,12 +323,15 @@ class MainWindow(QMainWindow):
                 self._duplicate._url.setText(self._checker._bs_entry.text().strip())
 
     def _open_tool(self, name: str):
+        if name == "quiz_repair":
+            self._quiz_repair.open_studio()
+            return
         if name == "structured_transfer":
             self._transfer.open_studio()
             return
         target = {"collect": 2, "restyle": 3, "kaltura": 4,
                   "h5p": 5, "scorm": 13, "cleanup": 8, "create_pages": 9,
-                  "link_review_preview": 10, "duplicate_content": 12}.get(name)
+                  "link_review_preview": 10, "duplicate_content": 12, "quiz_repair": 14}.get(name)
         if target is not None:
             self._on_step(target)
 
@@ -333,6 +339,8 @@ class MainWindow(QMainWindow):
         bs = self._checker._bs_entry.text().strip()
         moodle = self._checker._moodle_entry.text().strip()
         panel = self._kaltura if step == 4 else self._scorm if step == 13 else self._h5p
+        if step == 4 and (panel._task_active or panel._stage != 0):
+            return  # A reviewed Kaltura plan stays bound to its original course pair.
         if step == 13 and panel._busy:
             return
         bs_field = getattr(panel, "_bs_url", None) if step == 4 else panel._bs_entry
@@ -362,6 +370,7 @@ class MainWindow(QMainWindow):
         self._build_hub.refresh_theme()
         self._media_hub.refresh_theme()
         self._h5p.refresh_theme()
+        self._kaltura.refresh_theme()
         # Refresh log widgets in each panel
         for panel in (self._checker, self._collector, self._restyle,
                       self._kaltura, self._h5p, self._cleanup):
@@ -674,6 +683,11 @@ class MainWindow(QMainWindow):
             badge.reposition()
 
     def closeEvent(self, event):
+        if self._quiz_repair._busy or self._quiz_repair.studio_busy:
+            QMessageBox.information(self, "Quiz repair is running",
+                "Finish the Quiz Repair file selection or save before closing the app.")
+            event.ignore()
+            return
         if self._scorm._busy:
             QMessageBox.information(self, "SCORM transfer is running",
                 "Use Stop in SCORM packages and wait for the browser to close before closing the app.")
@@ -687,6 +701,11 @@ class MainWindow(QMainWindow):
         if self._transfer._busy:
             QMessageBox.information(self, "Transfer is running",
                 "Use Stop in Transfer Studio or the in-app planner, and wait for the current request before closing the app.")
+            event.ignore()
+            return
+        if self._kaltura._task_active:
+            QMessageBox.information(self, 'Kaltura transfer is active',
+                'Use Stop & save in Kaltura and wait for the current save check before closing the app.')
             event.ignore()
             return
         if self._restyle._busy:

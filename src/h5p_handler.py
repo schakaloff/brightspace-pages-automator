@@ -19,6 +19,11 @@ MOODLE_SAVE_TIMEOUT_MS = 90000
 MOODLE_NAV_RETRIES = 3
 
 
+# Lists of (page name, unit title) the handler fills in during a run; one place for the names.
+SUMMARY_KEYS = ("h5p_inserted", "h5p_failed", "h5p_graded", "h5p_ungraded",
+                "h5p_skipped", "h5p_grade_failed", "h5p_already_present")
+
+
 class H5PHandler:
     def __init__(
         self,
@@ -32,6 +37,7 @@ class H5PHandler:
         notify: Optional[Callable] = None,
         should_stop: Optional[Callable] = None,
         grade_recovery: Optional[Callable] = None,
+        verify_saved_name: Optional[Callable] = None,
     ) -> None:
         self.log = log
         self._eval_in_any_frame = eval_in_any_frame
@@ -39,6 +45,8 @@ class H5PHandler:
         self._confirm = confirm
         self._diagnose = diagnose
         self._verify_topic_in_module = verify_topic_in_module
+        # Exact-title variant used to confirm a page this tool just saved (None: same check as above).
+        self._verify_saved_name = verify_saved_name
         self._summary = summary
         self._notify = notify
         self._should_stop = should_stop or (lambda: False)
@@ -47,6 +55,14 @@ class H5PHandler:
         self._DEEP_FIND_JS = DEEP_FIND_JS
         self._last_cloud_scan_complete = False
         self.browser_guide = None
+        # State the panels and runners set before a run, and the editor flow updates:
+        self.progress = None             # H5PRun of a resumable Moodle transfer, if any
+        self.h5p_phase_b_only = False    # skip uploads; only insert (Checker panel)
+        self._on_page_saved = None       # called with the topic id once a page is saved
+        self._grade_choice_completed = False
+        self._last_grade_status = None
+        self.on_download = None          # optional callback(key, state) from the review step
+        self._last_verified_upload = None
 
     async def _watch(self, message, **details):
         if self.browser_guide is not None:
@@ -278,7 +294,7 @@ class H5PHandler:
         for idx, (item, safe_name, save_path) in enumerate(pending_items, 1):
             if self._should_stop():
                 return failures
-            observer = getattr(self, 'on_download', None)
+            observer = self.on_download
             if observer:
                 observer(safe_name, 'pending')
             name      = item["name"]
@@ -852,8 +868,25 @@ class H5PHandler:
         return re.sub(r'\s+', ' ', cleaned).strip().lower()
 
     def _checkpoint(self, item, stage, state, **details):
-        progress = getattr(self, 'progress', None)
+        progress = self.progress
         if progress: progress.checkpoint(item, stage, state, **details)
+
+    def _saved_name_verifier(self):
+        return self._verify_saved_name or self._verify_topic_in_module
+
+    @staticmethod
+    async def _tool_grade_ids(page, course_id) -> Optional[set]:
+        """Ids of grade items attached to a tool (an H5P link counts); None if unreadable."""
+        try:
+            ids = await page.evaluate("""async (course) => {
+                const r = await fetch(`/d2l/api/le/1.67/${course}/grades/`,
+                    { credentials: 'include', cache: 'no-store' });
+                if (!r.ok) throw Error(r.status);
+                return (await r.json()).filter(g => g.AssociatedTool).map(g => g.Id);
+            }""", str(course_id))
+            return set(ids)
+        except Exception:
+            return None
 
     def _title_in_cloud(self, name: str, cloud_titles) -> str:
         """Return the matching cloud title, or "" when the item is absent.
@@ -1458,11 +1491,14 @@ class H5PHandler:
             should_grade,
         )
 
+    @staticmethod
+    def _grade_button_labels(should_grade: bool) -> list[str]:
+        """Lower-case button texts of Brightspace's gradebook choice, best match first."""
+        return ["add grade item"] if should_grade else ["proceed without grade item", "proceed without", "skip"]
+
     async def _handle_grade_prompt(self, tab, item_name: str, should_grade: bool) -> str:
         """Handle Brightspace's grade choice. Returns handled/absent/skip/stop."""
-        wanted = ["add grade item"] if should_grade else [
-            "proceed without grade item", "proceed without", "skip"
-        ]
+        wanted = self._grade_button_labels(should_grade)
         # Brightspace can show this choice immediately after Insert. Check
         # promptly, while still allowing a few seconds for a slow response.
         for attempt in range(15):
@@ -1697,10 +1733,8 @@ class H5PHandler:
                 return False
 
             # Some Brightspace versions show the choice only after Save and Close.
-            if getattr(self, "_grade_choice_completed", False):
-                wanted = ["add grade item"] if should_grade else [
-                    "proceed without grade item", "proceed without", "skip"
-                ]
+            if self._grade_choice_completed:
+                wanted = self._grade_button_labels(should_grade)
                 for attempt in range(8):
                     if await self._auto_dismiss(tab, wanted):
                         break
@@ -1729,7 +1763,7 @@ class H5PHandler:
             if api:
                 topic_id = saved_page_id(editor_url, tab.url, existing_ids)
                 if topic_id:
-                    on_saved = getattr(self, '_on_page_saved', None)
+                    on_saved = self._on_page_saved
                     if on_saved:
                         on_saved(topic_id)
                     await ensure_owned_page_title(api, topic_id, title)
@@ -1987,22 +2021,44 @@ class H5PHandler:
                     "dim",
                 )
 
-    async def embed_in_brightspace(self, context, page, moodle_items, bs_flat, bs_base, course_id) -> None:
-        h5p_dir = Path(__file__).parent.parent / "downloads" / "h5p"
-        h5p_files = list(h5p_dir.glob("*.h5p"))
-        progress = getattr(self, 'progress', None)
-        if progress and not progress.data['activities'] and not self._download_stems(moodle_items):
-            self.log('No H5P activities found in this course.', 'info')
+    async def embed_in_brightspace(self, context, page, moodle_items, bs_flat, bs_base, course_id,
+                                   assignments=None) -> None:
+        plan = self._plan_embed(moodle_items, bs_flat, assignments)
+        if plan is None:
             return
-        if not h5p_files and not progress:
-            self.log("  ⚠ No .h5p files found in downloads/h5p/ — skipping embed", "warning")
+        this_course, matched = plan
+        if self.progress:
+            matched = await self._drop_already_present(page, course_id, matched)
+            if not matched:
+                return
+            this_course = matched
+        if self.h5p_phase_b_only:
+            self.log("⏭ Phase A skipped — going straight to Phase B", "info")
+        elif not await self._phase_a_upload(context, bs_base, course_id, matched, this_course):
             return
+        counts = await self._phase_b_insert(context, page, bs_base, course_id, matched)
+        if counts:
+            self._report_embed(*counts)
 
-        for key in ("h5p_inserted", "h5p_failed", "h5p_graded", "h5p_ungraded",
-                    "h5p_skipped", "h5p_grade_failed", "h5p_already_present"):
+    def _plan_embed(self, moodle_items, bs_flat, assignments):
+        """Choose the rows to process. Returns (this_course, matched), or None to stop."""
+        # `assignments` (manual upload) are ready-made rows, so no Moodle scan or cache is needed.
+        h5p_dir = Path(__file__).parent.parent / "downloads" / "h5p"
+        h5p_files = [] if assignments else list(h5p_dir.glob("*.h5p"))
+        progress = self.progress
+        if not assignments and progress and not progress.data['activities'] and not self._download_stems(moodle_items):
+            self.log('No H5P activities found in this course.', 'info')
+            return None
+        if not assignments and not h5p_files and not progress:
+            self.log("  ⚠ No .h5p files found in downloads/h5p/ — skipping embed", "warning")
+            return None
+
+        for key in SUMMARY_KEYS:
             self._summary.setdefault(key, [])
 
-        if progress and progress.data['activities']:
+        if assignments:
+            pass
+        elif progress and progress.data['activities']:
             assignments = progress.assignments(bs_flat)
         else:
             if progress:
@@ -2051,212 +2107,215 @@ class H5PHandler:
                 "activity has a verified Brightspace unit.",
                 "error",
             )
-            return
+            return None
 
-        if progress:
-            # A lost Save response may still have created the page. Check the
-            # live destination before touching either the cloud or the editor.
-            remaining = []
-            for index, item in enumerate(matched, 1):
-                if self._should_stop(): return
-                await self._watch('Checking existing Brightspace pages…', activity=item['name'],
-                    current=index, total=len(matched))
-                if item.get('name_check_required') and item.get('saved_topic_id'):
-                    from h5p_titles import ensure_owned_page_title
-                    from unit_overview import BrowserContentAPI
-                    await ensure_owned_page_title(BrowserContentAPI(page, course_id, item['bs_module_id']),
-                        item['saved_topic_id'], item['name'])
-                    verify_saved_name = getattr(self, '_verify_saved_name', self._verify_topic_in_module)
-                    if not await verify_saved_name(page, course_id, item['bs_module_id'], item['name']):
-                        raise RuntimeError(f"{item['name']}: the recorded page could not be verified after its rename. A second page will not be created.")
-                    self._checkpoint(item, 'name_check_required', False)
-                    item['name_check_required'] = False
-                verifier = getattr(self, '_verify_saved_name', self._verify_topic_in_module) if item.get('name_check_required') else self._verify_topic_in_module
-                present = await verifier(page, course_id, item['bs_module_id'], item['name'])
-                if item.get('name_check_required') and not present:
-                    raise RuntimeError(f"{item['name']}: check and correct the previously saved page title in Brightspace before retrying. A second page will not be created.")
-                if present:
-                    await self._watch('Already in Brightspace · keeping the existing page', kind='success')
-                    self._checkpoint(item, 'insertion', 'confirmed', name_check_required=False)
-                    self._summary['h5p_already_present'].append((item['name'], item['bs_module_title']))
-                    if item['should_grade'] and not item.get('graded'):
-                        self._summary['h5p_grade_failed'].append((item['name'], item['bs_module_title']))
-                    self.log(f"  ✓ Already in Brightspace: {item['name']} — keeping the existing page", 'info')
-                else:
-                    self._checkpoint(item, 'insertion', 'ready')
-                    remaining.append(item)
-            this_course = matched = remaining
-            if not remaining:
-                self.log('✓ All saved H5P activities are already in Brightspace.', 'success')
-                return
+        return this_course, matched
 
-        phase_b_only = getattr(self, "h5p_phase_b_only", False)
+    async def _drop_already_present(self, page, course_id, matched):
+        """Resume check: keep pages that already exist. Returns the rows still to do, or None to stop."""
+        progress = self.progress
+        # A lost Save response may still have created the page. Check the
+        # live destination before touching either the cloud or the editor.
+        remaining = []
+        for index, item in enumerate(matched, 1):
+            if self._should_stop(): return
+            await self._watch('Checking existing Brightspace pages…', activity=item['name'],
+                current=index, total=len(matched))
+            if item.get('name_check_required') and item.get('saved_topic_id'):
+                from h5p_titles import ensure_owned_page_title
+                from unit_overview import BrowserContentAPI
+                await ensure_owned_page_title(BrowserContentAPI(page, course_id, item['bs_module_id']),
+                    item['saved_topic_id'], item['name'])
+                verify_saved_name = self._saved_name_verifier()
+                if not await verify_saved_name(page, course_id, item['bs_module_id'], item['name']):
+                    raise RuntimeError(f"{item['name']}: the recorded page could not be verified after its rename. A second page will not be created.")
+                self._checkpoint(item, 'name_check_required', False)
+                item['name_check_required'] = False
+            verifier = self._saved_name_verifier() if item.get('name_check_required') else self._verify_topic_in_module
+            present = await verifier(page, course_id, item['bs_module_id'], item['name'])
+            if item.get('name_check_required') and not present:
+                raise RuntimeError(f"{item['name']}: check and correct the previously saved page title in Brightspace before retrying. A second page will not be created.")
+            if present:
+                await self._watch('Already in Brightspace · keeping the existing page', kind='success')
+                self._checkpoint(item, 'insertion', 'confirmed', name_check_required=False)
+                self._summary['h5p_already_present'].append((item['name'], item['bs_module_title']))
+                if item['should_grade'] and not item.get('graded'):
+                    self._summary['h5p_grade_failed'].append((item['name'], item['bs_module_title']))
+                self.log(f"  ✓ Already in Brightspace: {item['name']} — keeping the existing page", 'info')
+            else:
+                self._checkpoint(item, 'insertion', 'ready')
+                remaining.append(item)
+        if not remaining:
+            self.log('✓ All saved H5P activities are already in Brightspace.', 'success')
+            return None
 
+        return remaining
+
+    async def _phase_a_upload(self, context, bs_base, course_id, matched, this_course) -> bool:
+        """Phase A: upload files missing from the H5P library. Returns False to stop the run."""
+        progress = self.progress
         # ── Phase A: Upload this course's files to H5P cloud ─────────────────
         # The cloud is scanned BEFORE asking permission to upload. Asking first
         # meant a resumed run — where everything is already in the cloud — was
         # gated behind a prompt whose "no" abandoned Phase B as well.
-        if phase_b_only:
-            self.log("⏭ Phase A skipped — going straight to Phase B", "info")
-        else:
-            self.log("", "dim")
-            self.log("Phase A — checking H5P cloud…", "step")
-            await self._watch('Checking the H5P library for existing uploads…', activity='', current=0, total=0)
-            self.log("  Opening Brightspace Page editor → Insert Stuff → H5P library…", "info")
+        self.log("", "dim")
+        self.log("Phase A — checking H5P cloud…", "step")
+        await self._watch('Checking the H5P library for existing uploads…', activity='', current=0, total=0)
+        self.log("  Opening Brightspace Page editor → Insert Stuff → H5P library…", "info")
 
-        if not phase_b_only:
-            first = next((a for a in matched), None)
-            if not first:
-                self.log("  ✗ No matched modules — cannot open editor", "error")
-                return
+        first = next((a for a in matched), None)
+        if not first:
+            self.log("  ✗ No matched modules — cannot open editor", "error")
+            return False
 
-            upload_tab = await context.new_page()
-            try:
-                h5p_frame = await self.open_editor_and_get_frame(
-                    upload_tab, bs_base, course_id, first["bs_module_id"]
+        upload_tab = await context.new_page()
+        try:
+            h5p_frame = await self.open_editor_and_get_frame(
+                upload_tab, bs_base, course_id, first["bs_module_id"]
+            )
+            if not h5p_frame:
+                self.log("  ✗ Could not open H5P content list for upload phase", "error")
+                self._summary['h5p_failed'].extend(
+                    (item['name'], item['bs_module_title']) for item in matched
                 )
-                if not h5p_frame:
-                    self.log("  ✗ Could not open H5P content list for upload phase", "error")
-                    self._summary['h5p_failed'].extend(
-                        (item['name'], item['bs_module_title']) for item in matched
-                    )
+                self.log(
+                    f"  H5P stopped before upload or insertion — {len(matched)} "
+                    "activities could not be processed. Cached downloads are unchanged.",
+                    "warning",
+                )
+                return False
+
+            # Bulk-scan the whole library once, all pager pages included —
+            # no per-item navigation needed.
+            cloud_titles = []
+            self._last_cloud_scan_complete = False
+            try:
+                cloud_titles = await self._collect_cloud_titles(upload_tab, h5p_frame)
+                self.log(
+                    f"  H5P cloud scan: {len(cloud_titles)} title(s) across all pages",
+                    "dim",
+                )
+                if cloud_titles:
+                    for sample in cloud_titles[:5]:
+                        self.log(f"    cloud sample: {sample[:100]}", "dim")
+                else:
                     self.log(
-                        f"  H5P stopped before upload or insertion — {len(matched)} "
-                        "activities could not be processed. Cached downloads are unchanged.",
+                        "  ⚠ H5P cloud scan returned no titles; existing uploads may not be detected.",
                         "warning",
                     )
-                    return
+            except Exception as e:
+                self.log(f"  ⚠ H5P cloud scan failed: {str(e).splitlines()[0]}", "warning")
+                # Frame may not be ready yet; upload_one still has a per-item duplicate check.
 
-                # Bulk-scan the whole library once, all pager pages included —
-                # no per-item navigation needed.
-                cloud_titles = []
-                self._last_cloud_scan_complete = False
-                try:
-                    cloud_titles = await self._collect_cloud_titles(upload_tab, h5p_frame)
-                    self.log(
-                        f"  H5P cloud scan: {len(cloud_titles)} title(s) across all pages",
-                        "dim",
-                    )
-                    if cloud_titles:
-                        for sample in cloud_titles[:5]:
-                            self.log(f"    cloud sample: {sample[:100]}", "dim")
-                    else:
-                        self.log(
-                            "  ⚠ H5P cloud scan returned no titles; existing uploads may not be detected.",
-                            "warning",
-                        )
-                except Exception as e:
-                    self.log(f"  ⚠ H5P cloud scan failed: {str(e).splitlines()[0]}", "warning")
-                    # Frame may not be ready yet; upload_one still has a per-item duplicate check.
-
-                known_cloud_titles = (
-                    cloud_titles if getattr(self, "_last_cloud_scan_complete", False) else None
+            known_cloud_titles = (
+                cloud_titles if self._last_cloud_scan_complete else None
+            )
+            if known_cloud_titles is not None:
+                self.log(
+                    "  ✓ Reusing this complete cloud list for duplicate checks "
+                    "during Phase A.",
+                    "dim",
                 )
-                if known_cloud_titles is not None:
+
+            def _in_cloud(name):
+                key = self._norm_title(name)
+                matched = self._title_in_cloud(name, cloud_titles)
+                return bool(matched), key, matched or None
+
+            to_upload = []
+            for item in this_course:
+                found, key, matched_title = _in_cloud(item["name"])
+                if found:
+                    await self._watch('Already uploaded · reusing the H5P activity', activity=item['name'], kind='success')
                     self.log(
-                        "  ✓ Reusing this complete cloud list for duplicate checks "
-                        "during Phase A.",
+                        f"  ✓ Already in H5P cloud: {item['name']} "
+                        f"(key='{key}', matched='{matched_title[:100]}') — skipping upload",
                         "dim",
                     )
-
-                def _in_cloud(name):
-                    key = self._norm_title(name)
-                    matched = self._title_in_cloud(name, cloud_titles)
-                    return bool(matched), key, matched or None
-
-                to_upload = []
-                for item in this_course:
-                    found, key, matched_title = _in_cloud(item["name"])
-                    if found:
-                        await self._watch('Already uploaded · reusing the H5P activity', activity=item['name'], kind='success')
-                        self.log(
-                            f"  ✓ Already in H5P cloud: {item['name']} "
-                            f"(key='{key}', matched='{matched_title[:100]}') — skipping upload",
-                            "dim",
-                        )
-                        item["upload_skipped"] = True
-                        self._checkpoint(item, 'upload', 'confirmed', cloud_title=matched_title)
-                    else:
-                        if progress and item.get('upload') in ('pending', 'confirmed') and known_cloud_titles is None:
-                            raise RuntimeError(f"{item['name']}: an earlier upload is recorded but the cloud check is incomplete. Retry Resume when the library can be checked fully.")
-                        self.log(
-                            f"  ? Not found in H5P cloud: {item['name']} "
-                            f"(key='{key}', scanned {len(cloud_titles)} title(s))",
-                            "dim",
-                        )
-                        to_upload.append(item)
-
-                if not to_upload:
-                    self.log("  ✓ All files already in cloud — nothing to upload", "success")
+                    item["upload_skipped"] = True
+                    self._checkpoint(item, 'upload', 'confirmed', cloud_title=matched_title)
                 else:
-                    await self._watch('Ready to upload · confirm in the app if asked', activity='', kind='waiting')
-                    if not await self._confirm(
-                        f"{len(to_upload)} of {len(this_course)} H5P file(s) still need "
-                        "uploading. Upload them now?"
-                    ):
-                        # Declining the upload must not abandon Phase B: the
-                        # other files are already in the cloud and only need
-                        # inserting. Mark just these as unavailable so Phase B
-                        # skips them individually.
-                        self.log(
-                            f"⏹ Upload declined — skipping those {len(to_upload)} file(s); "
-                            "files already in the cloud will still be inserted.",
-                            "warning",
-                        )
-                        for item in to_upload:
-                            item["upload_failed"] = True
-                    else:
-                        self.log(f"  → Uploading {len(to_upload)} file(s)…", "info")
-                        for idx, item in enumerate(to_upload, 1):
-                            if self._should_stop():
-                                self.log("⏸ Stopped by user — aborting H5P upload phase", "warning")
-                                return
-                            self.log(f"  [{idx}/{len(to_upload)}] Uploading: {item['name']}…", "info")
-                            await self._watch('Uploading to the H5P library…', activity=item['name'],
-                                current=idx, total=len(to_upload))
-                            if progress and not Path(item['file']).is_file():
-                                self._checkpoint(item, 'problem', 'Download missing. Resume to retry or choose a replacement file.')
-                                item['upload_failed'] = True
-                                continue
-                            self._checkpoint(item, 'upload', 'pending')
-                            ok = await self.upload_one(
-                                upload_tab, h5p_frame, item["file"], item["name"],
-                                known_cloud_titles=known_cloud_titles,
-                            )
-                            if ok and progress and getattr(self, '_last_verified_upload', None) != item['name']:
-                                # A clicked cloud Save is not a durable result
-                                # until the uploaded title can be read back.
-                                live = await self.find_list_frame(upload_tab)
-                                verified = await self._collect_cloud_titles(upload_tab, live) if live else []
-                                ok = item['name'] in verified
-                            if not ok:
-                                await self._watch('Upload could not be verified · activity needs attention', kind='attention')
-                                self.log(f"    ✗ Upload failed — will skip insert for this item", "warning")
-                                item["upload_failed"] = True
-                            else:
-                                self._checkpoint(item, 'upload', 'confirmed', cloud_title=item['name'])
-                                await self._watch('H5P library upload verified', kind='success')
-                            if ok and known_cloud_titles is not None and not self._title_in_cloud(
-                                item["name"], known_cloud_titles
-                            ):
-                                known_cloud_titles.append(item["name"])
-            finally:
-                try:
-                    await upload_tab.close()
-                except Exception:
-                    pass
+                    if progress and item.get('upload') in ('pending', 'confirmed') and known_cloud_titles is None:
+                        raise RuntimeError(f"{item['name']}: an earlier upload is recorded but the cloud check is incomplete. Retry Resume when the library can be checked fully.")
+                    self.log(
+                        f"  ? Not found in H5P cloud: {item['name']} "
+                        f"(key='{key}', scanned {len(cloud_titles)} title(s))",
+                        "dim",
+                    )
+                    to_upload.append(item)
 
-            a_fail = [i for i in this_course if i.get("upload_failed")]
-            a_ok_n = len(this_course) - len(a_fail)
-            if a_fail:
-                self.log(f"Phase A done: {a_ok_n} in cloud, {len(a_fail)} failed", "warning")
+            if not to_upload:
+                self.log("  ✓ All files already in cloud — nothing to upload", "success")
             else:
-                self.log(f"✓ Phase A complete — {a_ok_n} file(s) in H5P cloud", "success")
+                await self._watch('Ready to upload · confirm in the app if asked', activity='', kind='waiting')
+                if not await self._confirm(
+                    f"{len(to_upload)} of {len(this_course)} H5P file(s) still need "
+                    "uploading. Upload them now?"
+                ):
+                    # Declining the upload must not abandon Phase B: the
+                    # other files are already in the cloud and only need
+                    # inserting. Mark just these as unavailable so Phase B
+                    # skips them individually.
+                    self.log(
+                        f"⏹ Upload declined — skipping those {len(to_upload)} file(s); "
+                        "files already in the cloud will still be inserted.",
+                        "warning",
+                    )
+                    for item in to_upload:
+                        item["upload_failed"] = True
+                else:
+                    self.log(f"  → Uploading {len(to_upload)} file(s)…", "info")
+                    for idx, item in enumerate(to_upload, 1):
+                        if self._should_stop():
+                            self.log("⏸ Stopped by user — aborting H5P upload phase", "warning")
+                            return False
+                        self.log(f"  [{idx}/{len(to_upload)}] Uploading: {item['name']}…", "info")
+                        await self._watch('Uploading to the H5P library…', activity=item['name'],
+                            current=idx, total=len(to_upload))
+                        if progress and not Path(item['file']).is_file():
+                            self._checkpoint(item, 'problem', 'Download missing. Resume to retry or choose a replacement file.')
+                            item['upload_failed'] = True
+                            continue
+                        self._checkpoint(item, 'upload', 'pending')
+                        ok = await self.upload_one(
+                            upload_tab, h5p_frame, item["file"], item["name"],
+                            known_cloud_titles=known_cloud_titles,
+                        )
+                        if ok and progress and self._last_verified_upload != item['name']:
+                            # A clicked cloud Save is not a durable result
+                            # until the uploaded title can be read back.
+                            live = await self.find_list_frame(upload_tab)
+                            verified = await self._collect_cloud_titles(upload_tab, live) if live else []
+                            ok = item['name'] in verified
+                        if not ok:
+                            await self._watch('Upload could not be verified · activity needs attention', kind='attention')
+                            self.log(f"    ✗ Upload failed — will skip insert for this item", "warning")
+                            item["upload_failed"] = True
+                        else:
+                            self._checkpoint(item, 'upload', 'confirmed', cloud_title=item['name'])
+                            await self._watch('H5P library upload verified', kind='success')
+                        if ok and known_cloud_titles is not None and not self._title_in_cloud(
+                            item["name"], known_cloud_titles
+                        ):
+                            known_cloud_titles.append(item["name"])
+        finally:
+            try:
+                await upload_tab.close()
+            except Exception:
+                pass
 
-        if not phase_b_only:
-            if not await self._confirm("Phase A done. Start Phase B (insert each into BS pages)?"):
-                return
+        a_fail = [i for i in this_course if i.get("upload_failed")]
+        a_ok_n = len(this_course) - len(a_fail)
+        if a_fail:
+            self.log(f"Phase A done: {a_ok_n} in cloud, {len(a_fail)} failed", "warning")
+        else:
+            self.log(f"✓ Phase A complete — {a_ok_n} file(s) in H5P cloud", "success")
 
+
+        return await self._confirm("Phase A done. Start Phase B (insert each into BS pages)?")
+
+    async def _phase_b_insert(self, context, page, bs_base, course_id, matched):
+        """Phase B: one Brightspace page per file. Returns (inserted, already_present, not_attempted), or None if stopped."""
         # ── Phase B: Create a BS page per item and insert from cloud list ─────
         self.log("", "dim")
         self.log("Phase B — inserting H5P into Brightspace pages…", "step")
@@ -2300,6 +2359,7 @@ class H5PHandler:
             self.log(f"  [{idx}/{N}] Inserting: {name} → {bs_module_title}", "info")
             await self._watch(f'Placing activity in {bs_module_title}…')
 
+            grades_before = await self._tool_grade_ids(page, course_id) if item["should_grade"] else None
             tab = await context.new_page()
             try:
                 self._checkpoint(item, 'insertion', 'pending')
@@ -2321,7 +2381,7 @@ class H5PHandler:
                         self._summary["h5p_grade_failed"].append((name, bs_module_title))
                         self._summary["h5p_skipped"].append((name, bs_module_title))
                         if self._last_grade_status == "stop":
-                            return
+                            return None
                     else:
                         self.log(f"    ✗ Insert failed — skipping", "error")
                         self._summary["h5p_failed"].append((name, bs_module_title))
@@ -2338,7 +2398,7 @@ class H5PHandler:
                         self._summary["h5p_grade_failed"].append((name, bs_module_title))
                         self._summary["h5p_skipped"].append((name, bs_module_title))
                         if self._last_grade_status == "stop":
-                            return
+                            return None
                         continue
                     self.log("    ✗ Page save or saved-name verification did not finish", "error")
                     self._summary["h5p_failed"].append((name, bs_module_title))
@@ -2359,7 +2419,7 @@ class H5PHandler:
                 confirmed = False
                 await self._watch('Checking the saved page and its title…')
                 for attempt in range(4):
-                    verify_saved_name = getattr(self, '_verify_saved_name', self._verify_topic_in_module)
+                    verify_saved_name = self._saved_name_verifier()
                     confirmed = await verify_saved_name(
                         page, course_id, bs_module_id, name
                     )
@@ -2373,15 +2433,26 @@ class H5PHandler:
                     self.log(f"    ✓ Done + verified: {name} → {bs_module_title}", "success")
                     self._summary["h5p_inserted"].append((name, bs_module_title))
                     newly_inserted_count += 1
-                    bucket = "h5p_graded" if item["should_grade"] else "h5p_ungraded"
-                    self._summary[bucket].append((name, bs_module_title))
-                    self._checkpoint(item, 'insertion', 'confirmed', graded=item['should_grade'], name_check_required=False)
+                    # "Add Grade Item" was clicked, but only a new tool-linked grade item
+                    # proves students will receive a mark.
+                    linked = False
+                    if item["should_grade"]:
+                        grades_after = await self._tool_grade_ids(page, course_id)
+                        linked = grades_before is not None and grades_after is not None \
+                            and bool(grades_after - grades_before)
+                        if not linked:
+                            self.log(f"    ⚠ {name}: no new gradebook item linked to this H5P was found — "
+                                     "students may not receive a mark. Check it in Manage Grades.", "warning")
+                            self._summary["h5p_grade_failed"].append((name, bs_module_title))
+                    bucket = "h5p_graded" if linked else None if item["should_grade"] else "h5p_ungraded"
+                    if bucket:
+                        self._summary[bucket].append((name, bs_module_title))
+                    self._checkpoint(item, 'insertion', 'confirmed', graded=linked, name_check_required=False)
                 else:
                     await self._watch('Saved page could not be verified · check the results', kind='attention')
                     self.log("    ✗ Saved H5P page could not be confirmed with its Moodle name in the destination unit", "error")
-                    if getattr(self, '_verify_saved_name', None):
-                        self._checkpoint(item, 'name_check_required', True,
-                            problem='A page may have saved with a different name. Check its title in Brightspace before retrying.')
+                    self._checkpoint(item, 'name_check_required', True,
+                        problem='A page may have saved with a different name. Check its title in Brightspace before retrying.')
                     self._summary["h5p_failed"].append((name, bs_module_title))
                     consecutive_save_failures += 1
                     if consecutive_save_failures >= 3:
@@ -2402,6 +2473,9 @@ class H5PHandler:
                 except Exception:
                     pass
 
+        return newly_inserted_count, already_present_count, not_attempted
+
+    def _report_embed(self, newly_inserted_count, already_present_count, not_attempted) -> None:
         self.log("", "dim")
         if not_attempted:
             self.log(

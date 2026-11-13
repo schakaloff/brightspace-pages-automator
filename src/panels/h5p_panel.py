@@ -7,6 +7,25 @@ from PySide6.QtCore import Signal, QTimer
 from panels.h5p_workspace import H5PWorkspace
 from panels._shared import friendly_error
 from h5p_progress import H5PRun, saved_runs, clean_url
+from panels.h5p_manual_card import parse_unit_url
+
+
+
+class Msg:
+    """Tokens the worker thread puts on the log queue instead of a log line.
+
+    _poll_log reads (token, payload) pairs; anything else is (message, tag) to log.
+    """
+    DONE = "__DONE__"                          # payload: bool, run succeeded
+    COMPLETE = "__COMPLETE__"                  # run finished its work, cleanup follows
+    STATE = "__H5P_STATE__"                    # payload: dict with 'stage'
+    REVIEW = "__H5P_REVIEW__"                  # payload: (plan, result, event)
+    GRADE_RECOVERY = "__H5P_GRADE_RECOVERY__"  # payload: (item_name, result, event)
+    FILE_RECOVERY = "__H5P_FILE_RECOVERY__"    # payload: (failures, result, event)
+    MOODLE_WAITING = "__H5P_MOODLE_WAITING__"
+    WAITING = "__H5P_WAITING__"
+    WAITS_FOR_ANSWER = (GRADE_RECOVERY, FILE_RECOVERY, REVIEW)  # a worker thread blocks until answered
+    H5P_PREFIX = "__H5P_"                      # every token above except DONE and COMPLETE
 
 
 class H5PPanel(H5PWorkspace):
@@ -105,7 +124,10 @@ class H5PPanel(H5PWorkspace):
             self.save_state()
             self.back_requested.emit()
 
-    def _start_run(self, resume_id=None):
+    def _start_manual(self, unit_url, files, grade):
+        self._start_run(manual={'unit_url': unit_url, 'files': files, 'grade': grade})
+
+    def _start_run(self, resume_id=None, manual=None):
         if self._task_active:
             return
         if not self._mw.chromium_ready:
@@ -113,24 +135,26 @@ class H5PPanel(H5PWorkspace):
             self._status_hint.setText('The browser engine is still installing. Please wait a moment, then try again.')
             return
 
-        bs_url = self._bs_entry.text().strip()
-        moodle_url = self._moodle_entry.text().strip()
-        grade_all = self._gradebook_cb.isChecked()
+        # A manual run uploads local files to one unit, so it has no Moodle course.
+        bs_url = manual['unit_url'] if manual else self._bs_entry.text().strip()
+        moodle_url = '' if manual else self._moodle_entry.text().strip()
+        grade_all = manual['grade'] if manual else self._gradebook_cb.isChecked()
         watch_browser = self._watch_browser_cb.isChecked()
-        if not bs_url or not moodle_url:
-            self._log.append_log("Enter both a Brightspace and a Moodle course URL.", "warning")
-            self._status_hint.setText('Enter both a Moodle source and a Brightspace destination course URL.')
-            return
+        if not manual:
+            if not bs_url or not moodle_url:
+                self._log.append_log("Enter both a Brightspace and a Moodle course URL.", "warning")
+                self._status_hint.setText('Enter both a Moodle source and a Brightspace destination course URL.')
+                return
 
-        try:
-            from content_checker import _extract_course_id
-            clean_url(bs_url)
-            clean_url(moodle_url)
-            if not _extract_course_id(bs_url):
-                raise ValueError('Enter a Brightspace course URL containing its course ID.')
-        except ValueError as exc:
-            self._status_hint.setText(str(exc))
-            return
+            try:
+                from content_checker import _extract_course_id
+                clean_url(bs_url)
+                clean_url(moodle_url)
+                if not _extract_course_id(bs_url):
+                    raise ValueError('Enter a Brightspace course URL containing its course ID.')
+            except ValueError as exc:
+                self._status_hint.setText(str(exc))
+                return
 
         self.save_state()
 
@@ -157,9 +181,11 @@ class H5PPanel(H5PWorkspace):
         self._change_btn.hide()
         self._new_btn.hide()
         self._progress_bar.hide()
-        self._status_line.setText('Finding your H5P activities')
-        self._status_hint.setText('The browser will open to connect your courses. Course content changes wait until you approve the plan.')
+        self._status_line.setText('Adding your H5P files' if manual else 'Finding your H5P activities')
+        self._status_hint.setText('The browser will open and sign in to Brightspace. Your files are then uploaded and placed on new pages.' if manual else
+            'The browser will open to connect your courses. Course content changes wait until you approve the plan.')
         self._resume_btn.setEnabled(False)
+        self._manual_card.set_busy(True)
         for field in (self._bs_entry, self._moodle_entry, self._gradebook_cb, self._watch_browser_cb): field.setEnabled(False)
 
         self._ready_btn.hide()
@@ -180,7 +206,7 @@ class H5PPanel(H5PWorkspace):
         def review(plan):
             result = [None]
             event = threading.Event()
-            q.put(('__H5P_REVIEW__', (plan, result, event)))
+            q.put((Msg.REVIEW, (plan, result, event)))
             while not event.wait(0.1):
                 if stop_flag[0]:
                     return None
@@ -189,7 +215,7 @@ class H5PPanel(H5PWorkspace):
         def grade_recovery(item_name: str, should_grade: bool) -> str:
             result = ["skip"]
             event = threading.Event()
-            q.put(("__H5P_GRADE_RECOVERY__", (item_name, result, event)))
+            q.put((Msg.GRADE_RECOVERY, (item_name, result, event)))
             while not event.wait(0.1):
                 if stop_flag[0]:
                     return "stop"
@@ -198,7 +224,7 @@ class H5PPanel(H5PWorkspace):
         def h5p_recovery(failures: list[dict]) -> list[dict]:
             result = []
             event = threading.Event()
-            q.put(("__H5P_FILE_RECOVERY__", (failures, result, event)))
+            q.put((Msg.FILE_RECOVERY, (failures, result, event)))
             while not event.wait(0.1):
                 if stop_flag[0]:
                     return []
@@ -209,22 +235,34 @@ class H5PPanel(H5PWorkspace):
 
             def on_done():
                 succeeded[0] = True
-                q.put(("__COMPLETE__", ""))
+                q.put((Msg.COMPLETE, ""))
 
             async def run():
                 self._worker_loop = asyncio.get_running_loop()
                 self._worker_task = asyncio.current_task()
                 if stop_flag[0]:
                     raise asyncio.CancelledError()
+                if manual:
+                    from h5p_runner import run_h5p_manual
+                    _, unit_id = parse_unit_url(bs_url)
+                    await run_h5p_manual(
+                        bs_url=bs_url, unit_id=unit_id, files=manual['files'], grade=grade_all,
+                        log=lambda msg, tag="info": q.put((msg, tag)),
+                        on_complete=on_done, h5p_grade_recovery=grade_recovery,
+                        stop_flag=stop_flag, **credentials,
+                        on_state=lambda state: q.put((Msg.STATE, state)),
+                        watch_browser=watch_browser,
+                    )
+                    return
                 await run_h5p_only(
                     bs_url=bs_url,
                     moodle_url=moodle_url,
                     log=lambda msg, tag="info": q.put((msg, tag)),
                     on_complete=on_done,
                     moodle_ready_event=moodle_ev,
-                    on_moodle_waiting=lambda: q.put(("__H5P_MOODLE_WAITING__", "")),
+                    on_moodle_waiting=lambda: q.put((Msg.MOODLE_WAITING, "")),
                     h5p_ready_event=h5p_ev,
-                    on_h5p_waiting=lambda: q.put(("__H5P_WAITING__", "")),
+                    on_h5p_waiting=lambda: q.put((Msg.WAITING, "")),
                     h5p_recovery=h5p_recovery,
                     h5p_skip_flag=skip_flag,
                     stop_flag=stop_flag,
@@ -234,7 +272,7 @@ class H5PPanel(H5PWorkspace):
                     resume_id=resume_id or None,
                     progress_directory=self._progress_directory,
                     review_fn=review,
-                    on_state=lambda state: q.put(('__H5P_STATE__', state)),
+                    on_state=lambda state: q.put((Msg.STATE, state)),
                     watch_browser=watch_browser,
                 )
 
@@ -252,7 +290,7 @@ class H5PPanel(H5PWorkspace):
             finally:
                 self._worker_task = None
                 self._worker_loop = None
-                q.put(("__DONE__", succeeded[0] and not stop_flag[0]))
+                q.put((Msg.DONE, succeeded[0] and not stop_flag[0]))
 
         self._worker_thread = threading.Thread(target=worker, daemon=True)
         self._worker_thread.start()
@@ -309,17 +347,18 @@ class H5PPanel(H5PWorkspace):
         try:
             while True:
                 msg, tag = self._log_queue.get_nowait()
-                if self._stop_flag[0] and msg.startswith("__H5P_"):
-                    if msg in ("__H5P_GRADE_RECOVERY__", "__H5P_FILE_RECOVERY__", "__H5P_REVIEW__"):
+                if self._stop_flag[0] and msg.startswith(Msg.H5P_PREFIX):
+                    if msg in Msg.WAITS_FOR_ANSWER:
                         tag[-1].set()
-                    elif msg == '__H5P_STATE__' and tag.get('run'):
+                    elif msg == Msg.STATE and tag.get('run'):
                         self._run_data = tag['run']
                         self._resume_id = self._run_data['id']
                     continue
-                if msg == "__DONE__":
+                if msg == Msg.DONE:
                     for dialog in list(self._active_dialogs):
                         dialog.close()
                     self._task_active = False
+                    self._manual_card.set_busy(False)
                     for field in (self._bs_entry, self._moodle_entry, self._gradebook_cb, self._watch_browser_cb): field.setEnabled(True)
                     self._refresh_saved_runs()
                     self._run_btn.setEnabled(True)
@@ -339,12 +378,12 @@ class H5PPanel(H5PWorkspace):
                         self._moodle_entry.setFocus()
                     else:
                         self._update_back_navigation()
-                elif msg == "__COMPLETE__":
+                elif msg == Msg.COMPLETE:
                     if not self._stop_flag[0]:
                         self._run_btn.setText("Finishing…")
-                elif msg == '__H5P_REVIEW__':
+                elif msg == Msg.REVIEW:
                     self._show_plan(*tag)
-                elif msg == '__H5P_STATE__':
+                elif msg == Msg.STATE:
                     stage = tag['stage']
                     if stage in ('progress', 'results'):
                         self._show_progress(tag['run'])
@@ -370,17 +409,17 @@ class H5PPanel(H5PWorkspace):
                             self._last_error = f'{len(issues)} activities need a gradebook check. Review their pages and gradebook settings in Brightspace.'
                         elif tag['run'].get('status') == 'complete':
                             self._last_error = None
-                elif msg == "__H5P_MOODLE_WAITING__":
+                elif msg == Msg.MOODLE_WAITING:
                     self._status_line.setText('Check the Moodle course in the browser')
                     self._status_hint.setText('Sign in if needed and open the correct course or section. Then continue here to find its activities.')
                     self._ready_btn.setText('I’m on the correct course — continue')
                     self._ready_btn.show()
-                elif msg == "__H5P_WAITING__":
+                elif msg == Msg.WAITING:
                     self._status_line.setText('Ready to download from Moodle')
                     self._status_hint.setText('Check that the browser shows the correct course and that editing controls are available.')
                     self._h5p_ready_btn.show()
                     self._h5p_skip_btn.show()
-                elif msg == "__H5P_GRADE_RECOVERY__":
+                elif msg == Msg.GRADE_RECOVERY:
                     item_name, result_ref, event = tag
                     self._status_line.setText('A gradebook choice needs your help')
                     self._status_hint.setText(f'Check the open Brightspace dialog for {item_name}. Use the recovery window to retry or continue.')
@@ -409,7 +448,7 @@ class H5PPanel(H5PWorkspace):
                         event.set()
 
                     self._show_prompt(dlg, grade_finished)
-                elif msg == "__H5P_FILE_RECOVERY__":
+                elif msg == Msg.FILE_RECOVERY:
                     failures, result_ref, event = tag
                     self._status_line.setText('Some downloads need your help')
                     self._status_hint.setText('Choose replacement .h5p files in the recovery window, or continue with the available activities.')

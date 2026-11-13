@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 from config import USERDATA_DIR
+from transfer_storage import atomic_json
 
 RUNS_DIR = USERDATA_DIR / 'h5p-runs'
 
@@ -62,13 +63,7 @@ class H5PRun:
     def save(self, *, touch=True):
         if touch:
             self.data['updated'] = datetime.now(timezone.utc).isoformat()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temp = self.path.with_suffix('.json.tmp')
-        with temp.open('w', encoding='utf-8') as file:
-            json.dump(self.data, file, ensure_ascii=False, indent=2)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temp, self.path)
+        atomic_json(self.path, self.data)
         if self.on_change:
             self.on_change(copy.deepcopy(self.data))
 

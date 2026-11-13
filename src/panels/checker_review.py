@@ -44,6 +44,7 @@ class CheckerReview:
     def refresh_theme(self):
         from panels.checker_styles import checker_stylesheet
         self.setStyleSheet(checker_stylesheet())
+        self._details_btn.refresh_theme()
         colors = gui_styles.modern_colors()
         for icon, name in self._fix_icons:
             icon.setPixmap(tool_pixmap(name, 24, colors["muted"]))
@@ -274,8 +275,7 @@ class CheckerReview:
             self._edit_courses()
 
     def _toggle_details(self, shown):
-        self._log.setVisible(shown)
-        self._details_btn.setText("Hide activity details" if shown else "Show activity details")
+        self._details_btn.reveal_log(self._log, self._scroll, shown)
         self._scroll.updateGeometry()
         # Qt propagates wrapped-label height changes through nested layouts
         # on the next event-loop turn. Refit after that propagation as well.

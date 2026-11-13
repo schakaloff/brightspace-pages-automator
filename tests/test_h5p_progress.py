@@ -92,7 +92,9 @@ async def test_resume_after_course_switch_rechecks_lost_save_and_skips_moodle(tm
             self.stop_flag = [False]
             self.course_id = h5p_runner._extract_course_id(kwargs['bs_url'])
             self.name = 'Activity A' if self.course_id == '1' else 'Activity B'
-            self._h5p = h5p_handler.H5PHandler(kwargs['log'], None, None, self.confirm, None, None, {})
+            verify = kwargs['h5p_verify']  # the real ContentChecker wires the runner's verifier the same way
+            self._h5p = h5p_handler.H5PHandler(kwargs['log'], None, None, self.confirm, None,
+                lambda *a: verify(*a), {}, verify_saved_name=lambda *a: verify(*a, exact_title=True))
             self._h5p.open_editor_and_get_frame = AsyncMock(return_value=object())
             self._h5p.find_list_frame = AsyncMock(return_value=object())
             self._h5p._collect_cloud_titles = self.scan_cloud

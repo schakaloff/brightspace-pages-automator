@@ -2,6 +2,7 @@ import html
 import re
 import os
 import sys
+import asyncio
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 from playwright.async_api import async_playwright
@@ -79,6 +80,27 @@ SECTION_NAMES_JS = r"""
 
 
 class KalturaCategorizer:
+
+    def __init__(self, *, on_state=None, observe_context=None, stop=None, visible_scan=False):
+        self.on_state = on_state
+        self.observe_context = observe_context
+        self.stop = stop
+        self.visible_scan = visible_scan
+        self.scan_issues = []
+
+    def checkpoint(self):
+        if self.stop is not None and self.stop.is_set():
+            raise asyncio.CancelledError()
+
+    async def _observe(self, context):
+        self.checkpoint()
+        if self.observe_context:
+            await self.observe_context(context)
+
+    def _scan_state(self, message, current=0, total=0):
+        self.checkpoint()
+        if self.on_state:
+            self.on_state(dict(stage='scan', message=message, current=current, total=total))
 
     async def _youtube_sources(self, page):
         sources = await page.evaluate('''() => {
@@ -190,8 +212,9 @@ class KalturaCategorizer:
             return None
 
         results = []
+        self.scan_entries = results
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(headless=not self.visible_scan)
             try:
                 moodle_session_exists = os.path.exists(MOODLE_SESSION_FILE)
                 log(f"Moodle session file exists: {'yes' if moodle_session_exists else 'no'} ({MOODLE_SESSION_FILE})")
@@ -202,6 +225,7 @@ class KalturaCategorizer:
                     log("Moodle: no saved session for scan; login is required before scanning", "warning")
                     storage = None
                 context = await browser.new_context(storage_state=storage)
+                await self._observe(context)
                 page = await context.new_page()
 
                 # A selected-section query is not a whole-course inventory.
@@ -287,7 +311,8 @@ class KalturaCategorizer:
                             name = cleanText(copy.textContent);
                             if (name.length > 160) name = name.slice(0, 157).trimEnd() + '...';
                         }
-                        found.push({ entryId, sectionName, name });
+                        found.push({ entryId, sectionName, name,
+                            sectionKey: section?.id || section?.getAttribute('data-id') || sectionName });
                     });
                     return found;
                 }""")
@@ -369,7 +394,8 @@ class KalturaCategorizer:
                             // Subsections belong to their own Brightspace unit,
                             // not the first parent visited by this loop.
                             if (a.closest(SECTION_SEL) !== section) return;
-                            if (!map[a.href]) map[a.href] = sectionName;
+                            if (!map[a.href]) map[a.href] = {name: sectionName,
+                                key: section.id || section.getAttribute('data-id') || sectionName};
                         });
                     });
                     return map;
@@ -385,7 +411,7 @@ class KalturaCategorizer:
                     return []
 
                 # entry_id dedupe (same video can appear in multiple book chapters/pages)
-                seen_entries = set()
+                seen_entries = {}
                 # chapter URL dedupe (a book's own TOC can list the chapter we're already on)
                 seen_chapter_urls = set()
                 other_videos = set()
@@ -434,22 +460,28 @@ class KalturaCategorizer:
                         page_name = re.sub(r'^[A-Z0-9_\-]+:\s*', '', page_name).strip()
                     return page_name
 
-                def record_embeds(embedded, name_base, moodle_url, section_name):
+                def record_embeds(embedded, name_base, moodle_url, section_name, section_key=None):
                     added = 0
                     for j, entry_id in enumerate(embedded):
-                        if entry_id in seen_entries:
-                            continue
-                        seen_entries.add(entry_id)
-                        added += 1
                         name_base = html.unescape(name_base)
                         name = name_base if len(embedded) == 1 else f"{name_base} ({j+1})"
+                        source = dict(name=name, moodle_url=moodle_url, section_name=section_name,
+                                      section_key=section_key or section_name)
+                        if entry_id in seen_entries:
+                            if source not in seen_entries[entry_id]['sources']:
+                                seen_entries[entry_id]['sources'].append(source)
+                            continue
+                        added += 1
                         log(f"  → embed entry_id={entry_id}  name={name!r}", "info")
-                        results.append({
+                        result = {
                             "entry_id": entry_id,
                             "name": name,
                             "moodle_url": moodle_url,
                             "section_name": section_name,
-                        })
+                            "sources": [source],
+                        }
+                        results.append(result)
+                        seen_entries[entry_id] = result
                     return added
 
                 for embed in course_embeds:
@@ -461,14 +493,19 @@ class KalturaCategorizer:
                         name,
                         moodle_course_url,
                         section_name,
+                        embed.get('sectionKey'),
                     )
 
                 for i, link in enumerate(all_links, 1):
-                    section_name = link_data[link]
+                    section_name = link_data[link]['name']
+                    section_key = link_data[link]['key']
+                    self._scan_state(f'Visiting Moodle activity {i} of {len(all_links)}', i, len(all_links))
                     log(f"[{i}/{len(all_links)}] Visiting {link}")
                     try:
                         await page.goto(link, wait_until="domcontentloaded", timeout=20000)
                         await page.wait_for_timeout(1500)
+                        if urlparse(page.url).hostname != 'mymoodle.okanagan.bc.ca' or '/login/' in page.url:
+                            raise RuntimeError('Moodle activity redirected to sign-in; its content was not checked.')
 
                         if "mod/kalvidres" in link:
                             # Dedicated Kaltura activity — entryId in iframe src
@@ -478,15 +515,17 @@ class KalturaCategorizer:
                             }""")
                             if not iframe_src:
                                 log(f"  No contentframe iframe — skipping", "warning")
+                                self.scan_issues.append(dict(url=link, reason='Kaltura player did not load.'))
                                 continue
                             m = re.search(r'entryid%2F([\w_]+)', iframe_src, re.IGNORECASE)
                             if not m:
                                 log(f"  No entryid in iframe src — skipping", "warning")
+                                self.scan_issues.append(dict(url=link, reason='Kaltura entry ID could not be read.'))
                                 continue
                             entry_id = m.group(1)
                             title = await page.title()
                             name = re.sub(r'\s*\|\s*OCmoodle\s*$', '', title).strip()
-                            record_embeds([entry_id], name, link, section_name)
+                            record_embeds([entry_id], name, link, section_name, section_key)
 
                         else:
                             # mod/page or mod/book — scan body HTML for embedded Kaltura entryIds
@@ -499,7 +538,7 @@ class KalturaCategorizer:
                                 log('  No Kaltura embeds found in this activity.', 'dim')
                             else:
                                 log(f"  Found {len(embedded)} Kaltura embed(s) in page: {page_name!r}", "info")
-                                record_embeds(embedded, page_name, link, section_name)
+                                record_embeds(embedded, page_name, link, section_name, section_key)
 
                             if is_book:
                                 # Books can have many chapters, each its own URL — scan each too
@@ -528,23 +567,28 @@ class KalturaCategorizer:
                                 if new_chapters:
                                     log(f"  Book has {len(new_chapters)} more chapter(s) to scan", "dim")
                                 for k, chapter_url in enumerate(new_chapters, 1):
+                                    self._scan_state(f'Reading book chapter {k} of {len(new_chapters)} · activity {i} of {len(all_links)}')
                                     log(f"  [chapter {k}/{len(new_chapters)}] Visiting {chapter_url}")
                                     try:
                                         await page.goto(chapter_url, wait_until="domcontentloaded", timeout=20000)
                                         await page.wait_for_timeout(1500)
+                                        if urlparse(page.url).hostname != 'mymoodle.okanagan.bc.ca' or '/login/' in page.url:
+                                            raise RuntimeError('Moodle chapter redirected to sign-in; its content was not checked.')
                                         chapter_embedded = await scan_embedded_entries()
                                         chapter_name = await get_page_name()
                                         await report_other_videos(chapter_name)
                                         if not chapter_embedded:
                                             continue
                                         log(f"  Found {len(chapter_embedded)} Kaltura embed(s) in chapter: {chapter_name!r}", "info")
-                                        record_embeds(chapter_embedded, chapter_name, chapter_url, section_name)
+                                        record_embeds(chapter_embedded, chapter_name, chapter_url, section_name, section_key)
                                     except Exception as e:
                                         log(f"    Error scanning chapter: {repr(e)} — skipping", "warning")
+                                        self.scan_issues.append(dict(url=chapter_url, reason=str(e).splitlines()[0]))
                                         continue
 
                     except Exception as e:
                         log(f"  Error: {repr(e)} — skipping", "warning")
+                        self.scan_issues.append(dict(url=link, reason=str(e).splitlines()[0]))
                         continue
                 if other_videos:
                     log(f"Also identified {len(other_videos)} YouTube video(s), reported separately above from Kaltura results.", 'info')
@@ -572,10 +616,13 @@ class KalturaCategorizer:
         MANUAL_LOGIN_URL = "https://mymoodle.okanagan.bc.ca/login/index.php?saml=off"
 
         log(f"Moodle session file exists before login: {'yes' if os.path.exists(MOODLE_SESSION_FILE) else 'no'} ({MOODLE_SESSION_FILE})")
+        if self.on_state:
+            self.on_state(dict(stage='attention', service='Moodle', message='Connect to Moodle · finish sign-in in the browser if asked'))
         p = await async_playwright().start()
         browser = await p.chromium.launch(headless=False, slow_mo=50)
         try:
             context = await browser.new_context()
+            await self._observe(context)
             page = await context.new_page()
 
             log("Opening Moodle manual login…")
@@ -644,6 +691,8 @@ class KalturaCategorizer:
                 else:
                     raise RuntimeError("Moodle login timed out after 6 minutes")
 
+            if urlparse(page.url).hostname != 'mymoodle.okanagan.bc.ca':
+                raise RuntimeError('Moodle sign-in has not returned to Moodle. Complete sign-in and try again.')
             log(f"Moodle: final URL before saving session: {page.url}")
             await context.storage_state(path=MOODLE_SESSION_FILE)
             log(f"Moodle session saved to {MOODLE_SESSION_FILE} — ready to scan.", "success")
@@ -696,32 +745,11 @@ class KalturaCategorizer:
             except Exception:
                 pass
             log(f"Landed on: {page.url}")
-            result = await page.evaluate(
-                """async (courseId) => {
-                    const resp = await fetch(
-                        `/d2l/api/le/1.0/${courseId}/content/toc`,
-                        {credentials: 'include'}
-                    );
-                    if (!resp.ok) return {error: resp.status + ' ' + resp.statusText, modules: null};
-                    const toc = await resp.json();
-                    const modules = [];
-                    function collect(arr) {
-                        for (const m of (arr || [])) {
-                            modules.push({id: String(m.ModuleId), title: m.Title || '(unnamed)'});
-                            collect(m.Modules);
-                        }
-                    }
-                    collect(toc.Modules || []);
-                    return {error: null, modules};
-                }""",
-                course_id,
-            )
+            result = await page.evaluate(self._TOC_MODULES_JS, course_id)
             if result is None:
-                log("API returned null — unexpected", "error")
-                return []
+                raise RuntimeError('The Brightspace module inventory could not be read.')
             if result.get("error"):
-                log(f"TOC API error: {result['error']}", "error")
-                return []
+                raise RuntimeError(f"TOC API error: {result['error']}")
             modules = result.get("modules") or []
             log(f"TOC returned {len(modules)} module(s)")
             return modules
@@ -737,10 +765,12 @@ class KalturaCategorizer:
         if (!resp.ok) return {error: resp.status + ' ' + resp.statusText, modules: null};
         const toc = await resp.json();
         const modules = [];
-        function collect(arr) {
+        function collect(arr, parent = '') {
             for (const m of (arr || [])) {
-                modules.push({id: String(m.ModuleId), title: m.Title || '(unnamed)'});
-                collect(m.Modules);
+                const title = m.Title || '(unnamed)';
+                const path = parent ? `${parent} / ${title}` : title;
+                modules.push({id: String(m.ModuleId), title, path});
+                collect(m.Modules, path);
             }
         }
         collect(toc.Modules || []);
@@ -807,8 +837,7 @@ class KalturaCategorizer:
                 result = await page.evaluate(self._TOC_MODULES_JS, course_id)
                 if not result or result.get("error"):
                     err = (result or {}).get("error", "no response")
-                    log(f"TOC API error: {err}", "error")
-                    return []
+                    raise RuntimeError(f"TOC API error: {err}. Existing units could not be checked.")
                 return result.get("modules") or []
 
             existing = await read_modules()
@@ -865,8 +894,20 @@ class KalturaCategorizer:
             log_fn(f"  [WARN] Entry {entry_id} not found in KMC", "warning")
             return None
 
+        # A search result is a suggestion until its exact entry ID is confirmed.
+        exact = []
+        for index in range(count):
+            text = await rows.nth(index).inner_text()
+            if re.search(r'(?<![\w])' + re.escape(entry_id) + r'(?![\w])', text):
+                exact.append(index)
+        if not exact and count == 1:
+            # Some KMC layouts hide the ID column. The embed itself is checked
+            # below before any course write, so a unique candidate is safe to open.
+            exact = [0]
+        if len(exact) != 1:
+            raise RuntimeError(f'KMC did not return one exact match for {entry_id}. No page was created.')
         # Click entry name cell (2nd td) — first td is checkbox
-        first_row = rows.first
+        first_row = rows.nth(exact[0])
         name_cell = first_row.locator("td").nth(1)
         if await name_cell.count() > 0:
             await name_cell.click()
@@ -892,6 +933,9 @@ class KalturaCategorizer:
             for _ in range(15):
                 code = await textarea.input_value()
                 if code and code.strip():
+                    from kaltura_verification import entry_ids
+                    if entry_ids(code) != {entry_id}:
+                        raise ValueError(f'KMC embed code does not identify only {entry_id}.')
                     log_fn(f"  KMC: embed code captured ({len(code.strip())} chars)", "dim")
                     return code.strip()
                 await kmc_page.wait_for_timeout(1000)
@@ -1242,7 +1286,7 @@ class KalturaCategorizer:
         await bs_page.evaluate("(h) => navigator.clipboard.writeText(h)", html)
         await bs_page.wait_for_timeout(300)
 
-        await bs_page.evaluate("""() => {
+        source_focus_js = """() => {
             function deepFind(root) {
                 const el = root.querySelector('[contenteditable="true"].cm-content');
                 if (el) return el;
@@ -1255,13 +1299,37 @@ class KalturaCategorizer:
                 return null;
             }
             const el = deepFind(document);
-            if (el) { el.focus(); el.click(); }
-        }""")
+            if (el) { el.focus(); el.click(); return true; }
+            return false;
+        }"""
+        source_context = None
+        for frame in _all_frames():
+            if await frame.evaluate(source_focus_js):
+                source_context = frame
+                break
+        if source_context is None:
+            log_fn('  Source editor could not be focused; page was not saved.', 'error')
+            return False
         await bs_page.wait_for_timeout(400)
         await bs_page.keyboard.press("Control+a")
         await bs_page.wait_for_timeout(200)
         await bs_page.keyboard.press("Control+v")
         await bs_page.wait_for_timeout(800)
+        pasted = await source_context.evaluate(r"""expected => {
+            function find(root) {
+                const el = root.querySelector('[contenteditable="true"].cm-content');
+                if (el) return el;
+                for (const child of root.querySelectorAll('*')) {
+                    if (child.shadowRoot) { const found = find(child.shadowRoot); if (found) return found; }
+                }
+                return null;
+            }
+            const el = find(document);
+            return !!el && el.textContent.replace(/\s/g, '') === expected.replace(/\s/g, '');
+        }""", html)
+        if not pasted:
+            log_fn('  Embed HTML could not be confirmed in the source editor; page was not saved.', 'error')
+            return False
 
         # ── Close Source Code dialog (Save/Update/OK button) ──────────────────
         for selector in (
@@ -1282,17 +1350,19 @@ class KalturaCategorizer:
         # ── Fill title (after source code dialog closed, before Save and Close) ─
         # Use JS only to locate + focus the input, then Playwright keyboard to type
         # — synthetic JS events don't trigger Lit/D2L property observers.
-        title_focused = await bs_page.evaluate("""() => {
+        title_focus_js = """() => {
             function findTitleInput(root, depth) {
                 if (depth === 0) return null;
                 for (const inp of root.querySelectorAll('input[type="text"], input:not([type])')) {
+                    const box = inp.getBoundingClientRect();
+                    if (!box.width || !box.height) continue;
                     const label = (inp.getAttribute('aria-label') || '').toLowerCase();
                     if (
                         label.includes('title') ||
                         inp.maxLength === 150 ||
                         inp.value === 'Untitled' ||
                         inp.placeholder === 'Untitled'
-                    ) { inp.focus(); inp.select(); return true; }
+                    ) { inp.focus(); inp.select(); if (inp.matches(':focus')) return true; }
                 }
                 for (const c of root.querySelectorAll('*')) {
                     if (c.shadowRoot) {
@@ -1302,16 +1372,37 @@ class KalturaCategorizer:
                 return false;
             }
             return findTitleInput(document, 12);
-        }""")
-        if title_focused:
+        }"""
+        title_context = None
+        for frame in _all_frames():
+            if await frame.evaluate(title_focus_js):
+                title_context = frame
+                break
+        if title_context is not None:
             await bs_page.wait_for_timeout(200)
             await bs_page.keyboard.press("Control+a")
             await bs_page.wait_for_timeout(100)
             await bs_page.keyboard.type(title, delay=30)
             await bs_page.wait_for_timeout(500)
+            title_confirmed = await title_context.evaluate("""expected => {
+                function verify(root) {
+                    for (const inp of root.querySelectorAll('input')) {
+                        if (inp.matches(':focus') && inp.value === expected) return true;
+                    }
+                    for (const el of root.querySelectorAll('*')) {
+                        if (el.shadowRoot && verify(el.shadowRoot)) return true;
+                    }
+                    return false;
+                }
+                return verify(document);
+            }""", title)
+            if not title_confirmed:
+                log_fn('  Page title could not be confirmed; page was not saved.', 'error')
+                return False
             log_fn(f"  [OK] Title typed: {title}", "dim")
         else:
-            log_fn("  [WARN] Title field not found — set manually", "warning")
+            log_fn("  Title field not found; page was not saved.", "error")
+            return False
 
         # ── Save and Close page ────────────────────────────────────────────────
         for selector in (
@@ -1548,6 +1639,7 @@ class KalturaCategorizer:
                 log("KMC: launching without saved session")
             storage = KMC_SESSION_FILE if kmc_session_exists else None
             context = await browser.new_context(storage_state=storage)
+            await self._observe(context)
             page = await context.new_page()
             await page.goto(KMC_URL, wait_until="domcontentloaded", timeout=30000)
             kmc_state = await wait_for_kmc_state(timeout_seconds=15)
@@ -1622,6 +1714,6 @@ class KalturaCategorizer:
             log(f"KMC session saved to {KMC_SESSION_FILE}", "success")
             # Return page so caller can reuse it — avoids opening KMC a second time
             return context, browser, page
-        except Exception:
+        except BaseException:
             await browser.close()
             raise

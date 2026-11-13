@@ -4,7 +4,7 @@ from urllib.parse import parse_qs, urlparse
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QToolButton,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QCheckBox, QFrame, QScrollArea, QGridLayout, QSizePolicy,
 )
 
@@ -343,11 +343,9 @@ def build(panel):
     panel._apply_choices.hide()
     layout.addWidget(panel._apply_choices)
 
-    panel._details_btn = QToolButton()
+    from panels._shared import TechnicalDetailsToggle
+    panel._details_btn = TechnicalDetailsToggle()
     panel._details_btn.setObjectName("checker_details_toggle")
-    panel._details_btn.setProperty("variant", "ghost")
-    panel._details_btn.setText("Show activity details")
-    panel._details_btn.setCheckable(True)
     panel._details_btn.toggled.connect(panel._toggle_details)
     layout.addWidget(panel._details_btn, 0, Qt.AlignmentFlag.AlignLeft)
     panel._log = LogWidget()

@@ -187,6 +187,8 @@ class BuildStyleHub(QWidget):
         ])
         layout.addSpacing(24)
         self._add_group(layout, 'Update existing content', [
+            ('quiz_repair', 'Repair quiz exports',
+             'Restore quiz images and repair multi-select and matching scoring in local files.', 'folders'),
             ('restyle', 'Restyle pages', 'Apply an OC theme to the pages you select.', 'paint-roller'),
             ('cleanup', 'Remove topics', 'Review course topics before removing them in one batch.', 'trash'),
         ])

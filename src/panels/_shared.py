@@ -1,9 +1,55 @@
 import re
 
-from PySide6.QtWidgets import QFrame, QLabel, QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QComboBox
-from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QFrame, QLabel, QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QComboBox, QToolButton
+from PySide6.QtCore import Qt, QSize, QPoint, QTimer
+from PySide6.QtGui import QIcon
 
 import gui_styles
+from gui_tool_icons import tool_pixmap
+
+
+BROWSER_GUIDE_LABEL = 'Show browser cursor and live messages'
+BROWSER_GUIDE_HINT = ('Watch real browser actions with a smooth cursor and short status messages. '
+                      'Your own mouse stays free. Change this before starting a transfer.')
+
+
+class TechnicalDetailsToggle(QToolButton):
+    """One name and disclosure treatment for troubleshooting logs."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setText('Technical Details')
+        self.setAccessibleName('Technical Details')
+        self.setProperty('variant', 'ghost')
+        self.setCheckable(True)
+        self.setMinimumHeight(32)
+        self.setIconSize(QSize(18, 18))
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.toggled.connect(self._refresh_state)
+        self._refresh_state(False)
+
+    def _refresh_state(self, shown):
+        self.setToolTip('Hide technical details' if shown else 'Show technical details')
+        self.setAccessibleDescription('Expanded' if shown else 'Collapsed')
+        self.refresh_theme()
+
+    def refresh_theme(self):
+        self.setIcon(QIcon(tool_pixmap('chevron-down' if self.isChecked() else 'chevron-right',
+            18, gui_styles.modern_colors()['muted'])))
+
+    def reveal_log(self, log, scroll, shown):
+        log.setVisible(shown)
+        if shown:
+            # Wait for wrapped text and the newly visible log to update the
+            # scroll range. The context cancels this if the panel is closed.
+            def reveal():
+                if not self.isChecked() or not log.isVisible():
+                    return
+                # QTextEdit exposes a cursor rectangle; ensureWidgetVisible
+                # can reveal just that cursor and leave most of the log hidden.
+                top = log.mapTo(scroll.widget(), QPoint(0, 0)).y()
+                height = min(log.height(), scroll.viewport().height())
+                scroll.ensureVisible(0, top + height // 2, 0, height // 2)
+            QTimer.singleShot(0, scroll, reveal)
 
 
 class NoScrollComboBox(QComboBox):

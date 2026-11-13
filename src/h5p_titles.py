@@ -9,6 +9,8 @@ from tempfile import TemporaryDirectory
 import zipfile
 from urllib.parse import parse_qs, urlparse
 
+from h5p_detect import html_contains_h5p_embed
+
 
 def new_page_target(editor_url):
     parts = urlparse(editor_url)
@@ -31,7 +33,6 @@ def saved_page_id(editor_url, saved_url, existing_ids):
 
 async def ensure_owned_page_title(api, topic_id, moodle_name):
     """Only repair the precise new page ID recorded by this transfer's save."""
-    from content_checker import ContentChecker
     topics = await api.list_structure()
     if not any(str(t.get('Id')) == str(topic_id) for t in topics):
         raise RuntimeError('The saved H5P page is not in its recorded destination unit.')
@@ -40,7 +41,7 @@ async def ensure_owned_page_title(api, topic_id, moodle_name):
         raise RuntimeError('Brightspace returned a different page while checking its name.')
     if topic.get('Title') != moodle_name:
         html = await api.get_topic_html(topic_id)
-        if not ContentChecker._html_contains_h5p_embed(html):
+        if not html_contains_h5p_embed(html):
             raise RuntimeError('The saved page could not be confirmed as H5P; its name was not changed.')
         topic = await api.rename_topic(topic_id, moodle_name)
     if topic.get('Title') != moodle_name:

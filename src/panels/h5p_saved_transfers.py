@@ -39,14 +39,15 @@ class CourseTitle(QLabel):
 
 
 class SavedH5PTransfersDialog(QDialog):
-    def __init__(self, directory=None, parent=None):
+    def __init__(self, directory=None, parent=None, *, provider=None):
         super().__init__(parent)
+        self.provider = provider
         self.directory = directory
         self.selected_run_id = None
         self._undo_ids = []
         self.setObjectName('h5p_saved_transfers')
         self.setProperty('design', 'modern')
-        self.setWindowTitle('Saved H5P transfers')
+        self.setWindowTitle(provider.title if provider else 'Saved H5P transfers')
         self.resize(920, 700)
         self.setMinimumSize(560, 460)
         self.setStyleSheet(gui_styles.get_modern_stylesheet())
@@ -54,7 +55,7 @@ class SavedH5PTransfersDialog(QDialog):
         layout.setContentsMargins(24, 24, 24, 20)
         layout.setSpacing(14)
         heading = QHBoxLayout()
-        heading.addWidget(self._label('Saved transfers', 'page-heading'))
+        heading.addWidget(self._label(provider.title if provider else 'Saved transfers', 'page-heading'))
         heading.addStretch()
         self.count = self._label('', 'status')
         heading.addWidget(self.count)
@@ -62,20 +63,21 @@ class SavedH5PTransfersDialog(QDialog):
         layout.addWidget(self._label('Find a course, pick up where you left off, or tidy up old scans.', 'dim'))
         filters = QHBoxLayout()
         self.search = QLineEdit()
-        self.search.setPlaceholderText('Search course name or ID…')
+        self.search.setPlaceholderText('Search course, course ID or transfer ID…')
         self.search.setAccessibleName('Search saved transfers by course name or ID')
         self.search.setClearButtonEnabled(True)
         self.search.addAction(QIcon(tool_pixmap('search', 16, gui_styles.modern_colors()['muted'])), QLineEdit.ActionPosition.LeadingPosition)
         filters.addWidget(self.search, 1)
         self.filter = QComboBox()
         self.filter.setAccessibleName('Filter saved transfers')
-        for title, key in (('All saved', 'all'), ('Needs attention', 'attention'),
-                           ('Complete', 'complete'), ('No H5P activities', 'empty'), ('Removed', 'removed')):
+        filter_options = provider.filters if provider else (('All saved', 'all'), ('Needs attention', 'attention'),
+                           ('Complete', 'complete'), ('No H5P activities', 'empty'), ('Removed', 'removed'))
+        for title, key in filter_options:
             self.filter.addItem(title, key)
         filters.addWidget(self.filter)
         layout.addLayout(filters)
         self.table = QTableWidget(0, 3)
-        self.table.setAccessibleName('Saved H5P transfers. Select one to continue, or several to remove.')
+        self.table.setAccessibleName((provider.title if provider else 'Saved H5P transfers') + '. Select one to continue, or several to remove.')
         self.table.setHorizontalHeaderLabels(['Course', 'Progress', 'Last saved'])
         self.table.verticalHeader().hide()
         self.table.setShowGrid(False)
@@ -109,7 +111,8 @@ class SavedH5PTransfersDialog(QDialog):
         notice.addWidget(self.undo)
         self.notice_row.hide()
         layout.addWidget(self.notice_row)
-        layout.addWidget(self._label('Removing an entry only changes this list. Course pages, H5P uploads and downloaded files are kept.', 'hint'))
+        layout.addWidget(self._label(provider.removal_note if provider else
+            'Removing an entry only changes this list. Course pages, H5P uploads and downloaded files are kept.', 'hint'))
         footer = QHBoxLayout()
         self.remove = self._button('Remove from list', self._change_removed)
         self.remove.setProperty('variant', 'secondary')
@@ -147,8 +150,11 @@ class SavedH5PTransfersDialog(QDialog):
         return button
 
     def _reload(self):
-        self._runs = saved_runs(self.directory, include_removed=True)
+        self._runs = (self.provider.list_runs if self.provider else saved_runs)(self.directory, include_removed=True)
         self._render()
+
+    def _describe(self, run):
+        return (self.provider.describe if self.provider else describe_run)(run)
 
     def _render(self, *args):
         query, category = self.search.text().casefold().strip(), self.filter.currentData()
@@ -157,7 +163,7 @@ class SavedH5PTransfersDialog(QDialog):
         self.table.setRowCount(0)
         self._visible = []
         for run in self._runs:
-            info = describe_run(run)
+            info = self._describe(run)
             if info['removed'] != (category == 'removed'):
                 continue
             if category not in ('all', 'removed') and info['category'] != category:
@@ -166,7 +172,7 @@ class SavedH5PTransfersDialog(QDialog):
                 continue
             row = self.table.rowCount()
             self.table.insertRow(row)
-            self.table.setRowHeight(row, 88)
+            self.table.setRowHeight(row, self.provider.row_height if self.provider else 88)
             self._visible.append(run)
             # Keep semantic table text for screen readers and keyboard selection.
             values = (info['title'] + '\n' + info['route'], info['status'] + '\n' + info['progress'],
@@ -212,7 +218,7 @@ class SavedH5PTransfersDialog(QDialog):
         self.open_button.setEnabled(len(selected) == 1 and not removed)
         self.open_button.setVisible(not removed)
         self.open_button.setText('Review transfer' if len(selected) == 1 and
-            describe_run(selected[0])['category'] in ('complete', 'empty') else 'Continue transfer')
+            self._describe(selected[0])['category'] in ('complete', 'empty') else 'Check && continue' if self.provider else 'Continue transfer')
         self.remove.setEnabled(bool(selected))
         self.remove.setText('Restore to list' if removed else 'Remove from list')
         self.remove.setIcon(QIcon() if removed else QIcon(tool_pixmap('trash', 16, gui_styles.modern_colors()['muted'])))
@@ -230,7 +236,7 @@ class SavedH5PTransfersDialog(QDialog):
         changed, failed = [], 0
         for run_id in ids:
             try:
-                set_run_removed(run_id, removed, self.directory)
+                (self.provider.set_removed if self.provider else set_run_removed)(run_id, removed, self.directory)
                 changed.append(run_id)
             except (OSError, ValueError, RuntimeError):
                 failed += 1

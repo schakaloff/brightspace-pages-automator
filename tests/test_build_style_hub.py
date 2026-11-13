@@ -93,7 +93,7 @@ def test_entire_rows_navigate_once_including_labels_and_icons(qtbot, region):
             point = row.mapTo(hub, QPoint(row.width() // 2, 6))
         QTest.mouseClick(hub.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
         assert opened[-1] == key
-    assert opened == ['create_pages', 'collect', 'duplicate_content', 'structured_transfer', 'restyle', 'cleanup']
+    assert opened == ['create_pages', 'collect', 'duplicate_content', 'structured_transfer', 'quiz_repair', 'restyle', 'cleanup']
 
 
 def test_keyboard_navigation_crosses_groups_without_extra_buttons(qtbot):
@@ -110,7 +110,11 @@ def test_keyboard_navigation_crosses_groups_without_extra_buttons(qtbot):
     transfer.setFocus()
     qtbot.keyClick(transfer, Qt.Key.Key_Return)
     qtbot.keyClick(transfer, Qt.Key.Key_Tab)
+    quiz = hub.buttons['quiz_repair']
+    assert quiz.hasFocus()
+    qtbot.keyClick(quiz, Qt.Key.Key_Space)
+    qtbot.keyClick(quiz, Qt.Key.Key_Tab)
     restyle = hub.buttons['restyle']
     assert restyle.hasFocus()
     qtbot.keyClick(restyle, Qt.Key.Key_Space)
-    assert opened == ['structured_transfer', 'restyle']
+    assert opened == ['structured_transfer', 'quiz_repair', 'restyle']

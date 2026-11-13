@@ -102,7 +102,7 @@ class TransferStudio:
             if self._closed:
                 raise RuntimeError("Transfer Studio has closed.")
             if self._server is None:
-                self._server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+                self._server = ThreadingHTTPServer(("127.0.0.1", 0), getattr(self, "handler_class", _Handler))
                 self._server.daemon_threads = True
                 self._server.studio = self
                 self.origin = f"http://127.0.0.1:{self._server.server_port}"
@@ -716,7 +716,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(403, {"error": "Invalid host."}); return False, None
         origin = self.headers.get("Origin")
         if origin and origin != studio.origin or self.headers.get("Sec-Fetch-Site") == "cross-site":
-            self._send(403, {"error": "Open Transfer Studio from the desktop app."}); return False, None
+            self._send(403, {"error": "Open this workspace from the desktop app."}); return False, None
         query = parse_qs(urlsplit(self.path).query)
         # A URL bearing a token must redeem it, even if a session cookie exists.
         if allow_launch and "token" in query:
@@ -726,7 +726,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return True, session
         elif studio.session(self.headers.get("Cookie")):
             return True, None
-        self._send(403, {"error": "This launch link has expired. Use Plan transfer in the desktop app."})
+        self._send(403, {"error": "This launch link has expired. Reopen the workspace from the desktop app."})
         return False, None
 
     def do_GET(self):
